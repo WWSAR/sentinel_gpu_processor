@@ -1,0 +1,6 @@
+{
+    "dependencies":[
+    "tiff",
+    "sqlite3"
+    ]
+}

@@ -1,0 +1,13 @@
+*~
+*.pyc
+*.o
+log.txt
+\#*
+.nfs*
+sario.py
+.vscode
+bin/
+csrc/build
+csrc/vcpkg_installed
+fortran_code
+__pycache__
