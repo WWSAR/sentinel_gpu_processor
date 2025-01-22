@@ -144,7 +144,7 @@ for ifile,file in enumerate(swathfiles):
     #command= PATH+'/bin/readgeotiff.exe '+file.rstrip()+' '+((file.replace('.tiff','.rawslc')).replace('/measurement','')).rstrip()+' '+linereverse+' '+pixelreverse
     basename = os.path.basename(file);
     output_slc_file = os.path.join(dir,basename.replace('tiff','rawslc'))
-    command= 'D:\\sentinel\\sentinel_processor\\src\\build\\Debug\\readgeotiff.exe '+file.rstrip()+' '+output_slc_file+' '+linereverse+' '+pixelreverse
+    command= 'D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\readgeotiff.exe '+file.rstrip()+' '+output_slc_file+' '+linereverse+' '+pixelreverse
     print(time.ctime())
     print(command)
     ret = subprocess.check_call(command, shell=True)
@@ -185,14 +185,14 @@ for file in swathfiles:
     print(f'nrange:{nrange}, nazimuth:{nazimuth}')
     print(origslcfile, derampedslcfile)
     # deramp the slave file
-    command='D:\\sentinel\\sentinel_processor\\src\\build\\Debug\\deramp_burst.exe '+slavedb.strip()+' '+rawslcfile
+    command='D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\deramp_burst.exe '+slavedb.strip()+' '+rawslcfile
     print(command)
     os.system(command)
 
     # and geocode/reramp the slave
     outfile=slavedb.replace('db','geo').strip()
     outgeo=outfile[0:outfile.find('geo.')+3]
-    command = "D:\\sentinel\\sentinel_processor\\src\\build\\Debug\\geo2rdr_reramp.exe "+outfile.replace('geo','db')+' '+outgeo
+    command = "D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\geo2rdr_reramp.exe "+outfile.replace('geo','db')+' '+outgeo
     print(time.ctime())
     print(command)
     os.system(command)
