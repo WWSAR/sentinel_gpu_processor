@@ -205,6 +205,8 @@ for file in swathfiles:
     
     print(time.ctime())
     print('Swath processed to common coordinates and coregistered.')
+os.remove(zip_file)
+shutil.rmtree(dir)
 
 print('Loop over swaths complete.')
 

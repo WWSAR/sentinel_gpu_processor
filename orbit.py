@@ -139,6 +139,29 @@ def orbitrangetime(timeorbit, xx, vv, xyz, tline0, satx0, satv0):
     dr = xyz - satx
     return dr, tline
 
+@njit
+def orbitrangetime_vec(llh,tt,xx,vv):
+    """
+    Do orbitrangetime for multiple points
+
+    Args:
+        llh (2d numpy array): lat/lon/h of the points to do orbitrangetime
+        tt (1d numpy array): time vector
+        xx (2d numpy array): position vector
+        vv (2d numpy array): velocity vector
+    """
+    nstatvec = len(tt)
+    nmid = nstatvec//2
+    tmid = tt[nmid]
+    xmid = xx[nmid,:]
+    vmid = vv[nmid,:]
+    xyz = geometry.llh2xyz_vec(llh) 
+    losvec = np.zeros(xyz.shape)
+    for i in range(len(xyz)):
+       dr,_ = orbitrangetime(tt,xx,vv,xyz[i,:],tmid,xmid,vmid)
+       losvec[i,:] = dr/np.sqrt(dr[0]*dr[0]+dr[1]*dr[1]+dr[2]*dr[2])
+    return losvec
+
 def rah2ll(meta,rgidx,azidx,h,zero_doppler=True,look_dir='RIGHT'):
     """
     Given the range/azimuth indices and the elevation of a set of radar pixels,
