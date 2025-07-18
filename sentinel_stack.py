@@ -61,16 +61,18 @@ for ifile,zip_file in enumerate(zips):
     #  which precise orbit file for this scene?
     print('zip_file: ',zip_file)
     geofile = zip_file.replace('zip','SAFE.geo')
-    if os.path.exists(geofile):
-        try:
-            os.remove(zip_file)
-        except Exception as e:
-            print(e)
-        try:
-            shutil.rmtree(zip_file.replace('zip','SAFE'))
-        except Exception as e:
-            print(e)
-        continue
+    #if os.path.exists(geofile):
+        #print('geo_file exists')
+        #continue
+        #try:
+        #    os.remove(zip_file)
+        #except Exception as e:
+        #    print(e)
+        #try:
+        #    shutil.rmtree(zip_file.replace('zip','SAFE'))
+        #except Exception as e:
+        #    print(e)
+        #continue
     # Finding the date of acqusition following the namign rule
     char1= 13
     char2= 12
@@ -106,9 +108,3 @@ for ifile,zip_file in enumerate(zips):
     ret = subprocess.check_call(command, shell=True)
 
 print('Loop over scenes complete.')
-
-
-
-
-
-
