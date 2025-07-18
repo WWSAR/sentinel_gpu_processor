@@ -98,7 +98,7 @@ for i in range(len(start)):
     
 orbinfo=open('precise_orbtiming','w')
 orbinfo.write(str(len(time))+'\n')
-for i in range(len(start)):
+for i in range(len(time)):
     orbinfo.write(str(time[i])+' '+str(x[i])+' '+str(y[i])+' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+' 0.0 0.0 0.0')
     orbinfo.write('\n')
 orbinfo.close()
