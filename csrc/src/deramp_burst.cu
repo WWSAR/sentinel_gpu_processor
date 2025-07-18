@@ -116,7 +116,6 @@ int deramp(const std::string &dbname,
     cudaMalloc((void**)&d_eta,sizeof(double)*lines_per_burst);
     cudaMalloc((void**)&d_etaref,sizeof(double)*nrange);
 
-    std::cout << "number of azimuth bursts: " << azimuth_bursts << std::endl;
     for(int iburst=0; iburst<azimuth_bursts; iburst++){
         std::string azimuth_time_second_key = "azimuthTimeSeconds" + 
                                               std::to_string(iburst+1);
@@ -145,21 +144,48 @@ int deramp(const std::string &dbname,
         double dcc0intp, dcc1intp, dcc2intp, dct0intp;
         double fmc0intp, fmc1intp, fmc2intp, fmt0intp;
         double trange, dt;
+        double frac;
         int idx;
         timecenterseconds = startime[iburst] + lines_per_burst*azimuth_time_interval/2;
         intp_orbit(npolyorb,tt,xx,vv,timecenterseconds,xpoint,vpoint);
         vs = sqrt(vpoint[0]*vpoint[0]+vpoint[1]*vpoint[1]+vpoint[2]*vpoint[2]);
         ks = 2.0*vs*radar_frequency/299792458.0*azimuth_steering_rate*M_PI/180.0;
         idx = closest_sample(fmtime, timecenterseconds, npolyfm);
-        fmc0intp = fmc0[idx];
-        fmc1intp = fmc1[idx];
-        fmc2intp = fmc2[idx];
-        fmt0intp = fmt0[idx];
+        if (fmtime[idx] < timecenterseconds){
+            frac = (timecenterseconds - fmtime[idx]) / (fmtime[idx+1] - fmtime[idx]);
+            fmc0intp = fmc0[idx] + frac * (fmc0[idx+1] - fmc0[idx]);
+            fmc1intp = fmc1[idx] + frac * (fmc1[idx+1] - fmc1[idx]);
+            fmc2intp = fmc2[idx] + frac * (fmc2[idx+1] - fmc2[idx]);
+            fmt0intp = fmt0[idx] + frac * (fmt0[idx+1] - fmt0[idx]);
+        }else{
+            frac = (timecenterseconds - fmtime[idx-1]) / (fmtime[idx] - fmtime[idx-1]);
+            fmc0intp = fmc0[idx-1] + frac * (fmc0[idx] - fmc0[idx-1]);
+            fmc1intp = fmc1[idx-1] + frac * (fmc1[idx] - fmc1[idx-1]);
+            fmc2intp = fmc2[idx-1] + frac * (fmc2[idx] - fmc2[idx-1]);
+            fmt0intp = fmt0[idx-1] + frac * (fmt0[idx] - fmt0[idx-1]);
+        }
+        //fmc0intp = fmc0[idx];
+        //fmc1intp = fmc1[idx];
+        //fmc2intp = fmc2[idx];
+        //fmt0intp = fmt0[idx];
         idx = closest_sample(dctime, timecenterseconds, npolydc);
-        dcc0intp = dcc0[idx];
-        dcc1intp = dcc1[idx];
-        dcc2intp = dcc2[idx];
-        dct0intp = dct0[idx];
+        if (dctime[idx] < timecenterseconds){
+            frac = (timecenterseconds - dctime[idx]) / (dctime[idx+1] - dctime[idx]);
+            dcc0intp = dcc0[idx] + frac * (dcc0[idx+1] - dcc0[idx]);
+            dcc1intp = dcc1[idx] + frac * (dcc1[idx+1] - dcc1[idx]);
+            dcc2intp = dcc2[idx] + frac * (dcc2[idx+1] - dcc2[idx]);
+            dct0intp = dct0[idx] + frac * (dct0[idx+1] - dct0[idx]);
+        }else{
+            frac = (timecenterseconds - dctime[idx-1]) / (dctime[idx] - dctime[idx-1]);
+            dcc0intp = dcc0[idx-1] + frac * (dcc0[idx] - dcc0[idx-1]);
+            dcc1intp = dcc1[idx-1] + frac * (dcc1[idx] - dcc1[idx-1]);
+            dcc2intp = dcc2[idx-1] + frac * (dcc2[idx] - dcc2[idx-1]);
+            dct0intp = dct0[idx-1] + frac * (dct0[idx] - dct0[idx-1]);
+        }
+        //dcc0intp = dcc0[idx];
+        //dcc1intp = dcc1[idx];
+        //dcc2intp = dcc2[idx];
+        //dct0intp = dct0[idx];
         for(int i = 0; i<lines_per_burst; ++i){
             eta[i] = -lines_per_burst*azimuth_time_interval/2.+i*azimuth_time_interval;
         }
