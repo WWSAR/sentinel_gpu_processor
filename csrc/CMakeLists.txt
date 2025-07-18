@@ -7,6 +7,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # Automatically set architerctures based on specific flags
 set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 90)
 
+include(D:/vcpkg/scripts/buildsystems/vcpkg.cmake)
+
 # Find TIFF package installed via vcpkg
 find_package(TIFF REQUIRED)
 
