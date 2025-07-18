@@ -22,6 +22,7 @@
 
 __global__
 void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex *outdata,
+               int *burst_num,
                double *tt, double *xx, double *vv, const std::size_t nstatvec,
                const double tmid, double *xmid, double *vmid,
                const double latmax, const double lonmin, const double dlat, 
@@ -33,7 +34,8 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex
                const int lines_per_burst, const int first_valid_line,
                const int last_valid_line, const int first_valid_sample,
                const int last_valid_sample, const double wvl,
-               const bool written, const std::size_t n){
+               const int current_burst_num, const bool written,
+               const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
     int row, col, intr, inta;
@@ -52,12 +54,18 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex
         if (written){
             res = outdata[i];
         }else{
+            // initialize res to zero
             res.x = 0;
             res.y = 0;
         }
         if (lat > burst_latmax || lat < burst_latmin ||
             lon > burst_lonmax || lon < burst_lonmin){
             outdata[i] = res;
+            continue;
+        }
+        if (res.x != 0 && res.y !=0){
+            // if res is not zero, it means this pixel has been processed
+            // in a previous burst, so we skip it
             continue;
         }
         llh[0] = lat;
@@ -68,15 +76,16 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex
         rngpix = sqrt(dr[0]*dr[0]+dr[1]*dr[1]+dr[2]*dr[2]);
         rgoff = (rngpix - rngstart)/dmrg;
         azoff = (tline - tstart)/dtaz;
-        //if (row == 50 && col == 10000){
-        //    printf("lat:%f,lon:%f,h%f\n",lat,lon,h);
+        //if ((row == 426 || row == 427) && col == 1841){
+        //  printf("lat:%f,lon:%f,h%f\n",lat,lon,h);
         //    printf("x:%f,y:%f,z:%f\n",xyz[0],xyz[1],xyz[2]);
         //    printf("rngpix:%f, rngstart:%f, dmrg:%f\n",rngpix,rngstart,dmrg);
         //    printf("tline:%f, tstart:%f, dtaz:%f\n",tline,tstart,dtaz);
         //    printf("rgoff: %f, azoff: %f\n",rgoff,azoff);
+        //    printf("\n\n\n");
         //}
         if (rgoff > first_valid_sample && rgoff < last_valid_sample &&
-            azoff >= first_valid_line+2 && azoff <= last_valid_line-3){
+            azoff >= first_valid_line+5 && azoff <= last_valid_line-5){
             intr = int(rgoff);
             fracr = rgoff - intr;
             inta = int(azoff);
@@ -109,6 +118,7 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex
             res.y = resx*sinphase + resy*cosphase;
         }
         outdata[i] = res;
+        burst_num[i] = current_burst_num;
     }
 }
 
@@ -123,6 +133,7 @@ int geo2rdr_reramp(const std::string &dbname,
         return 1;
     }
     const std::string tblname = "file";
+    const std::string burst_num_file = slcoutfile+ ".burst_num";
     std::string orbfile, demfile, demrscfile;
     std::size_t nstatvec, burstsize;
     rsc demrsc;
@@ -130,11 +141,12 @@ int geo2rdr_reramp(const std::string &dbname,
     int batch_lines = 3000, nbatch, subswath;
     short int *dem, *d_dem;
     double prf, wvl,slant_range_time,range_sampling_rate;
-    //double rawdataprf,radar_frequency,azimuth_time_interval;
     double *startime, *tt, *xx, *vv, *xmid, *vmid;
     double *d_tt, *d_xx, *d_vv, *d_xmid, *d_vmid;
     int *first_valid_line, *last_valid_line;
     int *first_valid_sample, *last_valid_sample;
+    int *burst_num; // index of burst for each pixel
+    int *d_burst_num; // device copy of burst_num
     Complex *burstdata, *d_burstdata, *outdata, *d_outdata;
     double *deramp_phase, *d_deramp_phase; 
     bool written;
@@ -204,12 +216,14 @@ int geo2rdr_reramp(const std::string &dbname,
     //std::cout << "orbfile: " << orbfile << std::endl;
     outdata = (Complex*)malloc(sizeof(Complex)*demrsc.nlon*batch_lines);
     dem = (short int*)malloc(sizeof(short int)*demrsc.nlon*batch_lines);
+    burst_num = (int*)malloc(sizeof(int)*demrsc.nlon*batch_lines);
     cudaMalloc((void**)&d_tt,sizeof(double)*nstatvec);
     cudaMalloc((void**)&d_xx,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_vv,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_xmid,sizeof(double)*3);
     cudaMalloc((void**)&d_vmid,sizeof(double)*3);
     cudaMalloc((void**)&d_dem,sizeof(short int)*demrsc.nlon*batch_lines);
+    cudaMalloc((void**)&d_burst_num,sizeof(int)*demrsc.nlon*batch_lines);
     cudaMalloc((void**)&d_outdata,sizeof(Complex)*demrsc.nlon*batch_lines);
     cudaMalloc((void**)&d_burstdata,sizeof(Complex)*nrange*lines_per_burst);
     cudaMalloc((void**)&d_deramp_phase,sizeof(double)*nrange*lines_per_burst);
@@ -269,26 +283,32 @@ int geo2rdr_reramp(const std::string &dbname,
             cudaMemcpy(d_xmid,xmid,sizeof(double)*3,cudaMemcpyHostToDevice);
             cudaMemcpy(d_vmid,vmid,sizeof(double)*3,cudaMemcpyHostToDevice);
             reproject<<<numBlocks,blockSize>>>(d_dem,d_burstdata,d_deramp_phase,
-            d_outdata,d_tt,d_xx,d_vv,nstatvec,tmid,d_xmid,d_vmid, 
+            d_outdata,d_burst_num,d_tt,d_xx,d_vv,nstatvec,tmid,d_xmid,d_vmid, 
             demrsc.latmax+demrsc.dlat*line_start,demrsc.lonmin,
             demrsc.dlat,demrsc.dlon,demrsc.nlon,
             latlons[0],latlons[1],latlons[2],latlons[3],rngstart,tstart,dmrg,dtaz,
             nrange, lines_per_burst, first_valid_line[iburst],
             last_valid_line[iburst], first_valid_sample[iburst],
-            last_valid_sample[iburst], wvl, written, nlines*demrsc.nlon);
+            last_valid_sample[iburst], wvl, iburst+1, written,nlines*demrsc.nlon);
             cudaDeviceSynchronize();
         }
         cudaMemcpy(outdata,d_outdata,sizeof(Complex)*demrsc.nlon*nlines,
                 cudaMemcpyDeviceToHost);
+        cudaMemcpy(burst_num,d_burst_num,sizeof(int)*demrsc.nlon*nlines,
+                cudaMemcpyDeviceToHost);
         if (subswath==1){
             if (ibatch == 0){
                 save_cpx(outdata,false,demrsc.nlon*nlines,slcoutfile);
+                //save_int(burst_num,false,demrsc.nlon*nlines,burst_num_file);
             }else{
                 save_cpx(outdata,true,demrsc.nlon*nlines,slcoutfile);
+                //save_int(burst_num,true,demrsc.nlon*nlines,burst_num_file);
             }
         }else{
             save_cpx(outdata,std::size_t(line_start*demrsc.nlon),
                      std::size_t(nlines*demrsc.nlon),slcoutfile);
+            //save_int(burst_num,std::size_t(line_start*demrsc.nlon),
+            //        std::size_t(nlines*demrsc.nlon),burst_num_file);
         }
     }
 
@@ -300,6 +320,7 @@ int geo2rdr_reramp(const std::string &dbname,
     free(burstdata);
     free(deramp_phase);
     free(dem);
+    free(burst_num);
     free(tt);
     free(xx);
     free(vv);
@@ -308,6 +329,7 @@ int geo2rdr_reramp(const std::string &dbname,
     cudaFree(d_burstdata);
     cudaFree(d_deramp_phase);
     cudaFree(d_dem);
+    cudaFree(d_burst_num);
     cudaFree(d_tt);
     cudaFree(d_xx);
     cudaFree(d_vv);

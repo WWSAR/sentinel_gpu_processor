@@ -4,6 +4,7 @@ import sys
 import sqlite3
 import sql_mod
 import os
+import numpy as np
 from datetime import datetime
 
 def readxmlparam(xmllines, param):
@@ -369,11 +370,11 @@ azimuthTimeInterval=float(readxmlparam(xmllines,'azimuthTimeInterval'))
 rangeSamplingRate=float(readxmlparam(xmllines,'rangeSamplingRate'))
 slantRangeTime=float(readxmlparam(xmllines,'slantRangeTime')) # this is the first slant range time in imageInformation
 
-ks=2*7500/299792458.*radarFrequency*azimuthSteeringRate*3.14159265359/180.
+ks=2*7500/299792458.*radarFrequency*azimuthSteeringRate*np.pi/180.
 
 print('approx ks = ',ks)
 sql_mod.add_param(c,swathfile,'azimuthSteeringRate')
-sql_mod.add_param(c,swathfile,'radarFrequency')
+#sql_mod.add_param(c,swathfile,'radarFrequency')
 sql_mod.add_param(c,swathfile,'azimuthTimeInterval')
 sql_mod.add_param(c,swathfile,'rangeSamplingRate')
 sql_mod.add_param(c,swathfile,'slantRangeTime')

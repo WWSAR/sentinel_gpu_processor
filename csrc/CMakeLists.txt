@@ -10,6 +10,8 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 include_directories("$ENV{CONDA_PREFIX}/include")
 link_directories("$ENV{CONDA_PREFIX}/lib")
 
+include(D:/vcpkg/scripts/buildsystems/vcpkg.cmake)
+
 # Find TIFF package installed via vcpkg
 find_package(TIFF REQUIRED)
 

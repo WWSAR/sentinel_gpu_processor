@@ -9,5 +9,6 @@ sario.py
 bin/
 csrc/build
 csrc/vcpkg_installed
+csrc/CMakeFiles
 fortran_code
 __pycache__

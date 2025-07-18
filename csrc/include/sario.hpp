@@ -35,6 +35,20 @@ void saveslc(std::complex<float> *slc,
              const std::size_t ncol,
              const std::string& imgfile);
 
+void save_int(int *img,
+              const std::size_t n,
+              const std::string& imgfile);
+
+void save_int(int*img,
+              bool append,
+              const std::size_t n,
+              const std::string& imgfile);
+
+void save_int(int *img,
+              const std::size_t toskip,
+              const std::size_t n,
+              const std::string& imgfile);
+
 void save_float(float *slc,
                 const std::size_t n,
                 const std::string& imgfile);
@@ -53,10 +67,6 @@ void save_double(double *img,
                 const std::size_t n,
                 const std::string& imgfile);
 
-void save_int(int *slc,
-              const std::size_t n,
-              const std::string& imgfile);
-
 void readdem(const std::string& imgfile, 
              const std::size_t n,
              short int *dem);
@@ -65,6 +75,15 @@ void readdem(const std::string& imgfile,
              const std::size_t toskip,
              const std::size_t n,
              short int *dem);
+
+void read_int(const std::string& imgfile, 
+              const std::size_t n,
+              int *img);
+
+void read_int(const std::string& imgfile, 
+              const std::size_t toskip,
+              const std::size_t n,
+              int *img);
 
 void read_float(const std::string& imgfile, 
                 const std::size_t n,

@@ -3,11 +3,9 @@
 #  create a new orbtiming file using a precise orbit file
 
 import sys
-import sqlite3
-import sql_mod,string
 import os
-import math
-from datetime import datetime
+import re
+from datetime import datetime,timedelta
 
 def readxmlparam(xmllines, param):
     for line in xmllines:
@@ -21,26 +19,41 @@ def readxmlparam(xmllines, param):
             #print(istart, istop, '\n')
             return value
 
-def timeinseconds(timestring):
-#    dt = datetime.strptime(timestring, 'TAI=%Y-%m-%dT%H:%M:%S.%f')
-    dt = datetime.strptime(timestring, 'UTC=%Y-%m-%dT%H:%M:%S.%f')
-#    dt = datetime.strptime(timestring, 'UT1=%Y-%m-%dT%H:%M:%S.%f')
-    secs=dt.hour*3600+dt.minute*60+dt.second+dt.microsecond/1000000.0
-    return secs
+def sentinel_parser(filename):
+    filename = os.path.split(filename)[-1]
+    words = re.split(r'[_]+|\.',filename)
+    sent = {}
+    sent['filename'] = filename
+    sent['mission'] = words[0]
+    sent['mode'] = words[1]
+    sent['product_type'] = words[2]
+    sent['level'] = words[3][0]
+    sent['product_class'] = words[3][1]
+    sent['polarization'] = words[3][2:4]
+    sent['start_time'] = datetime.strptime(words[4],"%Y%m%dT%H%M%S")
+    sent['stop_time'] = datetime.strptime(words[5],"%Y%m%dT%H%M%S")
+    sent['orbit_number'] = words[6]
+    sent['mission_id'] = words[7]
+    sent['unique_id'] = words[8]
+    return sent
 
-if len(sys.argv) < 2:
-    print('Usage: precise_orbit.py preciseorbitfile <start time def=entire file> <end time>')
+def timeinseconds(timestring):
+    dt = datetime.strptime(timestring, 'UTC=%Y-%m-%dT%H:%M:%S.%f')
+    secs=dt.hour*3600+dt.minute*60+dt.second+dt.microsecond/1000000.0
+    return dt,secs
+
+if len(sys.argv) < 3:
+    print('Usage: precise_orbit.py preciseorbitfile zip_file')
     sys.exit(1)
 
-starttime=-99999
-orbitfile=sys.argv[1]
-if len(sys.argv) > 2:
-    starttime=sys.argv[2]
-stoptime=starttime
-if len(sys.argv) > 3:
-    stoptime=sys.argv[3]
+orbitfile = sys.argv[1]
+zipfile = sys.argv[2]
+sent = sentinel_parser(zipfile)
+# expand start and stop times by 10 seconds
+start_time = sent['start_time']-timedelta(seconds=10)
+stop_time = sent['stop_time']+timedelta(seconds=10)
 
-print('Times: ',starttime,stoptime)
+print('Times: ',start_time,stop_time)
 
 # read the precise file
 xmlfile=open(orbitfile,'r')
@@ -68,10 +81,11 @@ vy=[]
 vz=[]
 for i in range(len(start)):
     statelines=xmllines[start[i]:stop[i]]
-    #print(statelines,'\n\n')
-#    time.append(readxmlparam(statelines,'TAI'))
-    time.append(readxmlparam(statelines,'UTC'))
-#    time.append(readxmlparam(statelines,'UT1'))
+    utc_str = readxmlparam(statelines,'UTC')
+    utc_time,time_seconds = timeinseconds(utc_str)
+    if utc_time < start_time or utc_time > stop_time:
+        continue
+    time.append(time_seconds)
     x.append(readxmlparam(statelines,'X unit'))
     y.append(readxmlparam(statelines,'Y unit'))
     z.append(readxmlparam(statelines,'Z unit'))
@@ -83,65 +97,9 @@ for i in range(len(start)):
     #print(statelines[velstart:velstop])
     
 orbinfo=open('precise_orbtiming','w')
-orbinfo.write('0 \n')
-orbinfo.write('0 \n')
-orbinfo.write('0 \n')
-orbinfo.write(str(len(start))+'\n')
-for i in range(len(start)):
-    orbinfo.write(str(timeinseconds(time[i]))+' '+str(x[i])+' '+str(y[i])+' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+' 0.0 0.0 0.0')
+orbinfo.write(str(len(time))+'\n')
+for i in range(len(time)):
+    orbinfo.write(str(time[i])+' '+str(x[i])+' '+str(y[i])+' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+' 0.0 0.0 0.0')
     orbinfo.write('\n')
-
 orbinfo.close()
-
-# filter orbtiming file to get desired range only
-
-if len(sys.argv) < 3:
-    sys.exit(0)
-
-#ret=os.system('mv precise_orbtiming orbtiming.full')
-src_fname = 'precise_orbtiming'
-tar_fname = 'orbtiming.full'
-if os.path.exists(tar_fname):
-    os.remove(tar_fname)
-os.rename(src_fname,tar_fname)
-orbinfofull=open('orbtiming.full','r')
-orbinfo=open('precise_orbtiming','w')
-qstr=orbinfofull.readline()  # read three lines at beginning first
-#orbinfo.write(qstr)
-qstr=orbinfofull.readline()
-#orbinfo.write(qstr)
-qstr=orbinfofull.readline()
-#orbinfo.write(qstr)
-
-# read number of lines in full file
-qstr=orbinfofull.readline()
-
-# get times bracketing desired times
-for i in range(len(time)):
-    #print(timeinseconds(time[i]),timeinseconds(time[0]))
-    if timeinseconds(time[i]) < timeinseconds(time[0]):
-        timeflag=i
-        break
-
-outvectors=[]
-for i in range(len(time)):
-    qstr=orbinfofull.readline()
-    #print(qstr,i,timeflag)
-    if i > 0:
-        if i > timeflag:
-            if timeinseconds(time[i]) < timeinseconds(time[i-1]):
-                break
-            #print(timeinseconds(time[i]),float(starttime))
-            if timeinseconds(time[i+1]) > float(starttime):
-                #print('time greater than starttime')
-                if timeinseconds(time[i-1]) < float(stoptime):
-                    #print('write output record ',timeinseconds(time[i]))
-                    outvectors.append(qstr)
-
-orbinfo.write(str(len(outvectors))+'\n')
-for i in range(len(outvectors)):
-    orbinfo.write(outvectors[i])
-
-orbinfo.close()
-orbinfofull.close()
 sys.exit(0)

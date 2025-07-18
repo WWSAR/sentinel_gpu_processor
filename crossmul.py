@@ -46,6 +46,8 @@ for line in sbas:
     slavename=slave[first:first+8]
 
     intfile=mastername+'_'+slavename+'.int'
+    if os.path.exists(os.path.join('int',intfile)):
+        continue
     #ampfile=mastername+'_'+slavename+'.amp'
     #ccfile=mastername+'_'+slavename+'.cc'
 

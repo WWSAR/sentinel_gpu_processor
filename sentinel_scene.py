@@ -8,7 +8,6 @@ import os
 import shutil
 import sql_mod
 import time
-from datetime import datetime
 import numpy as np
 import sqlite3
 import subprocess
@@ -72,11 +71,6 @@ for ifile,file in enumerate(swathfiles):
     if ifile == 0:
         #  retrieve scene start and stop times from scene name
         print(dir)
-        dt=datetime.strptime(dir[dir.find('T')+1:dir.find('T')+7],'%H%M%S')
-        scenestart=dt.hour*3600+dt.minute*60+dt.second
-        dt=datetime.strptime(dir[dir.find('T')+17:dir.find('T')+23],'%H%M%S')
-        scenestop=dt.hour*3600+dt.minute*60+dt.second
-        print('Scene limits: ',scenestart,scenestop)
         shutil.copy('orbtiming',f'{dir}.datafile_orbtiming')
         print(f'copy orbtiming to {dir}.datafile_orbtiming')
         #  insert the precise orbit
@@ -88,7 +82,7 @@ for ifile,file in enumerate(swathfiles):
             print(f'rename orbtiming to {dir}.orbtiming')
         else: 
             precise_orbit = os.path.join(PATH,'preproc','precise_orbit.py')
-            command = 'python '+precise_orbit+' '+precise.rstrip()+' '+str(scenestart-10)+' '+str(scenestop+10)
+            command = 'python '+precise_orbit+' '+precise.rstrip()+' '+zip_file
             print(command)
             os.system(command)
             print('*** Using precise orbit ***')
@@ -153,10 +147,6 @@ for ifile,file in enumerate(swathfiles):
 
     con.close()
 
-# Clean up tiff files to lessen disk space requirements
-#command="rm `find "+dir+" -name *tiff*`"
-#print(command)
-#ret = subprocess.check_call(command, shell=True)
 
 # Now, process each subswath to a geocoded slc
 ifile=0
@@ -183,10 +173,10 @@ for file in swathfiles:
     c.close()
     con.close()
     print(f'nrange:{nrange}, nazimuth:{nazimuth}')
-    print(origslcfile, derampedslcfile)
+    #print(origslcfile, derampedslcfile)
     # deramp the slave file
     command='D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\deramp_burst.exe '+slavedb.strip()+' '+rawslcfile
-    print(command)
+    #print(command)
     os.system(command)
 
     # and geocode/reramp the slave
@@ -194,17 +184,20 @@ for file in swathfiles:
     outgeo=outfile[0:outfile.find('geo.')+3]
     command = "D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\geo2rdr_reramp.exe "+outfile.replace('geo','db')+' '+outgeo
     print(time.ctime())
-    print(command)
+    #print(command)
     os.system(command)
 
     # remove the original slc files
-    print ('Original slc: ',origslcfile)
+    #print ('Original slc: ',origslcfile)
     os.remove(origslcfile)
-    print ('Deramped slc: ',derampedslcfile)
+    #print ('Deramped slc: ',derampedslcfile)
     os.remove(derampedslcfile)
     
     print(time.ctime())
     print('Swath processed to common coordinates and coregistered.')
+os.remove(zip_file)
+# Clean up unzipped SAFE folders to lessen disk space requirements
+shutil.rmtree(dir)
 
 print('Loop over swaths complete.')
 
