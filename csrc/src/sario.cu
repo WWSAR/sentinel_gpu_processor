@@ -109,13 +109,41 @@ void save_double(double *img,
 void save_int(int *img,
                 const std::size_t n,
                 const std::string& imgfile){
+    save_int(img,false,n,imgfile);
+}
+
+void save_int(int *img,
+              bool append,
+              const std::size_t n,
+              const std::string& imgfile){
     //std::cout << "outputfile: " << imgfile <<std::endl;
-    std::ofstream fout(imgfile, std::ios::out | std::ios::binary);
+    std::ofstream fout;
+    if(append){
+        fout.open(imgfile,std::ios::app|std::ios::binary);
+    }else{
+        fout.open(imgfile, std::ios::out | std::ios::binary);
+    }
     if (!fout.is_open()){
         printf("Unable to open file %s\n",imgfile.c_str());
         return;
     }
     fout.write((char*) img,sizeof(int)*n);
+    fout.close();
+    return; 
+}
+
+void save_int(int *img,
+              const std::size_t toskip,
+              const std::size_t n,
+              const std::string& imgfile){
+    std::fstream fout;
+    fout.open(imgfile, std::ios_base::binary|std::ios_base::out|std::ios_base::in);
+    fout.seekp(toskip*sizeof(int), std::ios_base::beg);
+    if (!fout.is_open()){
+        printf("Unable to open file %s\n",imgfile.c_str());
+        return;
+    }
+    fout.write((char*) img, sizeof(int)*n);
     fout.close();
     return; 
 }
@@ -142,6 +170,29 @@ void readdem(const std::string& imgfile,
     fin.close();
     return;
 }
+
+void read_int(const std::string& imgfile, 
+                const std::size_t n,
+                int *img){
+    read_int(imgfile,0,n,img);
+    return;
+}
+
+void read_int(const std::string& imgfile, 
+              const std::size_t toskip,
+              const std::size_t n,
+              int *img){
+    std::ifstream fin(imgfile, std::ios::binary);
+    fin.seekg(toskip*sizeof(int),std::ios::beg);
+    if (!fin){
+        printf("File %s does not exist.\n",imgfile.c_str());
+        return;
+    }
+    fin.read((char *)img, sizeof(int)*n);
+    fin.close();
+    return;
+}
+
 
 void read_float(const std::string& imgfile, 
                 const std::size_t n,
