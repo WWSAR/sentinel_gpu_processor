@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3 -u
+#!/usr/bin/env python3
 
 #  ps_sbas_igrams - create set of sentinel interferogram subsets 
 #    allow looks
@@ -55,7 +55,7 @@ for line in sbas:
     fintlist.write('\n')
 
     flag=0
-    command = 'D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\crossmul.exe '+ \
+    command = 'crossmul '+ \
               master+' '+slave+' '+demrscfile+' '+str(ylooks)+' '+str(xlooks)
     print(command)
     os.system(command)

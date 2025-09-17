@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3 -u
+#!/usr/bin/env python3
 #
 #  process stack of sentinel files to coregistered geocoded slcs, single/dual pol
 
