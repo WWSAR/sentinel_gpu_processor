@@ -2,6 +2,7 @@
 # create a list of sbas pairs
 
 import glob
+import re
 import numpy as np
 import os
 import sys
@@ -10,6 +11,31 @@ from datetime import datetime
 import geocoordinates
 import geometry
 import orbit
+
+def sentinel_parser(filename):
+    filename = os.path.split(filename)[-1]
+    words = re.split(r'[_]+|\.',filename)
+    sent = {}
+    sent['filename'] = filename
+    sent['mission'] = words[0]
+    sent['mode'] = words[1]
+    sent['product_type'] = words[2]
+    sent['level'] = words[3][0]
+    sent['product_class'] = words[3][1]
+    sent['polarization'] = words[3][2:4]
+    sent['start_time'] = words[4]
+    sent['stop_time'] = words[5]
+    sent['orbit_number'] = words[6]
+    sent['mission_id'] = words[7]
+    sent['unique_id'] = words[8]
+    return sent
+
+def sentinel_acq_time(filename):
+    sent = sentinel_parser(filename)
+    start_time = datetime.strptime(sent["start_time"],"%Y%m%dT%H%M%S")
+    stop_time = datetime.strptime(sent["stop_time"],"%Y%m%dT%H%M%S")
+    t = start_time + (stop_time-start_time)/2
+    return t
 
 def read_sentinel_orbit(orbfile):
     tt = None
@@ -82,14 +108,21 @@ geos = np.sort(geos)
 
 #names_times=[]
 jdlist = []
+start_time_list = []
 for geo in geos:
     # .geo format e.g. S1A_20150503.geo for char1=7
-    char1=7+13
-    scenedate=geo[char1:char1+8]
-    jd = datetime.strptime(scenedate, '%Y%m%d').toordinal()+1721424.5
-    print('Julian day ',jd)
-    #names_times.append(geo+' '+str(jd))
+    sent = sentinel_parser(os.path.split(geo)[-1])
+    scene_start_time = sent['start_time']
+    scene_date = scene_start_time[0:8]
+    jd = datetime.strptime(scene_date, '%Y%m%d').toordinal()+1721424.5
+    start_time = datetime.strptime(scene_start_time,"%Y%m%dT%H%M%S")
+    start_time0 = datetime.strptime(f'{scene_date}T000000',"%Y%m%dT%H%M%S")
+    start_time = start_time - start_time0
+    start_time_list.append(start_time.total_seconds())
     jdlist.append(jd)
+
+jdlist = np.array(jdlist)
+start_time_list = np.array(start_time_list)
 
 #  estimate baseline and create a file for the time-baseline plot
 ftb=open('sbas_list','w') 
@@ -98,15 +131,20 @@ demrscfile = os.path.join('..','elevation.dem.rsc')
 #  call the spatial baseline estimator
 for i in range(0,len(geos)-1):
     orbfile1 = geos[i].strip().replace('geo','orbtiming')
+    ref_img_start_time = start_time_list[i]
     for j in range(i+1,len(geos)):
+        sec_image_indices = jdlist == jdlist[j]
+        sec_image_start_times = start_time_list[sec_image_indices] 
+        if np.min(np.abs(ref_img_start_time - sec_image_start_times)) < \
+            np.abs(ref_img_start_time - start_time_list[j]):
+            continue
         print ('Interferograms: '+str(i)+' '+str(j))
         orbfile2 = geos[j].strip().replace('geo','orbtiming')
         bperp = estimatebaseline(orbfile1,orbfile2,demfile,demrscfile) 
         if abs(bperp) <= maxspatial:
             temp_bl=abs(jdlist[j]-jdlist[i])
-            if temp_bl <= maxtemporal:
+            if temp_bl <= maxtemporal and temp_bl>0:
                 ftb.write(f"{geos[i].strip()} {geos[j].strip()} {temp_bl} {bperp}\n")
 
 print('sbas_list written')
 ftb.close()
-
