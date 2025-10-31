@@ -5,7 +5,7 @@ import glob
 import numpy as np
 import os
 import sys
-from datetime import datetime 
+from datetime import datetime
 
 import geocoordinates
 import geometry
@@ -56,7 +56,7 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
     u1 = -dr1/np.linalg.norm(dr1)
     u2 = -dr2/np.linalg.norm(dr2)
     uperp = np.cross(u1,u2)
-    theta = np.arcsin(np.linalg.norm(uperp)) 
+    theta = np.arcsin(np.linalg.norm(uperp))
     vdotuperp = np.dot(vmid1,uperp)
     if vdotuperp>0:
         bperp = np.linalg.norm(dr1)*theta
@@ -64,49 +64,56 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
         bperp = -np.linalg.norm(dr1)*theta
     return bperp
 
-if len(sys.argv) < 3:
-    print ('Usage: sbas_list.py max_temporal max_spatial')
-    sys.exit(1)
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(
+            description = ("Create a list of SLC pairs based on baseline " + \
+                           "settings"))
+    parser.add_argument('--min_tbl',type=int,help="minimum temporal baseline",
+                        default = 0)
+    parser.add_argument('--max_tbl',type=int,help="maximum temporal baseline",
+                        default = 30000)
+    parser.add_argument('--min_sbl',type=int,help="minimum spatial baseline",
+                        default = 0)
+    parser.add_argument('--max_sbl',type=int,help="maximum spatial baseline",
+                        default = 1000)
 
-maxtemporal=float(sys.argv[1])
-maxspatial=float(sys.argv[2])
+    args = parser.parse_args()
+    min_tbl = args.min_tbl
+    max_tbl = args.max_tbl
+    min_sbl = args.min_sbl
+    max_sbl = args.max_sbl
 
-# get the PATH of the script directory
-PATH=os.path.dirname(os.path.abspath(sys.argv[0]))
-
-#  get a list of the sorted geocoded slc files
-# .geo format e.g. S1A_20150503.geo for char1=7
-geos = glob.glob(os.path.join('..','*.geo'))
-geos = np.sort(geos)
-# print(geos)
-
-#names_times=[]
-jdlist = []
-for geo in geos:
+    #  get a list of the sorted geocoded slc files
     # .geo format e.g. S1A_20150503.geo for char1=7
-    char1=7+13
-    scenedate=geo[char1:char1+8]
-    jd = datetime.strptime(scenedate, '%Y%m%d').toordinal()+1721424.5
-    print('Julian day ',jd)
-    #names_times.append(geo+' '+str(jd))
-    jdlist.append(jd)
+    geos = glob.glob(os.path.join('..','*.geo'))
+    geos = np.sort(geos)
 
-#  estimate baseline and create a file for the time-baseline plot
-ftb=open('sbas_list','w') 
-demfile = os.path.join('..','elevation.dem')
-demrscfile = os.path.join('..','elevation.dem.rsc')
-#  call the spatial baseline estimator
-for i in range(0,len(geos)-1):
-    orbfile1 = geos[i].strip().replace('geo','orbtiming')
-    for j in range(i+1,len(geos)):
-        print ('Interferograms: '+str(i)+' '+str(j))
-        orbfile2 = geos[j].strip().replace('geo','orbtiming')
-        bperp = estimatebaseline(orbfile1,orbfile2,demfile,demrscfile) 
-        if abs(bperp) <= maxspatial:
-            temp_bl=abs(jdlist[j]-jdlist[i])
-            if temp_bl <= maxtemporal:
-                ftb.write(f"{geos[i].strip()} {geos[j].strip()} {temp_bl} {bperp}\n")
+    jdlist = []
+    for geo in geos:
+        # .geo format e.g. S1A_20150503.geo for char1=7
+        char1=7+13
+        scenedate=geo[char1:char1+8]
+        jd = datetime.strptime(scenedate, '%Y%m%d').toordinal()+1721424.5
+        print('Julian day ',jd)
+        #names_times.append(geo+' '+str(jd))
+        jdlist.append(jd)
 
-print('sbas_list written')
-ftb.close()
+    #  estimate baseline and create a file for the time-baseline plot
+    ftb=open('sbas_list','w')
+    demfile = os.path.join('..','elevation.dem')
+    demrscfile = os.path.join('..','elevation.dem.rsc')
+    #  call the spatial baseline estimator
+    for i in range(0,len(geos)-1):
+        orbfile1 = geos[i].strip().replace('geo','orbtiming')
+        for j in range(i+1,len(geos)):
+            orbfile2 = geos[j].strip().replace('geo','orbtiming')
+            bperp = estimatebaseline(orbfile1,orbfile2,demfile,demrscfile)
+            if abs(bperp) <= max_sbl and abs(bperp) >= min_sbl:
+                temp_bl=abs(jdlist[j]-jdlist[i])
+                if temp_bl <= max_tbl and temp_bl >= min_tbl:
+                    ftb.write(f"{geos[i].strip()} {geos[j].strip()} {temp_bl} {bperp}\n")
+
+    print('sbas_list written')
+    ftb.close()
 
