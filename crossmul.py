@@ -35,6 +35,10 @@ fintlist=open('intlist','w')
 sbasfiles=[]
 fsbas=open(sbaslist,'r')
 sbas=fsbas.readlines()
+ref_list = []
+sec_list = []
+ref_date_list = []
+sec_date_list = []
 for line in sbas:
     words=line.split()
     master=words[0]
@@ -44,23 +48,34 @@ for line in sbas:
     mastername=master[first:first+8]
     first=slave.find('20')
     slavename=slave[first:first+8]
+    ref_list.append(words[0])
+    sec_list.append(words[1])
+    ref_date_list.append(mastername)
+    sec_date_list.append(slavename)
 
-    intfile=mastername+'_'+slavename+'.int'
-    if os.path.exists(os.path.join('int',intfile)):
+for i in range(len(ref_list)):
+    ref_date = ref_date_list[i]
+    sec_date = sec_date_list[i]
+    intfile=ref_date+'_'+sec_date+'.int'
+    j = i-1
+    while True:
+        if j >= 0 and ref_date == ref_date_list[j] and \
+           sec_date == sec_date_list[j]:
+            intfile = 'a' + intfile
+            j -= 1
+        else:
+            break
+    if os.path.exists(intfile):
         continue
-    #ampfile=mastername+'_'+slavename+'.amp'
-    #ccfile=mastername+'_'+slavename+'.cc'
 
     fintlist.write(intfile)
     fintlist.write('\n')
 
     flag=0
     command = 'D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\crossmul.exe '+ \
-              master+' '+slave+' '+demrscfile+' '+str(ylooks)+' '+str(xlooks)
+              ref_list[i]+' '+sec_list[i]+' '+demrscfile+' '+str(ylooks)+' '+ \
+              str(xlooks) + ' ' + intfile
     print(command)
     os.system(command)
 
-    # correlation file next
-    #command = PATH + '/bin/makecc ' + ' ' + intfile + ' ' + ampfile + ' ' + ccfile + ' ' + str(int((int(xsize) / int(xlooks))))
-    #ret = subprocess.check_call(command, shell=True)
 fintlist.close()
