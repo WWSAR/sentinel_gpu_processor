@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3 -u
+#!/usr/bin/env python3
 #
 #  process one sentinel scene files to coregistered geocoded slc, single/dual pol
 
@@ -63,7 +63,7 @@ for ifile,file in enumerate(swathfiles):
 #        file=swathfiles[ifile-1] # remove to go back to usual
     # create the orbtiming file, roi.db.X file with metadata, file table for each subswath
     print('ifile= ',ifile,': ',xmlfiles[ifile])
-    sentinel_roidb = os.path.join(PATH,'preproc','sentinel_roidb.py')
+    sentinel_roidb = os.path.join(PATH,'sentinel_roidb.py')
 
     command = 'python '+ sentinel_roidb+' '+dir+' '+str(ifile+1)+' '+xmlfiles[ifile]
     print(command)
@@ -81,7 +81,7 @@ for ifile,file in enumerate(swathfiles):
             os.rename('orbtiming',f'{dir}.orbtiming')
             print(f'rename orbtiming to {dir}.orbtiming')
         else: 
-            precise_orbit = os.path.join(PATH,'preproc','precise_orbit.py')
+            precise_orbit = os.path.join(PATH,'precise_orbit.py')
             command = 'python '+precise_orbit+' '+precise.rstrip()+' '+zip_file
             print(command)
             os.system(command)
@@ -138,7 +138,7 @@ for ifile,file in enumerate(swathfiles):
     #command= PATH+'/bin/readgeotiff.exe '+file.rstrip()+' '+((file.replace('.tiff','.rawslc')).replace('/measurement','')).rstrip()+' '+linereverse+' '+pixelreverse
     basename = os.path.basename(file);
     output_slc_file = os.path.join(dir,basename.replace('tiff','rawslc'))
-    command= 'D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\readgeotiff.exe '+file.rstrip()+' '+output_slc_file+' '+linereverse+' '+pixelreverse
+    command= 'readgeotiff '+file.rstrip()+' '+output_slc_file+' '+linereverse+' '+pixelreverse
     print(time.ctime())
     print(command)
     ret = subprocess.check_call(command, shell=True)
@@ -175,14 +175,14 @@ for file in swathfiles:
     print(f'nrange:{nrange}, nazimuth:{nazimuth}')
     #print(origslcfile, derampedslcfile)
     # deramp the slave file
-    command='D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\deramp_burst.exe '+slavedb.strip()+' '+rawslcfile
+    command='deramp_burst '+slavedb.strip()+' '+rawslcfile
     #print(command)
     os.system(command)
 
     # and geocode/reramp the slave
     outfile=slavedb.replace('db','geo').strip()
     outgeo=outfile[0:outfile.find('geo.')+3]
-    command = "D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\geo2rdr_reramp.exe "+outfile.replace('geo','db')+' '+outgeo
+    command = "geo2rdr_reramp "+outfile.replace('geo','db')+' '+outgeo
     print(time.ctime())
     #print(command)
     os.system(command)
@@ -195,9 +195,9 @@ for file in swathfiles:
     
     print(time.ctime())
     print('Swath processed to common coordinates and coregistered.')
-os.remove(zip_file)
+#os.remove(zip_file)
 # Clean up unzipped SAFE folders to lessen disk space requirements
-shutil.rmtree(dir)
+#shutil.rmtree(dir)
 
 print('Loop over swaths complete.')
 

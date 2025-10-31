@@ -1,4 +1,4 @@
-#!/usr/bin/env -S python3 -u
+#!/usr/bin/env python3
 
 #  ps_sbas_igrams - create set of sentinel interferogram subsets 
 #    allow looks
