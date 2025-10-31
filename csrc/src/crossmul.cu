@@ -111,7 +111,8 @@ std::string extract_date(const std::string &s){
 int crossmul(const std::string &slcfile1,
              const std::string &slcfile2,
              const std::string &rscfile,
-             const int rowlook, const int collook){
+             const int rowlook, const int collook,
+             std::string intfile=""){
     rsc demrsc;
     demrsc = readrsc(rscfile);
     Complex *slc1, *slc2, *ifglook;
@@ -119,13 +120,15 @@ int crossmul(const std::string &slcfile1,
     //double *d_amp1, *d_amp2;
     int batch_lines = 2000, blockSize=256, batch_sm;
     int nbatch, numBlocks, nrow, ncol, ncol_sm;
-    std::string date1, date2, outfilename;
+    std::string date1, date2;
     batch_sm = batch_lines/rowlook;
     batch_lines = batch_sm*rowlook;
     date1 = extract_date(slcfile1);
     date2 = extract_date(slcfile2);
-    outfilename = date1+"_"+date2+".int";
-    std::cout << "output filename: " << outfilename << std::endl;
+    if (intfile==""){
+        intfile = date1+"_"+date2+".int";
+    }
+    std::cout << "output filename: " << intfile << std::endl;
     nbatch = (demrsc.nlat + batch_lines-1)/batch_lines;
     nrow = demrsc.nlat;
     ncol = demrsc.nlon;
@@ -173,9 +176,9 @@ int crossmul(const std::string &slcfile1,
         cudaMemcpy(ifglook,d_ifglook,sizeof(Complex)*nlines/rowlook*ncol_sm,
                    cudaMemcpyDeviceToHost);
         if(ibatch==0){
-            save_cpx(ifglook,false,nlines/rowlook*ncol_sm,outfilename);
+            save_cpx(ifglook,false,nlines/rowlook*ncol_sm,intfile);
         }else{
-            save_cpx(ifglook,true,nlines/rowlook*ncol_sm,outfilename);
+            save_cpx(ifglook,true,nlines/rowlook*ncol_sm,intfile);
         }
     }
 
@@ -199,6 +202,10 @@ int main(int argc, char *argv[]){
     const std::string rscfile = std::string(argv[3]);
     const int rowlook = std::stoi(argv[4]);
     const int collook = std::stoi(argv[5]);
-    crossmul(slcfile1,slcfile2,rscfile,rowlook,collook);
+    std::string intfile = "";
+    if (argc > 6){
+        intfile = std::string(argv[6]);
+    }
+    crossmul(slcfile1,slcfile2,rscfile,rowlook,collook,intfile);
     return 0;
 }
