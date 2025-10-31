@@ -2,6 +2,7 @@
 # create a list of sbas pairs
 
 import glob
+import re
 import numpy as np
 import os
 import sys
@@ -10,6 +11,31 @@ from datetime import datetime
 import geocoordinates
 import geometry
 import orbit
+
+def sentinel_parser(filename):
+    filename = os.path.split(filename)[-1]
+    words = re.split(r'[_]+|\.',filename)
+    sent = {}
+    sent['filename'] = filename
+    sent['mission'] = words[0]
+    sent['mode'] = words[1]
+    sent['product_type'] = words[2]
+    sent['level'] = words[3][0]
+    sent['product_class'] = words[3][1]
+    sent['polarization'] = words[3][2:4]
+    sent['start_time'] = words[4]
+    sent['stop_time'] = words[5]
+    sent['orbit_number'] = words[6]
+    sent['mission_id'] = words[7]
+    sent['unique_id'] = words[8]
+    return sent
+
+def sentinel_acq_time(filename):
+    sent = sentinel_parser(filename)
+    start_time = datetime.strptime(sent["start_time"],"%Y%m%dT%H%M%S")
+    stop_time = datetime.strptime(sent["stop_time"],"%Y%m%dT%H%M%S")
+    t = start_time + (stop_time-start_time)/2
+    return t
 
 def read_sentinel_orbit(orbfile):
     tt = None
