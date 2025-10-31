@@ -1,0 +1,12 @@
+# Core scientific stack
+numpy>=1.23
+
+# Data handling
+pandas>=2.0
+
+# Performance acceleration
+numba>=0.58
+
+# Optional visualization
+matplotlib>=3.8
+

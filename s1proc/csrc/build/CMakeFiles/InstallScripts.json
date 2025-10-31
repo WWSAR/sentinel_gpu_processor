@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/wangke/sentinel/csrc/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

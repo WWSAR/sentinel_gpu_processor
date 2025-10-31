@@ -72,7 +72,7 @@ for i in range(len(ref_list)):
     fintlist.write('\n')
 
     flag=0
-    command = 'D:\\sentinel\\sentinel_processor\\csrc\\build\\Debug\\crossmul.exe '+ \
+    command = 'crossmul' + \
               ref_list[i]+' '+sec_list[i]+' '+demrscfile+' '+str(ylooks)+' '+ \
               str(xlooks) + ' ' + intfile
     print(command)
