@@ -1,13 +1,35 @@
 import numpy as np
 import os
 import shutil
+from pathlib import Path
 from matplotlib import pyplot as plt
 plt.rcParams['image.interpolation'] = 'none'
 
-import sario
-import geocoordinates
+from s1proc import sario
+from s1proc import geocoordinates
+from s1proc._log import setup_logger, set_logging_level
+logger = setup_logger(name=__name__,level='INFO')
 
-def stitch(intfile1,intfile2,ncol):
+def stitch(intfile1:Path|str,
+           intfile2:Path|str,
+           ncol:int)->np.ndarray:
+    """
+    Stitch two interferograms on the same path
+
+    Parameters
+    ----------
+    intfile1: Path|str
+        Path to the first interferogram
+    intfile2: Path|str
+        Path to the second interferogram
+    ncol: int
+        Number of columns of each interferogram
+
+    Returns
+    -------
+    ifg_stitch: np.ndarray
+        Stitched interferogram
+    """
     ifg1 = sario.readslc(intfile1,ncol)
     ifg2 = sario.readslc(intfile2,ncol)
     mask1 = np.abs(ifg1)>1e-3
@@ -15,12 +37,16 @@ def stitch(intfile1,intfile2,ncol):
     common_mask = mask1 & mask2
     ifg_diff = np.conj(ifg1)*ifg2
     phase_diff = np.angle(np.mean(ifg_diff[common_mask]))
-    #print(phase_diff)
+    logger.debug(f'phase difference between {intfile1} and {intfile2} :'
+                 f'{phase_diff} rad')
     ifg2 = ifg2 * np.exp(-1j*phase_diff)
     ifg_stitch = ifg1*mask1 + ifg2*mask2*(~mask1)
     return ifg_stitch
 
 def main():
+    """
+    Stitch interferograms with the same path number
+    """
     rsc = geocoordinates.GeoCoordinates('dem.rsc')
     os.makedirs('old_int',exist_ok=True)
     _,ncol = rsc.nlat,rsc.nlon
@@ -31,7 +57,7 @@ def main():
         intfile1 = intlist[i]
         intfile2 = intlist[i+1]
         if intfile1 == intfile2[1:]:
-            print('Stitching ',intfile1,intfile2)
+            logger.info(f'Stitching {intfile1} and {intfile2}')
             ifg_stitch = stitch(intfile1,intfile2,ncol)
             shutil.move(intfile1,os.path.join('old_int',intfile1))
             shutil.move(intfile2,os.path.join('old_int',intfile2))

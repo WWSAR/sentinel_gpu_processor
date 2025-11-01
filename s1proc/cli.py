@@ -14,9 +14,11 @@ def main()->int:
 
     import tyro
     from s1proc.slc_pairs import create_slc_pair_list
+    from s1proc.stitch import main as stitch_ifg
     tyro.extras.subcommand_cli_from_dict(
         {
-            "slcpairs":create_slc_pair_list
+            "slcpairs": create_slc_pair_list,
+            "stitch": stitch_ifg
         })
     return os.EX_OK
 
