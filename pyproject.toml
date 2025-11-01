@@ -14,6 +14,9 @@ dependencies = [
     "matplotlib",
     "numpy",
     "numba",
-    "pandas"
+    "pandas",
+    "tyro"
 ]
 
+[project.scripts]
+s1proc = "s1proc.cli:main"

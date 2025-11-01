@@ -10,3 +10,5 @@ numba>=0.58
 # Optional visualization
 matplotlib>=3.8
 
+# Command Line Tools
+tyro>=0.9

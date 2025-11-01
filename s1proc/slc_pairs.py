@@ -10,10 +10,10 @@ import tyro
 from pathlib import Path
 from datetime import datetime
 
-import geocoordinates
-import geometry
-import orbit
-from _log import setup_logger, set_logging_level
+from s1proc import geocoordinates
+from s1proc import geometry
+from s1proc import orbit
+from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
 
@@ -141,7 +141,7 @@ def create_slc_pair_list(
 
     f = open('sbas_list','w')
     unique_date_list = np.sort(np.unique(date_list))
-    ndates = len(unqiue_date_list)
+    ndates = len(unique_date_list)
     for i in range(ndates-1):
         date_str_ref = unique_date_list[i]
         date_ref = datetime.strptime(date_str_ref,'%Y%m%d')
@@ -156,7 +156,7 @@ def create_slc_pair_list(
             if tempbl > max_tbl or tempbl < min_tbl:
                 continue
             bperp = estimatebaseline(orbfile1,orbfile2,demfile,rscfile)
-            if bperp > max_sbl or bperp < min_sbl:
+            if np.abs(bperp) > max_sbl or np.abs(bperp) < min_sbl:
                 continue
             if len(slcs_ref) != len(slcs_sec):
                 logger.warning('Numbers of SLC images do not match for '
@@ -164,7 +164,7 @@ def create_slc_pair_list(
                 continue
             else:
                 for k in range(len(slcs_ref)):
-                    f.write(f'{date_str_ref} {date_str_sec} {tempbl} {bperp}\n')
+                    f.write(f'{slcs_ref[k]} {slcs_sec[k]} {tempbl} {bperp}\n')
     f.close()
 
 if __name__ == '__main__':
