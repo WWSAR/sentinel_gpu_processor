@@ -1,1 +1,0 @@
-  -L/home/wangke/anaconda3/lib  -lcudadevrt -lcudart_static -lrt -lpthread -ldl 

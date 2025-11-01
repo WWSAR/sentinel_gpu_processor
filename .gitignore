@@ -4,11 +4,12 @@
 log.txt
 \#*
 .nfs*
-sario.py
 .vscode
 bin/
-csrc/build
-csrc/vcpkg_installed
-csrc/CMakeFiles
+s1proc/csrc/build
+s1proc/csrc/vcpkg_installed
+s1proc/csrc/CMakeFiles
 fortran_code
 __pycache__
+*.egg-info
+*.so

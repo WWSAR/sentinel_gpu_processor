@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5)
-project(sentinel_processor VERSION 0.1.0 LANGUAGES C CXX CUDA)
+project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
 # Specify the C++ standard
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -50,3 +50,7 @@ elseif(WIN32)
     target_link_libraries(geo2rdr_reramp PRIVATE unofficial::sqlite3::sqlite3)
 endif()
 
+# Install CUDA executables into the Python package: s1proc/bin/
+install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul
+        RUNTIME DESTINATION s1proc/bin
+)

@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/readgeotiff.dir/src/readgeotiff.cpp.o -o bin/readgeotiff   -L/home/wangke/anaconda3/lib  -Wl,-rpath,/home/wangke/anaconda3/lib /usr/lib64/libtiff.so

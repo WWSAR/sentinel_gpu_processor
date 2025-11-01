@@ -1,6 +1,0 @@
-/home/wangke/sentinel/csrc/build/CMakeFiles/readgeotiff.dir
-/home/wangke/sentinel/csrc/build/CMakeFiles/deramp_burst.dir
-/home/wangke/sentinel/csrc/build/CMakeFiles/geo2rdr_reramp.dir
-/home/wangke/sentinel/csrc/build/CMakeFiles/crossmul.dir
-/home/wangke/sentinel/csrc/build/CMakeFiles/edit_cache.dir
-/home/wangke/sentinel/csrc/build/CMakeFiles/rebuild_cache.dir
