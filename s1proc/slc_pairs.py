@@ -6,13 +6,18 @@ import re
 import numpy as np
 import os
 import sys
+import tyro
+from pathlib import Path
 from datetime import datetime
 
 import geocoordinates
 import geometry
 import orbit
+from _log import setup_logger, set_logging_level
+logger = setup_logger(name=__name__,level='INFO')
 
-def sentinel_parser(filename):
+
+def sentinel_parser(filename:Path|str)->dict:
     filename = os.path.split(filename)[-1]
     words = re.split(r'[_]+|\.',filename)
     sent = {}
@@ -28,6 +33,7 @@ def sentinel_parser(filename):
     sent['orbit_number'] = words[6]
     sent['mission_id'] = words[7]
     sent['unique_id'] = words[8]
+    sent['date'] = sent['start_time'][0:8]
     return sent
 
 def sentinel_acq_time(filename):
@@ -90,56 +96,76 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
         bperp = -np.linalg.norm(dr1)*theta
     return bperp
 
-if __name__ == '__main__':
-    import argparse
-    parser = argparse.ArgumentParser(
-            description = ("Create a list of SLC pairs based on baseline " + \
-                           "settings"))
-    parser.add_argument('--min_tbl',type=int,help="minimum temporal baseline",
-                        default = 0)
-    parser.add_argument('--max_tbl',type=int,help="maximum temporal baseline",
-                        default = 30000)
-    parser.add_argument('--min_sbl',type=int,help="minimum spatial baseline",
-                        default = 0)
-    parser.add_argument('--max_sbl',type=int,help="maximum spatial baseline",
-                        default = 1000)
+def create_slc_pair_list(
+        min_tbl:int = 0,
+        max_tbl:int = 30000,
+        min_sbl:int = 0,
+        max_sbl:int = 10000):
+    """
+    Create a list of SLC pairs for interferogram generation
 
-    args = parser.parse_args()
-    min_tbl = args.min_tbl
-    max_tbl = args.max_tbl
-    min_sbl = args.min_sbl
-    max_sbl = args.max_sbl
-
-    #  get a list of the sorted geocoded slc files
-    # .geo format e.g. S1A_20150503.geo for char1=7
-    geos = glob.glob(os.path.join('..','*.geo'))
-    geos = np.sort(geos)
-
-    jdlist = []
-    for geo in geos:
-        # .geo format e.g. S1A_20150503.geo for char1=7
-        char1=7+13
-        scenedate=geo[char1:char1+8]
-        jd = datetime.strptime(scenedate, '%Y%m%d').toordinal()+1721424.5
-        print('Julian day ',jd)
-        #names_times.append(geo+' '+str(jd))
-        jdlist.append(jd)
-
-    #  estimate baseline and create a file for the time-baseline plot
-    ftb=open('sbas_list','w')
+    Parameters
+    ----------
+    min_tbl: int
+        minimum temporal baseline threshold
+    max_tbl: int
+        maximum temporal baseline threshold
+    min_sbl: int
+        minimum temporal baseline threshold
+    max_sbl: int
+        maximum temporal baseline threshold
+    """
+    
+    # set dem and rsc files
     demfile = os.path.join('..','elevation.dem')
-    demrscfile = os.path.join('..','elevation.dem.rsc')
-    #  call the spatial baseline estimator
-    for i in range(0,len(geos)-1):
-        orbfile1 = geos[i].strip().replace('geo','orbtiming')
-        for j in range(i+1,len(geos)):
-            orbfile2 = geos[j].strip().replace('geo','orbtiming')
-            bperp = estimatebaseline(orbfile1,orbfile2,demfile,demrscfile)
-            if abs(bperp) <= max_sbl and abs(bperp) >= min_sbl:
-                temp_bl=abs(jdlist[j]-jdlist[i])
-                if temp_bl <= max_tbl and temp_bl >= min_tbl:
-                    ftb.write(f"{geos[i].strip()} {geos[j].strip()} {temp_bl} {bperp}\n")
+    rscfile = os.path.join('..','elevation.dem.rsc')
+    
+    # find all slc images in the parent directory
+    slc_list = glob.glob(os.path.join('..','*.geo'))
+    slc_list = np.sort(slc_list)
 
-    print('sbas_list written')
-    ftb.close()
+    # create a list of all acquisition dates
+    date_list = []
+    for slc_file in slc_list:
+        sent = sentinel_parser(slc_file)
+        date_str = sent['date']
+        date_list.append(date_str)
+    
+    # create a dictionary mapping date to slcfiles
+    slc_dict = {}
+    for i,date_str in enumerate(date_list):
+        if date_str in slc_dict:
+            slc_dict[date_str].append(slc_list[i])
+        else:
+            slc_dict[date_str] = [slc_list[i]]
 
+    f = open('sbas_list','w')
+    unique_date_list = np.sort(np.unique(date_list))
+    ndates = len(unqiue_date_list)
+    for i in range(ndates-1):
+        date_str_ref = unique_date_list[i]
+        date_ref = datetime.strptime(date_str_ref,'%Y%m%d')
+        slcs_ref = slc_dict[date_str_ref]
+        orbfile1 = slcs_ref[0].strip().replace('geo','orbtiming')
+        for j in range(i+1,ndates):
+            date_str_sec = unique_date_list[j]
+            date_sec = datetime.strptime(date_str_sec,'%Y%m%d')
+            slcs_sec = slc_dict[date_str_sec]
+            orbfile2 = slcs_sec[0].strip().replace('geo','orbtiming')
+            tempbl = (date_sec-date_ref).days 
+            if tempbl > max_tbl or tempbl < min_tbl:
+                continue
+            bperp = estimatebaseline(orbfile1,orbfile2,demfile,rscfile)
+            if bperp > max_sbl or bperp < min_sbl:
+                continue
+            if len(slcs_ref) != len(slcs_sec):
+                logger.warning('Numbers of SLC images do not match for '
+                        f'{date_str_ref} and {date_str_sec}, skipping')
+                continue
+            else:
+                for k in range(len(slcs_ref)):
+                    f.write(f'{date_str_ref} {date_str_sec} {tempbl} {bperp}\n')
+    f.close()
+
+if __name__ == '__main__':
+    tyro.cli(create_slc_pair_list)
