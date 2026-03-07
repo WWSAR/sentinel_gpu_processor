@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel", "numpy"]
+requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,13 +9,8 @@ description = "GPU-accelerated Sentinel-1 SAR processing tools"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Ke Wang", email = "kewang@utexas.edu" }]
-requires-python = ">=3.9"
+requires-python = ">=3.8"
 dependencies = [
-    "matplotlib",
-    "numpy",
-    "numba",
-    "pandas",
-    "tyro"
 ]
 
 [project.scripts]
