@@ -9,6 +9,7 @@ import sys
 import tyro
 from pathlib import Path
 from datetime import datetime
+from typing import List
 
 from s1proc import geocoordinates
 from s1proc import geometry
@@ -166,6 +167,38 @@ def create_slc_pair_list(
                 for k in range(len(slcs_ref)):
                     f.write(f'{slcs_ref[k]} {slcs_sec[k]} {tempbl} {bperp}\n')
     f.close()
+
+def mid_orbit(
+        orb_list: List[Path|str]|None = None,
+        dem_file: Path|str = 'elevation.dem',
+        rsc_file: Path|str = 'elevation.dem.rsc') -> str:
+    """
+    Find the middle orbit
+    
+    Parameters
+    ----------
+    orb_list: List[Path|str]|None
+        List of orbit files. If None, use all precise orbit files
+    dem_file: Path|str
+        DEM file
+    rsc_file: Path|str
+        rsc file
+
+    Returns
+    -------
+        File name of the middle orbit
+    """
+    if orb_list is None:
+        orb_list = glob.glob('*.precise_orbtiming')
+
+    norb = len(orb_list)
+    bperps = np.zeros(norb,dtype=np.float32)
+    for i in range(1,norb):
+        bperps[i] = estimatebaseline(orb_list[0],orb_list[i],dem_file,rsc_file)
+    idx = np.argsort(bperps)
+    mid_orb_file = orb_list[idx[norb//2]]
+    logger.info(f'Middle orbit file: {mid_orb_file}')
+    return mid_orb_file
 
 if __name__ == '__main__':
     tyro.cli(create_slc_pair_list)
