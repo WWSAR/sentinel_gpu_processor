@@ -2,9 +2,10 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
-#include <string>
 #include <iostream>
+#include <fstream>
 #include <sqlite3.h>
+#include <string>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
 #include "sql_mod.hpp"
@@ -20,9 +21,14 @@
     #define SOL 299792458.0
 #endif
 
+bool file_exists(const std::string& filename) {
+    std::ifstream f(filename);
+    return f.good();
+}
+
 __global__
-void reproject(short int *dem, Complex *burstdata, double *deramp_phase, Complex *outdata,
-               int *burst_num,
+void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
+               Complex *outdata, int *burst_num,
                double *tt, double *xx, double *vv, const std::size_t nstatvec,
                const double tmid, double *xmid, double *vmid,
                const double latmax, const double lonmin, const double dlat, 
@@ -241,7 +247,8 @@ int geo2rdr_reramp(const std::string &dbname,
         cudaMemcpy(d_dem,dem,sizeof(short int)*nlines*demrsc.nlon,
                 cudaMemcpyHostToDevice);
         // read .geo file if current subswath is > 1
-        if (subswath > 1){
+        if (file_exists(slcoutfile)){
+            std::cout << slcoutfile << " exists." << std::endl;
             read_cpx(slcoutfile,line_start*demrsc.nlon,nlines*demrsc.nlon,outdata);
             cudaMemcpy(d_outdata,outdata,sizeof(Complex)*nlines*demrsc.nlon,
                         cudaMemcpyHostToDevice);
@@ -253,7 +260,7 @@ int geo2rdr_reramp(const std::string &dbname,
             double tstart, dtaz, tend, tmid;
             double rngstart, dmrg, rngend;
             double latlons[4];
-            if (subswath == 1 & iburst == 0){
+            if (!file_exists(slcoutfile) & iburst == 0){
                 written = false;
             }else{
                 written = true;
@@ -296,7 +303,7 @@ int geo2rdr_reramp(const std::string &dbname,
                 cudaMemcpyDeviceToHost);
         cudaMemcpy(burst_num,d_burst_num,sizeof(int)*demrsc.nlon*nlines,
                 cudaMemcpyDeviceToHost);
-        if (subswath==1){
+        if (!file_exists(slcoutfile)){
             if (ibatch == 0){
                 save_cpx(outdata,false,demrsc.nlon*nlines,slcoutfile);
                 //save_int(burst_num,false,demrsc.nlon*nlines,burst_num_file);
