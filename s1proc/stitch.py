@@ -53,10 +53,10 @@ def main():
     with open('intlist','r') as f:
         intlist = f.readlines() 
     intlist = [x.strip() for x in intlist]
-    for i in range(len(intlist)-1):
+    for i in range(len(intlist)):
         intfile1 = intlist[i]
-        intfile2 = intlist[i+1]
-        if intfile1 == intfile2[1:]:
+        intfile2 = 'a'+intfile1
+        if intfile2 in intlist:
             logger.info(f'Stitching {intfile1} and {intfile2}')
             ifg_stitch = stitch(intfile1,intfile2,ncol)
             shutil.move(intfile1,os.path.join('old_int',intfile1))
