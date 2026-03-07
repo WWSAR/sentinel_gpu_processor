@@ -7,6 +7,9 @@ import os
 import re
 from datetime import datetime,timedelta
 
+from s1proc._log import setup_logger, set_logging_level
+logger = setup_logger(name=__name__,level='INFO')
+
 def readxmlparam(xmllines, param):
     for line in xmllines:
         if param in line:
@@ -42,64 +45,56 @@ def timeinseconds(timestring):
     secs=dt.hour*3600+dt.minute*60+dt.second+dt.microsecond/1000000.0
     return dt,secs
 
-if len(sys.argv) < 3:
-    print('Usage: precise_orbit.py preciseorbitfile zip_file')
-    sys.exit(1)
+def parse_orbit(orbfile, zipfile, outputfile = None):
+    if outputfile is None:
+        outputfile = zipfile.replace('.zip','.SAFE.orbtiming')
+    sent = sentinel_parser(zipfile)
+    # expand start and stop times by 10 seconds
+    start_time = sent['start_time']-timedelta(seconds=10)
+    stop_time = sent['stop_time']+timedelta(seconds=10)
+    logger.debug(f'start time: {start_time}, stop time: {stop_time}')
 
-orbitfile = sys.argv[1]
-zipfile = sys.argv[2]
-sent = sentinel_parser(zipfile)
-# expand start and stop times by 10 seconds
-start_time = sent['start_time']-timedelta(seconds=10)
-stop_time = sent['stop_time']+timedelta(seconds=10)
+    # read the precise orbit file
+    xmlfile = open(orbfile,'r')
+    xmllines = xmlfile.readlines()
+    xmlfile.close()
 
-print('Times: ',start_time,stop_time)
+    #  save orbit and timing information
+    #  extract each state vector
+    start=[]
+    stop=[]
+    for i in range(len(xmllines)):
+        if '<OSV>' in xmllines[i]:
+            start.append(i)
+            
+        if '</OSV>' in xmllines[i]:
+            stop.append(i)
 
-# read the precise file
-xmlfile=open(orbitfile,'r')
-xmllines=xmlfile.readlines()
-xmlfile.close()
-
-#  save orbit and timing information
-
-#  extract each state vector
-start=[]
-stop=[]
-for i in range(len(xmllines)):
-    if '<OSV>' in xmllines[i]:
-        start.append(i)
+    time=[]
+    x=[]
+    y=[]
+    z=[]
+    vx=[]
+    vy=[]
+    vz=[]
+    for i in range(len(start)):
+        statelines=xmllines[start[i]:stop[i]]
+        utc_str = readxmlparam(statelines,'UTC')
+        utc_time,time_seconds = timeinseconds(utc_str)
+        if utc_time < start_time or utc_time > stop_time:
+            continue
+        time.append(time_seconds)
+        x.append(readxmlparam(statelines,'X unit'))
+        y.append(readxmlparam(statelines,'Y unit'))
+        z.append(readxmlparam(statelines,'Z unit'))
+        vx.append(readxmlparam(statelines,'VX unit'))
+        vy.append(readxmlparam(statelines,'VY unit'))
+        vz.append(readxmlparam(statelines,'VZ unit'))
         
-    if '</OSV>' in xmllines[i]:
-        stop.append(i)
-
-time=[]
-x=[]
-y=[]
-z=[]
-vx=[]
-vy=[]
-vz=[]
-for i in range(len(start)):
-    statelines=xmllines[start[i]:stop[i]]
-    utc_str = readxmlparam(statelines,'UTC')
-    utc_time,time_seconds = timeinseconds(utc_str)
-    if utc_time < start_time or utc_time > stop_time:
-        continue
-    time.append(time_seconds)
-    x.append(readxmlparam(statelines,'X unit'))
-    y.append(readxmlparam(statelines,'Y unit'))
-    z.append(readxmlparam(statelines,'Z unit'))
-    vx.append(readxmlparam(statelines,'VX unit'))
-    vy.append(readxmlparam(statelines,'VY unit'))
-    vz.append(readxmlparam(statelines,'VZ unit'))
-    #print(posstart,posstop,velstart,velstop)
-    #print(statelines[posstart:posstop])
-    #print(statelines[velstart:velstop])
-    
-orbinfo=open('precise_orbtiming','w')
-orbinfo.write(str(len(time))+'\n')
-for i in range(len(time)):
-    orbinfo.write(str(time[i])+' '+str(x[i])+' '+str(y[i])+' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+' 0.0 0.0 0.0')
-    orbinfo.write('\n')
-orbinfo.close()
-sys.exit(0)
+    orbinfo = open(outputfile,'w')
+    orbinfo.write(str(len(time))+'\n')
+    for i in range(len(time)):
+        orbinfo.write(str(time[i])+' '+str(x[i])+' '+str(y[i])+' '+str(z[i])+\
+                ' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+' 0.0 0.0 0.0')
+        orbinfo.write('\n')
+    orbinfo.close()

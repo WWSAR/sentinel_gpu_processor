@@ -8,6 +8,12 @@ import glob
 import subprocess
 import shutil
 from datetime import datetime
+from typing import Literal, Sequence
+
+from s1proc._log import setup_logger, set_logging_level
+from s1proc.sario import sentinel_acq_time, sentinel_parser
+from s1proc.sentinel_scene import sentinel_scene 
+logger = setup_logger(name = __name__, level = 'INFO')
 
 def parse_orbitfilename(orbitfilelist):
     start_date = []
@@ -22,89 +28,79 @@ def parse_orbitfilename(orbitfilelist):
         end_date.append(datetime.strptime(end_date_str,"%Y%m%d"))
     return start_date,end_date
 
-if len(sys.argv) < 1:
-    print('Usage: sentinel_stack.py')
-
-print('Processing stack of sentinel geotiff products to coregistered geocoded slcs')
-
-# get the PATH of the script directory
-PATH=os.path.dirname(os.path.abspath(sys.argv[0]))
-
-# Create a 'params' file
-params=open('params','w')
-p1 = os.path.join(os.getcwd(),'elevation.dem')
-p2 = os.path.join(os.getcwd(),'elevation.dem.rsc')
-params.write(p1+'\n')
-params.write(p2+'\n')
-params.close()
-print('DEM file set to elevation.dem')
-print('RSC file set to elevation.dem.rsc')
-
-# get list of geotiff products
-zips = glob.glob('*.zip')
-
-print('zip_files: ',zips)
-
-# get the precise orbit files
-preciseorbitlist = glob.glob('*.EOF')
-with open('preciseorbitfiles','w') as f:
-    f.write('\n'.join(preciseorbitlist))
-
-print('Precise orbit list:')
-print(preciseorbitlist)
-start_date,end_date = parse_orbitfilename(preciseorbitlist)
-norbit = len(preciseorbitlist)
-
-# loop over directories and process each with sentinel_scene.py
-#   sentinel_scene needs zip_file and precise orbit if available
-for ifile,zip_file in enumerate(zips):
-    #  which precise orbit file for this scene?
-    print('zip_file: ',zip_file)
-    geofile = zip_file.replace('zip','SAFE.geo')
-    #if os.path.exists(geofile):
-        #print('geo_file exists')
-        #continue
-        #try:
-        #    os.remove(zip_file)
-        #except Exception as e:
-        #    print(e)
-        #try:
-        #    shutil.rmtree(zip_file.replace('zip','SAFE'))
-        #except Exception as e:
-        #    print(e)
-        #continue
-    # Finding the date of acqusition following the namign rule
-    char1= 13
-    char2= 12
-    scenedate=zip_file[char1+4:char1+char2]
+def stack(
+        data_dir: str = '.',
+        eof_dir: str = '.',
+        demfile: str = 'elevation.dem',
+        rscfile: str = 'elevation.dem.rsc',
+        polarization: Literal['hh','hv','vh','vv'] = 'vv',
+        subswath_list: Sequence[int] = [1,2,3],
+        rm_zipfile: bool = False,
+        rm_folder: bool = False,
+        reprocess: bool = False):
+    """
+    Process a stack of sentinel products to coregistered geocoded SLCS
     
-    current_date = datetime.strptime(scenedate,"%Y%m%d")
-    #doy=datetime.strptime(scenedate, '%Y%m%d').timetuple().tm_yday
-    #year=scenedate[0:4]   # day of year and year for scene
-    #print('doy ',doy,' ',year)
-    #if doy > 1:
-    #    orbitfilestartdate = datetime.strptime(year+' '+str(doy-1),'%Y %j').strftime('%Y%m%d')
-    #else:
-    #    lastdoy=datetime.strptime(str(int(year)-1)+'1231', '%Y%m%d').timetuple().tm_yday
-    #    orbitfilestartdate = datetime.strptime(str(int(year)-1)+' '+str(lastdoy),'%Y %j').strftime('%Y%m%d')
-    #print('orbit file start date: ',orbitfilestartdate)
-    #orbitfilecandidates = [s for s in preciseorbitlist if ('V'+orbitfilestartdate) in s]
-    #orbitfilename = orbitfilecandidates[0]
-    orbitfilename = None
-    for j in range(norbit):
-        if start_date[j] <= current_date and end_date[j] >= current_date:
-            orbitfilename = preciseorbitlist[j]
-            print('Precise orbit file found:', orbitfilename)
-            break
-    sentinel_scene = os.path.join(PATH, 'sentinel_scene.py')
+    Parameters
+    ----------
+    data_dir: str
+        Data folder of Sentinel-1 zipfiles
+    eof_dir: str
+        Data folder of precise orbit EOF files
+    demfile: str
+        DEM file
+    rscfile: str
+        rsc file
+    polarization: Literal
+        Polarization to process
+    subswath_list: Sequence[int]
+        Subswaths to process 
+    rm_zipfile: bool
+        Remove the zipfile after image processing is done
+    rm_folder: bool
+        Remove the unzipped folder after image processing is done
+    reprocess: bool
+        Reprocess the geo file if it already exists
+    """
 
-    if orbitfilename is None:
-        print(f'Cannot find a precise orbit file for {zip_file}')
-        command='python '+sentinel_scene+' '+zip_file
-    else:
-        command='python '+sentinel_scene+' '+zip_file+' '+orbitfilename
+    # Create a 'params' file
+    params=open('params','w')
+    params.write(demfile+'\n')
+    params.write(rscfile+'\n')
+    params.close()
+    #print('DEM file set to elevation.dem')
+    #print('RSC file set to elevation.dem.rsc')
 
-    print(command)
-    ret = subprocess.check_call(command, shell=True)
+    # get list of geotiff products
+    zips = glob.glob(os.path.join(data_dir,'*.zip'))
+    # get the precise orbit files
+    preciseorbitlist = glob.glob(os.path.join(eof_dir,'*.EOF'))
+    with open('preciseorbitfiles','w') as f:
+        f.write('\n'.join(preciseorbitlist))
+    start_date,end_date = parse_orbitfilename(preciseorbitlist)
+    norbit = len(preciseorbitlist)
 
-print('Loop over scenes complete.')
+    # loop over directories and process each with sentinel_scene.py
+    # sentinel_scene needs zip_file and precise orbit if available
+    for ifile,zip_file in enumerate(zips):
+        #  which precise orbit file for this scene?
+        logger.info(f'Processing {zip_file}')
+        sent = sentinel_parser(zip_file)
+        geofile = sent['start_time'][0:8] + '.geo'
+        if os.path.exists(geofile):
+            if reprocess:
+                os.remove(geofile)
+            else:
+                logger.warning(f'{geofile} exists')
+                continue
+
+        # Finding the date of acqusition following the naming rule
+        current_date = sentinel_acq_time(zip_file)
+        for j in range(norbit):
+            if start_date[j] <= current_date and end_date[j] >= current_date:
+                orbitfilename = preciseorbitlist[j]
+                logger.info(f'Precise orbit file found: {orbitfilename}')
+                break
+        sentinel_scene(zip_file, orbitfilename, polarization,
+                subswath_list, rm_zipfile, rm_folder)
+    logger.info('Loop over scenes complete.')
