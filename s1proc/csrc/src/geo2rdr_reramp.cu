@@ -251,7 +251,8 @@ int geo2rdr_reramp(const std::string &dbname,
         std::size_t line_end = line_start + batch_lines;
         line_end = line_end < demrsc.nlat ? line_end : demrsc.nlat;
         std::size_t nlines = line_end - line_start;
-        readdem(demfile,line_start*demrsc.nlon,nlines*demrsc.nlon,dem);
+        read_binary<short int>(demfile,line_start*demrsc.nlon,
+                nlines*demrsc.nlon,dem);
         cudaMemcpy(d_dem,dem,sizeof(short int)*nlines*demrsc.nlon,
                 cudaMemcpyHostToDevice);
         numBlocks = (nlines*demrsc.nlon+blockSize-1)/blockSize;
