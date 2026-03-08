@@ -1,5 +1,8 @@
-#include <iostream>
+#include <algorithm>
+#include <complex>
+#include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 #include "sario.hpp"
@@ -54,13 +57,6 @@ rsc readrsc(const std::string& rscfile){
 }
 
 void save_float(float *img,
-                const std::size_t n,
-                const std::string& imgfile){
-    save_float(img,false,n,imgfile);
-    return; 
-}
-
-void save_float(float *img,
                 bool append,
                 const std::size_t n,
                 const std::string& imgfile){
@@ -79,10 +75,10 @@ void save_float(float *img,
     return; 
 }
 
-void save_double(double *img,
+void save_float(float *img,
                 const std::size_t n,
                 const std::string& imgfile){
-    save_double(img,false,n,imgfile);
+    save_float(img,false,n,imgfile);
     return; 
 }
 
@@ -106,10 +102,11 @@ void save_double(double *img,
     return; 
 }
 
-void save_int(int *img,
+void save_double(double *img,
                 const std::size_t n,
                 const std::string& imgfile){
-    save_int(img,false,n,imgfile);
+    save_double(img,false,n,imgfile);
+    return; 
 }
 
 void save_int(int *img,
@@ -133,6 +130,12 @@ void save_int(int *img,
 }
 
 void save_int(int *img,
+                const std::size_t n,
+                const std::string& imgfile){
+    save_int(img,false,n,imgfile);
+}
+
+void save_int(int *img,
               const std::size_t toskip,
               const std::size_t n,
               const std::string& imgfile){
@@ -149,18 +152,11 @@ void save_int(int *img,
 }
 
 void readdem(const std::string& imgfile, 
-             const std::size_t n,
-             short int *dem){
-    readdem(imgfile,0,n,dem);
-    return;
-}
-
-void readdem(const std::string& imgfile, 
              const std::size_t toskip,
              const std::size_t n,
              short int *dem){
     std::ifstream fin(imgfile, std::ios::binary);
-    std::cout << "dem to skip: " << toskip << std::endl;
+    //std::cout << "dem to skip: " << toskip << std::endl;
     fin.seekg(toskip*sizeof(short int),std::ios::beg);
     if (!fin){
         printf("File %s does not exist.\n",imgfile.c_str());
@@ -171,12 +167,13 @@ void readdem(const std::string& imgfile,
     return;
 }
 
-void read_int(const std::string& imgfile, 
-                const std::size_t n,
-                int *img){
-    read_int(imgfile,0,n,img);
+void readdem(const std::string& imgfile, 
+             const std::size_t n,
+             short int *dem){
+    readdem(imgfile,0,n,dem);
     return;
 }
+
 
 void read_int(const std::string& imgfile, 
               const std::size_t toskip,
@@ -193,11 +190,10 @@ void read_int(const std::string& imgfile,
     return;
 }
 
-
-void read_float(const std::string& imgfile, 
+void read_int(const std::string& imgfile, 
                 const std::size_t n,
-                float *img){
-    read_float(imgfile,0,n,img);
+                int *img){
+    read_int(imgfile,0,n,img);
     return;
 }
 
@@ -216,10 +212,10 @@ void read_float(const std::string& imgfile,
     return;
 }
 
-void read_double(const std::string& imgfile, 
+void read_float(const std::string& imgfile, 
                 const std::size_t n,
-                double *img){
-    read_double(imgfile,0,n,img);
+                float *img){
+    read_float(imgfile,0,n,img);
     return;
 }
 
@@ -235,6 +231,13 @@ void read_double(const std::string& imgfile,
     }
     fin.read((char *)img, sizeof(double)*n);
     fin.close();
+    return;
+}
+
+void read_double(const std::string& imgfile, 
+                const std::size_t n,
+                double *img){
+    read_double(imgfile,0,n,img);
     return;
 }
 
@@ -297,13 +300,6 @@ void save_cpx(Complex *img,
 }
 
 void save_cpx(Complex *img,
-              const std::size_t n,
-              const std::string& imgfile){
-    save_cpx(img,false,n,imgfile);
-    return; 
-}
-
-void save_cpx(Complex *img,
               const std::size_t toskip,
               const std::size_t n,
               const std::string& imgfile){
@@ -322,6 +318,13 @@ void save_cpx(Complex *img,
     fout.write((char*) imgbuffer, sizeof(float)*n*2);
     fout.close();
     free(imgbuffer);
+    return; 
+}
+
+void save_cpx(Complex *img,
+              const std::size_t n,
+              const std::string& imgfile){
+    save_cpx(img,false,n,imgfile);
     return; 
 }
 
@@ -366,4 +369,71 @@ void read_param_file(const std::string& fname,
     fin >> rsc_fname;
     fin.close();
     return;
+}
+
+void read_and_resample(
+        const std::string& filename,
+        Complex* dst,
+        const int left_dst,
+        const int top_dst,
+        const int right_dst,
+        const int bottom_dst,
+        const int row_begin,
+        const int row_end)
+{
+    std::ifstream fin(filename, std::ios::binary);
+    if (!fin)
+        throw std::runtime_error("Cannot open file");
+
+    /* read header */
+    int32_t head[64];
+    fin.read(reinterpret_cast<char*>(head), sizeof(head));
+
+    //int nrow0 = head[0];
+    //int ncol0 = head[1];
+
+    int left_src   = head[2];
+    int top_src    = head[3];
+    int right_src  = head[4];
+    int bottom_src = head[5];
+
+    int src_w = right_src - left_src;
+    //int src_h = bottom_src - top_src;
+
+    int dst_w = right_dst - left_dst;
+
+    const size_t header_bytes = 64 * sizeof(int32_t);
+
+    /* overlapping columns */
+    int overlap_left  = std::max(left_dst, left_src);
+    int overlap_right = std::min(right_dst, right_src);
+
+    if (overlap_left >= overlap_right)
+        return;
+
+    int copy_w = overlap_right - overlap_left;
+    int src_col0 = overlap_left - left_src;
+    int dst_col0 = overlap_left - left_dst;
+
+    for (int r = row_begin; r < row_end; ++r)
+    {
+        int global_row = top_dst + r;
+
+        if (global_row < top_src || global_row >= bottom_src)
+            continue;
+
+        int src_row = global_row - top_src;
+
+        size_t offset =
+            header_bytes +
+            ((size_t)src_row * src_w + src_col0) * sizeof(Complex);
+
+        fin.seekg(offset, std::ios::beg);
+
+        fin.read(reinterpret_cast<char*>(
+                 dst + (size_t)(r - row_begin)*dst_w + dst_col0),
+                 copy_w * sizeof(Complex));
+    }
+
+    fin.close();
 }

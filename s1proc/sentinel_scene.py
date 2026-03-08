@@ -175,8 +175,10 @@ def sentinel_scene(
         os.system(command)
 
         # and geocode/reramp the slave
-        outfile = acq_date+'.geo'
-        command = 'geo2rdr_reramp '+slavedb.strip()+' '+outfile
+        outfile = f'{acq_date}_iw{subswath}.geo'
+        overlapfile = f'{acq_date}_iw{subswath}_overlap.geo'
+        command = 'geo2rdr_reramp '+slavedb.strip()+' '+outfile + ' ' + \
+                  overlapfile
         logger.info(command)
         os.system(command)
 
