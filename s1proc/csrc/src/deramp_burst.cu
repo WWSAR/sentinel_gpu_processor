@@ -199,8 +199,8 @@ int deramp(const std::string &dbname,
             etac[i] = -fnc[i]/ka[i];
             etaref[i] = etac[i] - etac[0];
         }
-        read_cpx(burstfile,iburst*nrange*lines_per_burst,nrange*lines_per_burst,
-                 burst);
+        read_binary<Complex>(burstfile,iburst*nrange*lines_per_burst,
+                nrange*lines_per_burst,burst);
         cudaMemcpy(d_burst,burst,sizeof(Complex)*nrange*lines_per_burst,
                    cudaMemcpyHostToDevice);
         cudaMemcpy(d_kt,kt,sizeof(double)*nrange,cudaMemcpyHostToDevice);
@@ -218,11 +218,15 @@ int deramp(const std::string &dbname,
                    sizeof(double)*nrange*lines_per_burst,
                    cudaMemcpyDeviceToHost);
         if (iburst == 0){
-            save_cpx(burst,false,nrange*lines_per_burst,burstoutfile);
-            save_double(deramp_phase,false,nrange*lines_per_burst,deramp_phase_file);
+            save_binary<Complex>(burst,false,nrange*lines_per_burst,
+                    burstoutfile);
+            save_binary<double>(deramp_phase,false,nrange*lines_per_burst,
+                    deramp_phase_file);
         }else{
-            save_cpx(burst,true,nrange*lines_per_burst,burstoutfile);
-            save_double(deramp_phase,true,nrange*lines_per_burst,deramp_phase_file);
+            save_binary<Complex>(burst,true,nrange*lines_per_burst,
+                    burstoutfile);
+            save_binary<double>(deramp_phase,true,nrange*lines_per_burst,
+                    deramp_phase_file);
         }
     }
 
@@ -261,6 +265,7 @@ int deramp(const std::string &dbname,
 int main(int argc, char *argv[]){
     if (argc<3){
         std::cout << "Usage: deramp_burst dbname burstfile" << std::endl;
+        return 0;
     }
     const std::string dbname = std::string(argv[1]);
     const std::string burstfile = std::string(argv[2]);

@@ -14,7 +14,8 @@ void upper(std::string &s){
     std::transform(s.begin(),s.end(),s.begin(),::toupper);
 }
 
-std::vector<std::string> get_param(sqlite3* db, const std::string& tblname, const std::string& name) {
+std::vector<std::string> get_param(
+        sqlite3* db, const std::string& tblname, const std::string& name) {
     std::string trimmed_name = name;
     
     // Trim spaces and convert to upper case (mimicking Python's strip and upper)
