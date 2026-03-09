@@ -61,6 +61,8 @@ def sentinel_scene(
     logger.debug(f'input orbit file: {orbfile}')
 
     sent = sentinel_parser(zip_file)
+    mission_id = sent['mission_id']
+    unique_id = sent['unique_id']
     acq_date = sent['start_time'][0:8]
     data_dir = os.path.join(proc_dir, zip_file.replace('.zip','.SAFE'))
     os.makedirs(slc_dir, exist_ok = True)
@@ -190,11 +192,11 @@ def sentinel_scene(
 
         # and geocode/reramp the slave
         main_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_iw{subswath}_main.geo')
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_main.geo')
         sec_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_iw{subswath}_sec.geo')
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
         compress_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_iw{subswath}.geo')
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.geo')
         command = 'geo2rdr_reramp '+slavedb.strip()+' '+ ' ' + deramp_phase_file + \
                 ' ' + main_slc_file + ' ' + sec_slc_file
         logger.info(command)
