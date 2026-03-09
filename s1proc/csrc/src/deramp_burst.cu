@@ -56,7 +56,8 @@ __global__ void deramp_burst(
 }
 
 int deramp(const std::string &dbname,
-            const std::string &burstfile){
+           const std::string &burstfile,
+           const std::string &deramp_phase_file){
     sqlite3 *db; // database that stores relevant paramters
 
     // open the database
@@ -72,7 +73,7 @@ int deramp(const std::string &dbname,
     double radar_frequency,slant_range_time;
     const std::string tblname = "file";
     std::string fmratefile, dcfile, orbfile;
-    std::string burstoutfile, deramp_phase_file;
+    std::string burstoutfile;
     double *startime; 
     int *first_valid_line, *last_valid_line;
     double *eta, *ka, *kt, *etac, *fnc, *etaref;
@@ -84,7 +85,6 @@ int deramp(const std::string &dbname,
     Complex *burst, *d_burst;
 
     burstoutfile = burstfile+".deramp";
-    deramp_phase_file = "deramp_phase";
     nrange = get_parami(db,tblname,"samplesPerBurst");
     lines_per_burst = get_parami(db,tblname,"linesPerBurst");
     azimuth_bursts = get_parami(db,tblname,"azimuthBursts");
@@ -263,12 +263,14 @@ int deramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
-    if (argc<3){
-        std::cout << "Usage: deramp_burst dbname burstfile" << std::endl;
+    if (argc<4){
+        std::cout << "Usage: deramp_burst dbname burstfile deramp_phase_file"
+            << std::endl;
         return 0;
     }
     const std::string dbname = std::string(argv[1]);
     const std::string burstfile = std::string(argv[2]);
-    deramp(dbname,burstfile);
+    const std::string deramp_phase_file = std::string(argv[3]);
+    deramp(dbname,burstfile,deramp_phase_file);
     return 0;
 }

@@ -65,13 +65,10 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
             res.x = 0;
             res.y = 0;
             outdata[i] = zero;
+            overlapdata[i] = zero; 
         }
         if (lat > burst_latmax || lat < burst_latmin ||
             lon > burst_lonmax || lon < burst_lonmin){
-            if (!written){
-                outdata[i] = zero;
-                overlapdata[i] = zero; 
-            }
             continue;
         }
         if (res.x != 0 || res.y !=0){
@@ -142,6 +139,7 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
 }
 
 int geo2rdr_reramp(const std::string &dbname,
+                   const std::string &deramp_phase_file,
                    const std::string &slcoutfile,
                    const std::string &overlapfile,
                    std::string &slcinfile){
@@ -154,7 +152,7 @@ int geo2rdr_reramp(const std::string &dbname,
     }
     // database table name
     const std::string tblname = "file";
-    std::string orbfile, demfile, demrscfile;
+    std::string orbfile, demfile, rscfile;
     std::size_t nstatvec, burstsize;
     rsc demrsc;
     int azimuth_bursts, lines_per_burst, nrange, blockSize=256, numBlocks;
@@ -170,6 +168,8 @@ int geo2rdr_reramp(const std::string &dbname,
     double *deramp_phase, *d_deramp_phase; 
     bool written;
 
+    demfile = get_params(db, tblname, "demfile");
+    rscfile = get_params(db, tblname, "rscfile");
     nrange = get_parami(db,tblname,"samplesPerBurst");
     lines_per_burst = get_parami(db,tblname,"linesPerBurst");
     azimuth_bursts = get_parami(db,tblname,"azimuthBursts");
@@ -214,19 +214,8 @@ int geo2rdr_reramp(const std::string &dbname,
         std::cerr << "Can't close database: " << sqlite3_errmsg(db) << std::endl;
         return -1;
     }
-    read_param_file("params",demfile,demrscfile);
-    //std::cout << "dem file: " << demfile << std::endl;
-    //std::cout << "rsc file: " << demrscfile << std::endl;
-    demrsc = readrsc(demrscfile);
-    //std::cout << "dem parameters" << std::endl;
-    //std::cout << "latmax: " << demrsc.latmax << std::endl;
-    //std::cout << "lonmin: " << demrsc.lonmin << std::endl;
-    //std::cout << "nlat: " << demrsc.nlat << std::endl;
-    //std::cout << "nlon: " << demrsc.nlon << std::endl;
-    //std::cout << "dlat: " << demrsc.dlat << std::endl;
-    //std::cout << "dlon: " << demrsc.dlon << std::endl;
+    demrsc = readrsc(rscfile);
     read_orbit_ascii(orbfile,nstatvec,&tt,&xx,&vv);
-    //std::cout << "orbfile: " << orbfile << std::endl;
     outdata = (Complex*)malloc(sizeof(Complex)*demrsc.nlon*batch_lines);
     overlapdata = (Complex*)malloc(sizeof(Complex)*demrsc.nlon*batch_lines);
     dem = (short int*)malloc(sizeof(short int)*demrsc.nlon*batch_lines);
@@ -278,7 +267,7 @@ int geo2rdr_reramp(const std::string &dbname,
 
             read_binary<Complex>(slcinfile,iburst*burstsize,burstsize,
                     burstdata);
-            read_binary<double>("deramp_phase",iburst*burstsize,burstsize,
+            read_binary<double>(deramp_phase_file,iburst*burstsize,burstsize,
                     deramp_phase);
 
             // calculate lat/lon bnoudaries of current burst
@@ -341,18 +330,19 @@ int geo2rdr_reramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
-    if (argc<4){
-        std::cout << "Usage: geo2rdr_reramp dbname slcoutfile overlapfile " <<
-            "[slcinfile]" << std::endl;
+    if (argc<5){
+        std::cout << "Usage: geo2rdr_reramp dbname deramp_phase_file " <<
+            "slcoutfile overlapfile [slcinfile]" << std::endl;
         return 0;
     }
     const std::string dbname = std::string(argv[1]);
-    const std::string slcoutfile = std::string(argv[2]);
-    const std::string overlapfile = std::string(argv[3]);
+    const std::string deramp_phase_file = std::string(argv[2]);
+    const std::string slcoutfile = std::string(argv[3]);
+    const std::string overlapfile = std::string(argv[4]);
     std::string slcinfile = "";
-    if (argc>4){
-        slcinfile = std::string(argv[4]);
+    if (argc>5){
+        slcinfile = std::string(argv[5]);
     }
-    geo2rdr_reramp(dbname,slcoutfile,overlapfile,slcinfile);
+    geo2rdr_reramp(dbname,deramp_phase_file,slcoutfile,overlapfile,slcinfile);
     return 0;
 }
