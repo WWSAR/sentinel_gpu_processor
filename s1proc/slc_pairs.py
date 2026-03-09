@@ -6,7 +6,6 @@ import re
 import numpy as np
 import os
 import sys
-import tyro
 from pathlib import Path
 from datetime import datetime
 from typing import List
@@ -98,10 +97,15 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
     return bperp
 
 def create_slc_pair_list(
-        min_tbl:int = 0,
-        max_tbl:int = 30000,
-        min_sbl:int = 0,
-        max_sbl:int = 10000):
+        min_tbl: int = 0,
+        max_tbl: int = 30000,
+        min_sbl: int = 0,
+        max_sbl: int = 10000,
+        slc_dir: str = 'slc',
+        proc_dir: str = 'proc',
+        ifg_dir: str = 'igrams',
+        demfile: str = 'elevation.dem',
+        rscfile: str = 'elevation.dem.rsc'):
     """
     Create a list of SLC pairs for interferogram generation
 
@@ -115,21 +119,37 @@ def create_slc_pair_list(
         minimum temporal baseline threshold
     max_sbl: int
         maximum temporal baseline threshold
+    slc_dir: str
+        SLC directory
+    proc_dir: str
+        Directory storing auxilary parameters
+    ifg_dir: str
+        Directory storing interferograms
+    demfile: str
+        DEM file
+    rscfile: str
+        rsc file
     """
-    
-    # set dem and rsc files
-    demfile = os.path.join('..','elevation.dem')
-    rscfile = os.path.join('..','elevation.dem.rsc')
-    
+    os.makedirs(ifg_dir, exist_ok = True)
     # find all slc images in the parent directory
-    slc_list = glob.glob(os.path.join('..','*.geo'))
-    slc_list = np.sort(slc_list)
+    subswath_lists = []
+    for subswath in range(1,4):
+        subswath_list = glob.glob(os.path.join(slc_dir,f'*iw{subswath}*.geo'))
+        if len(subswath_list) > 0:
+            subswath_list = np.sort(subswath_list)
+            subswath_lists.append(subswath_list)
 
+    nsubswath = len(subswath_lists) 
+    if nsubswath == 0:
+        logger.warning('No SLC images were found.')
+        return
+
+    slc_list = list(zip(*subswath_lists))
     # create a list of all acquisition dates
     date_list = []
-    for slc_file in slc_list:
-        sent = sentinel_parser(slc_file)
-        date_str = sent['date']
+    for subswath_files in slc_list:
+        basename = os.path.basename(subswath_files[0])
+        date_str = basename[0:8]
         date_list.append(date_str)
     
     # create a dictionary mapping date to slcfiles
@@ -140,32 +160,45 @@ def create_slc_pair_list(
         else:
             slc_dict[date_str] = [slc_list[i]]
 
-    f = open('sbas_list','w')
+    f = open(os.path.join(ifg_dir,'subswath_list'),'w')
     unique_date_list = np.sort(np.unique(date_list))
     ndates = len(unique_date_list)
     for i in range(ndates-1):
         date_str_ref = unique_date_list[i]
         date_ref = datetime.strptime(date_str_ref,'%Y%m%d')
         slcs_ref = slc_dict[date_str_ref]
-        orbfile1 = slcs_ref[0].strip().replace('geo','orbtiming')
+        basename1 = os.path.basename(slcs_ref[0][0])
+        orbfile1 = os.path.join(proc_dir, basename1[0:8]+'.orbtiming')
         for j in range(i+1,ndates):
             date_str_sec = unique_date_list[j]
             date_sec = datetime.strptime(date_str_sec,'%Y%m%d')
             slcs_sec = slc_dict[date_str_sec]
-            orbfile2 = slcs_sec[0].strip().replace('geo','orbtiming')
+            basename2 = os.path.basename(slcs_sec[0][0])
+            orbfile2 = os.path.join(proc_dir, basename2[0:8]+'.orbtiming')
             tempbl = (date_sec-date_ref).days 
             if tempbl > max_tbl or tempbl < min_tbl:
                 continue
             bperp = estimatebaseline(orbfile1,orbfile2,demfile,rscfile)
             if np.abs(bperp) > max_sbl or np.abs(bperp) < min_sbl:
                 continue
-            if len(slcs_ref) != len(slcs_sec):
+            if len(slcs_ref) == 1:
+                for k in range(len(slcs_sec)):
+                    for j in range(nsubswath):
+                        f.write(f'{slcs_ref[0][j]} {slcs_sec[k][j]} ' + \
+                                f'{tempbl} {bperp}\n')
+            elif len(slcs_sec) == 1:
+                for k in range(len(slcs_ref)):
+                    for j in range(nsubswath):
+                        f.write(f'{slcs_ref[k][j]} {slcs_sec[0][j]} ' + \
+                                f'{tempbl} {bperp}\n')
+            elif len(slcs_ref) == len(slcs_sec):
+                for k in range(len(slcs_ref)):
+                    for j in range(nsubswath):
+                        f.write(f'{slcs_ref[k][j]} {slcs_sec[k][j]} ' + \
+                                f'{tempbl} {bperp}\n')
+            else:
                 logger.warning('Numbers of SLC images do not match for '
                         f'{date_str_ref} and {date_str_sec}, skipping')
-                continue
-            else:
-                for k in range(len(slcs_ref)):
-                    f.write(f'{slcs_ref[k]} {slcs_sec[k]} {tempbl} {bperp}\n')
     f.close()
 
 def mid_orbit(
@@ -186,6 +219,7 @@ def mid_orbit(
 
     Returns
     -------
+    mid_orb_file
         File name of the middle orbit
     """
     if orb_list is None:
@@ -200,5 +234,3 @@ def mid_orbit(
     logger.info(f'Middle orbit file: {mid_orb_file}')
     return mid_orb_file
 
-if __name__ == '__main__':
-    tyro.cli(create_slc_pair_list)
