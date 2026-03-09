@@ -43,7 +43,7 @@ for line in sbas:
     words=line.split()
     master=words[0]
     slave=words[1]
-#  get a short names for master and slave files
+    #  get a short names for master and slave files
     first=master.find('20')
     mastername=master[first:first+8]
     first=slave.find('20')

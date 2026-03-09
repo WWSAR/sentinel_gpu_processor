@@ -12,18 +12,23 @@ import zipfile
 from pathlib import Path
 from typing import Sequence
 
-from s1proc._log import setup_logger, set_logging_level
-from s1proc.sario import sentinel_parser 
 from s1proc import sql_mod
+from s1proc._log import setup_logger, set_logging_level
+from s1proc.sario import sentinel_parser, compress
+from s1proc.geocoordinates import GeoCoordinates
 from s1proc.precise_orbit import parse_orbit
 from s1proc.sentinel_roidb import create_db
 logger = setup_logger(name = __name__, level = 'INFO')
 
 def sentinel_scene(
         zip_file: str,
+        demfile: str,
+        rscfile: str,
         orbfile: str|None = None,
         polarization: str = 'vv',
         subswath_list: Sequence[int] = [1,2,3],
+        proc_dir: str = 'stack',
+        slc_dir: str = 'slc',
         rm_zipfile: bool = False,
         rm_folder: bool = False):
     """
@@ -33,29 +38,40 @@ def sentinel_scene(
     ----------
     zip_file: str
         Input zip file
+    demfile: str
+        DEM file
+    rscfile: str
+        rsc file
     orbfile: str|None
         Precise orbit file. If none, coarse orbit will be used
     polarization: str
         Polarization(s) to process
     subswath_list: Sequence[int]
         Subswaths to process
+    proc_dir: str
+        Directory to store temporary files
+    slc_dir: str        
+        Directory to store geocoded SLC files
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
         Remove the unzipped data folder after image processing is done
     """
-
     logger.info(f'Processing: {zip_file} to a geocoded SLC')
     logger.debug(f'input orbit file: {orbfile}')
 
     sent = sentinel_parser(zip_file)
     acq_date = sent['start_time'][0:8]
-    data_dir = zip_file.replace('.zip','.SAFE')
+    data_dir = os.path.join(proc_dir, zip_file.replace('.zip','.SAFE'))
+    os.makedirs(slc_dir, exist_ok = True)
 
     if not os.path.exists(data_dir):
         with zipfile.ZipFile(zip_file,'r') as zip_ref:
-            zip_ref.extractall('.')
+            zip_ref.extractall(proc_dir)
     logger.debug(f"Contents extracted to current folder")
+
+    # read image size
+    rsc = GeoCoordinates(rscfile)
 
     # first, preprocess the Sentinel products:
     #   1.  Get the number of subswaths
@@ -64,7 +80,6 @@ def sentinel_scene(
     #   4.  Rename and save the ancillary files needed for deramping the slc
     #   5.  Unpack the geotiff product into floating point slc
 
-    #  how many subswaths?
     swathfiles = []
     xmlfiles = []
     for subswath in sorted(subswath_list):
@@ -80,12 +95,6 @@ def sentinel_scene(
                 data_dir,
                 'annotation',
                 f'*iw{subswath}*{polarization}*.xml'))[0])
-    #with open('swathfiles','w') as f:
-    #    f.write('\n'.join(swathfiles))
-    #with open('xmlfiles','w') as f:
-    #    f.write('\n'.join(xmlfiles))
-
-    #  retrieve scene start and stop times from scene name
 
     #  loop over subswaths
     for ifile,fn in enumerate(swathfiles):
@@ -93,10 +102,11 @@ def sentinel_scene(
         #        file=swathfiles[ifile-1] # remove to go back to usual
         # create the orbtiming file, roi.db.X file with metadata, file table for each subswath
         subswath = subswath_list[ifile]
-        dbfname = f'{data_dir}.db.{subswath}'
-        orbfname = f'{data_dir}.orbtiming'
-        dcfname = f'{data_dir}.dcinfo.{subswath}'
-        fmratefname = f'{data_dir}.fmrateinfo.{subswath}'
+        dbfname = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.db')
+        orbfname = os.path.join(proc_dir, f'{acq_date}.orbtiming')
+        dcfname = os.path.join(proc_dir,f'{acq_date}_iw{subswath}.dcinfo')
+        fmratefname = os.path.join(proc_dir,
+                f'{acq_date}_iw{subswath}.fmrateinfo')
         create_db(data_dir, subswath, xmlfiles[ifile],
                 dbfname, orbfname, dcfname, fmratefname)
         con = sqlite3.connect(dbfname)
@@ -143,18 +153,24 @@ def sentinel_scene(
 
     if orbfile is not None:
         logger.debug('*** Using precise orbit ***')
-        parse_orbit(orbfile.strip(),zip_file)
+        parse_orbit(orbfile.strip(),zip_file,
+                os.path.join(proc_dir,f'{acq_date}.orbtiming'))
 
     # Now, process each subswath to a geocoded slc
     for ifile, fn in enumerate(swathfiles):
         subswath = subswath_list[ifile]
-        slavedb = data_dir.strip()+'.db.'+str(subswath)
+        slavedb = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.db')
+        deramp_phase_file = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.phase')
 
         # remove ramp, resample to lat lon, reinsert ramp
         #  save parameters in database file
         con = sqlite3.connect(slavedb.strip())
         # create a cursor
         c = con.cursor()  # update slc entry in database
+        sql_mod.add_param(c,'file','demfile')
+        sql_mod.add_param(c,'file','rscfile')
+        sql_mod.edit_param(c,'file','demfile',demfile,'-','char','DEM file')
+        sql_mod.edit_param(c,'file','rscfile',rscfile,'-','char','DEM file')
         sql_mod.add_param(c,'file','raw_slc_file')
         origslcfile = sql_mod.valuec(c,'file','slc_file')
         sql_mod.edit_param(c,'file','raw_slc_file',origslcfile,'-','char',
@@ -163,28 +179,35 @@ def sentinel_scene(
         sql_mod.edit_param(c,'file','slc_file',derampedslcfile,'-','char',
                 'deramped slc')
         rawslcfile = sql_mod.valuec(c,'file','raw_slc_file')
-        nrange = sql_mod.valuef(c,'file','samplesPerBurst')
-        nazimuth = sql_mod.valuef(c,'file','linesPerBurst')
         con.commit()
         c.close()
         con.close()
-        logger.info(f'nrange:{nrange}, nazimuth:{nazimuth}')
+
         # deramp the slave file
-        command='deramp_burst '+slavedb.strip()+' '+rawslcfile
+        command='deramp_burst '+slavedb.strip()+' '+rawslcfile+' '+deramp_phase_file
         logger.info(command)
         os.system(command)
 
         # and geocode/reramp the slave
-        outfile = f'{acq_date}_iw{subswath}.geo'
-        overlapfile = f'{acq_date}_iw{subswath}_overlap.geo'
-        command = 'geo2rdr_reramp '+slavedb.strip()+' '+outfile + ' ' + \
-                  overlapfile
+        main_slc_file = os.path.join(slc_dir,
+                f'{acq_date}_iw{subswath}_main.geo')
+        sec_slc_file = os.path.join(slc_dir,
+                f'{acq_date}_iw{subswath}_sec.geo')
+        compress_slc_file = os.path.join(slc_dir,
+                f'{acq_date}_iw{subswath}.geo')
+        command = 'geo2rdr_reramp '+slavedb.strip()+' '+ ' ' + deramp_phase_file + \
+                ' ' + main_slc_file + ' ' + sec_slc_file
         logger.info(command)
         os.system(command)
 
+        compress(main_slc_file, sec_slc_file, compress_slc_file,
+                 rsc.nlat, rsc.nlon)
         # remove the original slc files
+        os.remove(main_slc_file)
+        os.remove(sec_slc_file)
         os.remove(origslcfile)
         os.remove(derampedslcfile)
+        os.remove(deramp_phase_file)
         logger.info('Swath processed to common coordinates and coregistered.')
     # Clean up zip files to lessen disk space requirements
     if rm_zipfile:

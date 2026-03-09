@@ -123,7 +123,7 @@ int crossmul(const std::string &slcfile1,
              std::string intfile=""){
     // delcaration
     const int nheader = 64;
-    std::int32_t header_data1[nheader], header_data2[nheader];
+    std::int32_t header1[nheader], header2[nheader], ifg_header[nheader];
     Complex *slc1, *slc2, *ifglook;
     Complex *d_slc1, *d_slc2, *d_ifg, *d_ifg_collook, *d_ifglook;
     int batch_lines = 2000, blockSize=256, batch_sm;
@@ -147,19 +147,19 @@ int crossmul(const std::string &slcfile1,
     }
     std::cout << "output filename: " << intfile << std::endl;
     // read the header of the first image
-    read_binary<std::int32_t>(slcfile1, nheader, header_data1);
+    read_binary<std::int32_t>(slcfile1, nheader, header1);
     // read the header of the second image
-    read_binary<std::int32_t>(slcfile2, nheader, header_data2);
+    read_binary<std::int32_t>(slcfile2, nheader, header2);
     // read the parameters of the first image
-    left1 = header_data1[2];
-    top1 = header_data1[3];
-    right1 = header_data1[4];
-    bottom1 = header_data1[5];
+    left1 = header1[2];
+    top1 = header1[3];
+    right1 = header1[4];
+    bottom1 = header1[5];
     // read the parameters of the second image
-    left2 = header_data2[2];
-    top2 = header_data2[3];
-    right2 = header_data2[4];
-    bottom2 = header_data2[5];
+    left2 = header2[2];
+    top2 = header2[3];
+    right2 = header2[4];
+    bottom2 = header2[5];
     // determine the size of the interferogram 
     left = left1 < left2 ? left1 : left2;
     left = int(left / collook) * collook;
@@ -171,6 +171,13 @@ int crossmul(const std::string &slcfile1,
     bottom = int(bottom/rowlook)*rowlook;
     nrow = bottom - top;
     ncol = right - left;
+    // fill ifg_header
+    ifg_header[0] = int(header1[0] / rowlook);
+    ifg_header[1] = int(header1[1] / collook);
+    ifg_header[2] = int(left / collook);
+    ifg_header[3] = int(top / rowlook);
+    ifg_header[4] = int(right / collook);
+    ifg_header[5] = int(bottom / rowlook);
     
     nbatch = (nrow + batch_lines-1)/batch_lines;
     ncol_sm = ncol/collook;
@@ -213,9 +220,11 @@ int crossmul(const std::string &slcfile1,
         CHECK_CUDA(cudaMemcpy(ifglook,d_ifglook,sizeof(Complex)*nlines/rowlook*ncol_sm,
                    cudaMemcpyDeviceToHost));
         if(ibatch==0){
-            save_binary<Complex>(ifglook,false,nlines/rowlook*ncol_sm,intfile);
+            save_binary<Complex>(ifglook,nlines/rowlook*ncol_sm,ifg_header,
+                    nheader,intfile);
         }else{
-            save_binary<Complex>(ifglook,true,nlines/rowlook*ncol_sm,intfile);
+            save_binary<Complex>(ifglook,true,nlines/rowlook*ncol_sm,
+                    intfile);
         }
     }
 

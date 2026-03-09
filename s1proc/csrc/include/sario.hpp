@@ -123,4 +123,26 @@ void save_binary(
     save_binary<T>(img, false, n, imgfile);
 }
 
+template <typename T>
+void save_binary(
+        const T* img,
+        const std::size_t n,
+        const std::int32_t* header,
+        const std::size_t nheader,
+        const std::string& imgfile)
+{
+    std::ofstream fout;
+
+    fout.open(imgfile, std::ios::out | std::ios::binary);
+
+    if (!fout.is_open()) {
+        printf("Unable to open file %s\n", imgfile.c_str());
+        return;
+    }
+    fout.write(reinterpret_cast<const char*>(header),
+            sizeof(std::int32_t)*nheader);
+    fout.write(reinterpret_cast<const char*>(img), sizeof(T) * n);
+    fout.close();
+}
+
 #endif

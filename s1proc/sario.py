@@ -2,9 +2,295 @@ from datetime import datetime
 import glob
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
+from typing import List
 import numpy as np
 import os
 import re
+NHEAD = 64
+BLOCK = 512
+
+class CroppedImage:
+    def __init__(self, nrow0:int, ncol0:int, left:int, top:int, right:int,
+            bottom:int, data:np.ndarray|None|str):
+        """
+        Initialize a Cropped Image object
+
+        Parameters
+        ----------
+        nrow0, ncol0: int
+            Size of the original uncropped image
+        left, top, right, bottom: int
+            Bounds of the cropped image
+        data: np.ndarray|str|None
+            Data of the cropped image.
+            np.ndarray: fully loaded cropped image
+            str: filename of the cropped image
+            None: placeholder
+        """
+        self.nrow0 = nrow0
+        self.ncol0 = ncol0
+        self.left = left
+        self.top = top
+        self.right = right
+        self.bottom = bottom
+        self.data = data
+        self.nrow = bottom - top
+        self.ncol = right - left
+
+    @classmethod
+    def from_file(cls, filename: str, load_data: bool = False):
+        """
+        Initialize from a file
+
+        Parameters
+        ----------
+        filename: str
+            File storing the cropped image
+        load_data: bool
+            If true, load all data to the data field. Otherwise, the data
+            field is set to `filename`
+
+        Returns
+        -------
+        cls: CroppedImage
+            A CroppedImage object initalized from filename
+        """
+        with open(filename, 'rb') as f:
+            header = np.fromfile(f, count = NHEAD, dtype = np.int32)
+            nrow0 = header[0]
+            ncol0 = header[1]
+            left, top, right, bottom = \
+                    header[2], header[3], header[4], header[5]
+            nrow = bottom - top
+            ncol = right - left
+            if load_data:
+                data = np.fromfile(
+                        f, count = nrow * ncol, dtype = np.complex64)
+                data = np.reshape(data,(nrow, ncol))
+            else:
+                data = filename
+            return cls(nrow0, ncol0, left, top, right, bottom, data)
+
+    def resample(self, left:int, top:int, right:int, bottom:int):
+        """
+        Resample this cropped image to another (cropped) grid
+
+        Parameters
+        ----------
+        left, top, right, bottom: int
+            Bounds of the destination grid
+
+        Returns
+        -------
+        res: np.ndarray
+            Resampled image
+        """
+        if self.data is None or isinstance(self.data, str):
+            raise RuntimeError('Data are not loaded for this CroppedImage')
+        nrow_dst = bottom - top
+        ncol_dst = right - left
+        overlap_left = np.maximum(left, self.left)
+        overlap_right = np.minimum(right, self.right)
+        overlap_top = np.maximum(top, self.top)
+        overlap_bottom = np.minimum(bottom, self.bottom)
+        res = np.zeros((nrow_dst, ncol_dst), dtype = self.data.dtype)
+        res[overlap_top - top: overlap_bottom - top,
+            overlap_left - left: overlap_right - left] = \
+            self.data[overlap_top - self.top: overlap_bottom - self.top,
+                      overlap_left - self.left: overlap_right - self.left]
+        return res
+
+    def load_data(self, left:int, top:int, right:int, bottom:int):
+        """
+        Load part of the cropped image
+
+        Parameters
+        ----------
+        left, top, right, bottom: int
+            Bounds of the image to read
+
+        Returns
+        -------
+        res: np.ndarray|None
+            Loaded image, None if its data are not loaded and data file is not
+            specified
+        """
+        if isinstance(self.data, np.ndarray):
+            return self.resample(left, top, right, bottom)
+        elif isinstance(self.data, str):
+            # load part of the image from file
+            with open(self.data, 'rb') as f:
+                overlap_top = np.maximum(top, self.top)
+                overlap_bottom = np.minimum(bottom, self.bottom)
+                f.seek(NHEAD*4 + (overlap_top - self.top)*self.ncol*8)
+                d = np.fromfile(
+                        f, 
+                        count = (overlap_bottom - overlap_top)*self.ncol,
+                        dtype = np.complex64)
+                d = np.reshape(d, (overlap_bottom - overlap_top, self.ncol))
+            # create a new CroppedImage for image resampling
+            temp = CroppedImage(self.nrow0, self.ncol0, self.left,
+                    overlap_top, self.right, overlap_bottom, d)
+            return temp.resample(left, top, right, bottom)
+        return None
+
+    def __str__(self):
+        s = f'nrow0: {self.nrow0}\n' + \
+            f'ncol0: {self.ncol0}\n' + \
+            f'left: {self.left}\n' + \
+            f'top: {self.top}\n' + \
+            f'right: {self.right}\n' + \
+            f'bottom: {self.bottom}\n' + \
+            f'nrow: {self.nrow}\n' + \
+            f'ncol: {self.ncol}'
+        return s
+
+class Subswath:
+    def __init__(self, main:CroppedImage, sec:List[CroppedImage]):
+        self.main = main
+        self.sec = sec
+        self.nrow0 = main.nrow0
+        self.ncol0 = main.ncol
+        self.left = main.left
+        self.top = main.top
+        self.right = main.right
+        self.bottom = main.bottom
+
+    @classmethod
+    def from_file(cls, filename:str,
+            load_main_data:bool = False):
+        """
+        Initialize a Subswath object from a file
+        
+        Parameters
+        ----------
+        input_file: str
+            Compressed subswath image
+        load_main_data: bool
+            If true, load the data of the main image, which can take a lot of
+            memory. Otherwise, use a placeholder instead.
+
+        Returns
+        ------
+        subswath: Subswath
+            Loaded subswath object
+        """
+        f = open(input_file, 'rb')
+        header = np.fromfile(f, count = NHEAD, dtype = np.int32)
+        nrow0 = header[0]
+        ncol0 = header[1]
+        left, main_top, right, main_bottom = \
+                header[2], header[3], header[4], header[5]
+        main_nrow = main_bottom - main_top
+        ncol = right - left
+        if load_main_data:
+            main_data = np.fromfile(
+                    f, count = main_nrow * ncol, dtype = np.complex64)
+            main_data = np.reshape(main_data,(main_nrow, ncol))
+        else:
+            main_data = input_file
+            f.seek(main_nrow * ncol * 8, 1)
+        main_img = CroppedImage(nrow0, ncol0, left, main_top, right,
+                main_bottom, main_data)
+        nstrip = header[6]
+        sec_imgs = []
+        for i in range(nstrip):
+            sec_top = header[7 + 2*i]
+            sec_bottom = header[8 + 2*i]
+            sec_nrow = sec_bottom - sec_top
+            sec_data = np.fromfile(f, count = sec_nrow * ncol, dtype = np.complex64)
+            sec_data = np.reshape(sec_data, (sec_nrow, ncol))
+            sec_img = CroppedImage(nrow0, ncol0, left, sec_top, right,
+                    sec_bottom, sec_data)
+            sec_imgs.append(sec_img)  
+        f.close()
+        subswath = cls(main_img, sec_imgs)
+        return subswath
+    
+    def __str__(self):
+        s = 'Main image:\n============\n' + self.main.__str__()
+        s = s + '\n\nSecondary images:'
+        for i, sec in enumerate(self.sec):
+            s = s + f'\n\nStrip No. {i+1}\n============\n' + sec.__str__()
+        return s
+
+def compress(
+        main_img_file: str,
+        sec_img_file: str,
+        outfile: str,
+        nrow: int,
+        ncol: int):
+    """
+    Compress a geocoded subswath by removing all-zero lines and columns
+
+    Parameters
+    ----------
+    main_img_file: str
+        Main image file
+    sec_img_file: str
+        Secondary image file only containing the radar image in areas where
+        adjacent burst overlap
+    outfile: str
+        Output image
+    nrow: int
+        Number of rows
+    ncol: int
+        Number of columns
+    """
+    header = np.zeros(NHEAD, dtype = np.int32) 
+    header[0] = nrow
+    header[1] = ncol
+    # compress the main image
+    main_img = np.memmap(main_img_file, dtype=np.complex64, mode="r",
+            shape=(nrow, ncol))
+    
+    # top
+    for top in range(nrow):
+        if np.any(np.abs(main_img[top,:]) != 0):
+            break
+    if top == nrow:
+        return
+    # bottom
+    for bottom in range(nrow-1, -1, -1):
+        if np.any(np.abs(main_img[bottom,:]) != 0):
+            bottom += 1
+            break
+    # left
+    for left in range(0, ncol, BLOCK):
+        sub = np.abs(main_img[:, left:left+BLOCK])
+        if np.any(sub != 0):
+            left += np.where(np.any(sub != 0, axis=0))[0][0]
+            break
+    # right
+    for right in range(ncol, 0, -BLOCK):
+        left_ = np.maximum(0, right - BLOCK)
+        sub = np.abs(main_img[:, left_:right])
+        if np.any(sub != 0):
+            right = left_ + np.where(np.any(sub != 0, axis = 0))[0][-1] + 1
+            break
+    header[2],header[3],header[4],header[5] = left, top, right, bottom
+
+    # compress the secondary image
+    sec_img = np.memmap(sec_img_file, dtype=np.complex64, mode="r",
+            shape=(nrow, ncol))
+    nonzero_rows = np.any(sec_img != 0, axis=1).astype(int)
+    p = np.pad(nonzero_rows, (1,1))       # add 0 at both ends
+    d = np.diff(p)
+    if np.all(d == 0):
+        nstrip = 0
+    else:
+        starts = np.where(d == 1)[0]
+        ends = np.where(d == -1)[0] - 1
+        nstrip = len(starts)
+    header[6] = nstrip
+    for i in range(nstrip):
+        header[7+2*i] = starts[i]
+        header[8+2*i] = ends[i] + 1
+    with open(outfile, 'wb') as f:
+        header.tofile(f)
+        main_img[top:bottom, left:right].tofile(f)
+        for i in range(nstrip):
+            sec_img[starts[i]:ends[i]+1,left:right].tofile(f)
 
 def sentinel_parser(filename):
     filename = os.path.split(filename)[-1]
@@ -101,19 +387,6 @@ def readslc(filename,nrg,rowstart=None,rowend=None,colstart=None,colend=None,
     slc = slc[:,colstart*2:colend*2:2] + 1j * slc[:,colstart*2+1:colend*2:2]
     return slc
 
-def readigram(filename,nrg):
-    igram = readslc(filename,nrg)
-    image1 = datetime.strptime(filename[0:8],'%Y%m%d')
-    image2 = datetime.strptime(filename[9:17],'%Y%m%d')
-    tempbl = (image2-image1).days
-    tempbl = (image2-image1).days
-    return {'dat':igram,'image1':image1,'image2':image2,'tempb':tempbl}
-
-def plotigram(igram):
-    phase = np.angle(igram['dat'])
-    plt.imshow(phase,vmin=-np.pi,vmax=np.pi)
-    plt.show()
-
 def saveslc(slc,filename):
     naz,nrg = slc.shape
     tosave = np.zeros((naz,nrg*2),dtype='float32')
@@ -122,14 +395,6 @@ def saveslc(slc,filename):
     f = open(filename,'w')
     tosave.tofile(f)
     f.close()
-
-def plotslc(slc):
-    amp = abs(slc)
-    cutmax = np.percentile(amp,99)
-    cutmin = np.percentile(amp,1)
-    amp = np.minimum(cutmax,np.maximum(cutmin,amp))
-    plt.imshow(amp,cmap='jet')
-    plt.show()
 
 def readc(f,nrg):
     data = np.fromfile(f,dtype='float32')
@@ -326,269 +591,4 @@ def bwr_cmap(n):
         c[:,i] = np.interp(xval,x,y[:,i])
     return c
 
-def ifg_cmap(n):
-    J = [0.9922,0.6914,0.6797,
-	0.9922,0.7031,0.6719,
-	0.9922,0.7070,0.6680,
-	0.9922,0.7148,0.6562,
-	0.9922,0.7227,0.6523,
-	0.9922,0.7266,0.6445,
-	0.9922,0.7383,0.6367,
-	0.9922,0.7422,0.6289,
-	0.9922,0.7539,0.6211,
-	0.9922,0.7578,0.6172,
-	0.9922,0.7617,0.6094,
-	0.9922,0.7734,0.6016,
-	0.9922,0.7773,0.5938,
-	0.9922,0.7891,0.5859,
-	0.9922,0.7930,0.5820,
-	0.9922,0.7969,0.5742,
-	0.9922,0.8086,0.5664,
-	0.9922,0.8125,0.5586,
-	0.9922,0.8242,0.5508,
-	0.9922,0.8281,0.5430,
-	0.9922,0.8398,0.5352,
-	0.9922,0.8438,0.5312,
-	0.9922,0.8477,0.5234,
-	0.9922,0.8594,0.5156,
-	0.9922,0.8633,0.5078,
-	0.9922,0.8750,0.5000,
-	0.9922,0.8789,0.4961,
-	0.9922,0.8828,0.4883,
-	0.9922,0.8945,0.4805,
-	0.9922,0.8984,0.4727,
-	0.9922,0.9102,0.4648,
-	0.9922,0.9141,0.4609,
-	0.9922,0.9180,0.4531,
-	0.9922,0.9297,0.4453,
-	0.9922,0.9336,0.4375,
-	0.9922,0.9453,0.4297,
-	0.9922,0.9492,0.4219,
-	0.9922,0.9531,0.4180,
-	0.9922,0.9648,0.4102,
-	0.9922,0.9688,0.4023,
-	0.9922,0.9805,0.3945,
-	0.9922,0.9844,0.3867,
-	0.9922,0.9883,0.3828,
-	0.9805,0.9922,0.3945,
-	0.9727,0.9922,0.3984,
-	0.9648,0.9922,0.4102,
-	0.9609,0.9922,0.4141,
-	0.9492,0.9922,0.4219,
-	0.9453,0.9922,0.4297,
-	0.9375,0.9922,0.4336,
-	0.9297,0.9922,0.4453,
-	0.9258,0.9922,0.4492,
-	0.9141,0.9922,0.4609,
-	0.9102,0.9922,0.4648,
-	0.9023,0.9922,0.4688,
-	0.8945,0.9922,0.4805,
-	0.8867,0.9922,0.4844,
-	0.8789,0.9922,0.4961,
-	0.8750,0.9922,0.5000,
-	0.8672,0.9922,0.5039,
-	0.8594,0.9922,0.5156,
-	0.8516,0.9922,0.5195,
-	0.8438,0.9922,0.5312,
-	0.8398,0.9922,0.5352,
-	0.8320,0.9922,0.5391,
-	0.8242,0.9922,0.5508,
-	0.8164,0.9922,0.5547,
-	0.8086,0.9922,0.5664,
-	0.8008,0.9922,0.5703,
-	0.7969,0.9922,0.5742,
-	0.7891,0.9922,0.5859,
-	0.7812,0.9922,0.5898,
-	0.7734,0.9922,0.6016,
-	0.7656,0.9922,0.6055,
-	0.7617,0.9922,0.6094,
-	0.7539,0.9922,0.6211,
-	0.7461,0.9922,0.6250,
-	0.7383,0.9922,0.6367,
-	0.7305,0.9922,0.6406,
-	0.7266,0.9922,0.6445,
-	0.7148,0.9922,0.6562,
-	0.7109,0.9922,0.6602,
-	0.7031,0.9922,0.6719,
-	0.6953,0.9922,0.6758,
-	0.6875,0.9922,0.6875,
-	0.6797,0.9922,0.6914,
-	0.6758,0.9922,0.6953,
-	0.6680,0.9922,0.7070,
-	0.6602,0.9922,0.7109,
-	0.6523,0.9922,0.7227,
-	0.6445,0.9922,0.7266,
-	0.6406,0.9922,0.7305,
-	0.6289,0.9922,0.7422,
-	0.6250,0.9922,0.7461,
-	0.6172,0.9922,0.7578,
-	0.6094,0.9922,0.7617,
-	0.6055,0.9922,0.7656,
-	0.5938,0.9922,0.7773,
-	0.5898,0.9922,0.7812,
-	0.5820,0.9922,0.7930,
-	0.5742,0.9922,0.7969,
-	0.5703,0.9922,0.8008,
-	0.5586,0.9922,0.8125,
-	0.5547,0.9922,0.8164,
-	0.5430,0.9922,0.8281,
-	0.5391,0.9922,0.8320,
-	0.5352,0.9922,0.8398,
-	0.5234,0.9922,0.8477,
-	0.5195,0.9922,0.8516,
-	0.5078,0.9922,0.8633,
-	0.5039,0.9922,0.8672,
-	0.5000,0.9922,0.8750,
-	0.4883,0.9922,0.8828,
-	0.4844,0.9922,0.8867,
-	0.4727,0.9922,0.8984,
-	0.4688,0.9922,0.9023,
-	0.4609,0.9922,0.9141,
-	0.4531,0.9922,0.9180,
-	0.4492,0.9922,0.9258,
-	0.4375,0.9922,0.9336,
-	0.4336,0.9922,0.9375,
-	0.4219,0.9922,0.9492,
-	0.4180,0.9922,0.9531,
-	0.4141,0.9922,0.9609,
-	0.4023,0.9922,0.9688,
-	0.3984,0.9922,0.9727,
-	0.3867,0.9922,0.9844,
-	0.3828,0.9922,0.9883,
-	0.3945,0.9883,0.9922,
-	0.4023,0.9805,0.9922,
-	0.4102,0.9727,0.9922,
-	0.4180,0.9648,0.9922,
-	0.4219,0.9609,0.9922,
-	0.4297,0.9531,0.9922,
-	0.4375,0.9453,0.9922,
-	0.4453,0.9375,0.9922,
-	0.4531,0.9297,0.9922,
-	0.4609,0.9258,0.9922,
-	0.4648,0.9180,0.9922,
-	0.4727,0.9102,0.9922,
-	0.4805,0.9023,0.9922,
-	0.4883,0.8945,0.9922,
-	0.4961,0.8867,0.9922,
-	0.5039,0.8789,0.9922,
-	0.5078,0.8750,0.9922,
-	0.5156,0.8672,0.9922,
-	0.5234,0.8594,0.9922,
-	0.5312,0.8516,0.9922,
-	0.5391,0.8438,0.9922,
-	0.5430,0.8398,0.9922,
-	0.5508,0.8320,0.9922,
-	0.5586,0.8242,0.9922,
-	0.5664,0.8164,0.9922,
-	0.5742,0.8086,0.9922,
-	0.5820,0.8008,0.9922,
-	0.5859,0.7969,0.9922,
-	0.5938,0.7891,0.9922,
-	0.6016,0.7812,0.9922,
-	0.6094,0.7734,0.9922,
-	0.6172,0.7656,0.9922,
-	0.6211,0.7617,0.9922,
-	0.6289,0.7539,0.9922,
-	0.6367,0.7461,0.9922,
-	0.6445,0.7383,0.9922,
-	0.6523,0.7305,0.9922,
-	0.6562,0.7266,0.9922,
-	0.6680,0.7148,0.9922,
-	0.6719,0.7109,0.9922,
-	0.6797,0.7031,0.9922,
-	0.6875,0.6953,0.9922,
-	0.6914,0.6914,0.9922,
-	0.7031,0.6797,0.9922,
-	0.7070,0.6758,0.9922,
-	0.7148,0.6680,0.9922,
-	0.7227,0.6602,0.9922,
-	0.7305,0.6523,0.9922,
-	0.7383,0.6445,0.9922,
-	0.7422,0.6406,0.9922,
-	0.7539,0.6289,0.9922,
-	0.7578,0.6250,0.9922,
-	0.7656,0.6172,0.9922,
-	0.7734,0.6094,0.9922,
-	0.7773,0.6055,0.9922,
-	0.7891,0.5938,0.9922,
-	0.7930,0.5898,0.9922,
-	0.8008,0.5820,0.9922,
-	0.8086,0.5742,0.9922,
-	0.8125,0.5703,0.9922,
-	0.8242,0.5586,0.9922,
-	0.8281,0.5547,0.9922,
-	0.8398,0.5430,0.9922,
-	0.8438,0.5391,0.9922,
-	0.8477,0.5352,0.9922,
-	0.8594,0.5234,0.9922,
-	0.8633,0.5195,0.9922,
-	0.8750,0.5078,0.9922,
-	0.8789,0.5039,0.9922,
-	0.8828,0.5000,0.9922,
-	0.8945,0.4883,0.9922,
-	0.8984,0.4844,0.9922,
-	0.9102,0.4727,0.9922,
-	0.9141,0.4688,0.9922,
-	0.9180,0.4648,0.9922,
-	0.9297,0.4531,0.9922,
-	0.9336,0.4492,0.9922,
-	0.9453,0.4375,0.9922,
-	0.9492,0.4336,0.9922,
-	0.9531,0.4297,0.9922,
-	0.9648,0.4180,0.9922,
-	0.9688,0.4141,0.9922,
-	0.9805,0.4023,0.9922,
-	0.9844,0.3984,0.9922,
-	0.9961,0.3867,0.9922,
-	0.9922,0.3867,0.9844,
-	0.9922,0.3945,0.9805,
-	0.9922,0.4023,0.9688,
-	0.9922,0.4102,0.9648,
-	0.9922,0.4180,0.9531,
-	0.9922,0.4219,0.9492,
-	0.9922,0.4297,0.9453,
-	0.9922,0.4375,0.9336,
-	0.9922,0.4453,0.9297,
-	0.9922,0.4531,0.9180,
-	0.9922,0.4609,0.9141,
-	0.9922,0.4648,0.9102,
-	0.9922,0.4727,0.8984,
-	0.9922,0.4805,0.8945,
-	0.9922,0.4883,0.8828,
-	0.9922,0.4961,0.8789,
-	0.9922,0.5000,0.8750,
-	0.9922,0.5078,0.8633,
-	0.9922,0.5156,0.8594,
-	0.9922,0.5234,0.8477,
-	0.9922,0.5312,0.8438,
-	0.9922,0.5352,0.8398,
-	0.9922,0.5430,0.8281,
-	0.9922,0.5508,0.8242,
-	0.9922,0.5586,0.8125,
-	0.9922,0.5664,0.8086,
-	0.9922,0.5742,0.7969,
-	0.9922,0.5820,0.7930,
-	0.9922,0.5859,0.7891,
-	0.9922,0.5938,0.7773,
-	0.9922,0.6016,0.7734,
-	0.9922,0.6094,0.7617,
-	0.9922,0.6172,0.7578,
-	0.9922,0.6211,0.7539,
-	0.9922,0.6289,0.7422,
-	0.9922,0.6367,0.7383,
-	0.9922,0.6445,0.7266,
-	0.9922,0.6523,0.7227,
-	0.9922,0.6562,0.7148,
-	0.9922,0.6680,0.7070,
-	0.9922,0.6719,0.7031,
-	0.9922,0.6797,0.6914,
-	0.9922,0.6914,0.6797]
-    J = np.array(J)
-    J = np.reshape(J,(256,3))
-    c = np.ones((n,4))
-    for i in range(3):
-        c[:,i] = np.interp(np.linspace(0,1,n),np.linspace(0,1,256),J[:,i])
-    return c
-
-ifgcmap = ListedColormap(ifg_cmap(256))
 bwrcmap = ListedColormap(bwr_cmap(256))
