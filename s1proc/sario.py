@@ -100,7 +100,8 @@ class CroppedImage:
                       overlap_left - self.left: overlap_right - self.left]
         return res
 
-    def load_data(self, left:int, top:int, right:int, bottom:int):
+    def load_data(self, left:int = None, top:int = None, right:int = None, \
+            bottom:int = None):
         """
         Load part of the cropped image
 
@@ -115,6 +116,14 @@ class CroppedImage:
             Loaded image, None if its data are not loaded and data file is not
             specified
         """
+        if left is None:
+            left = 0
+        if top is None:
+            top = 0
+        if right is None:
+            right = self.ncol0
+        if bottom is None:
+            bottom = self.nrow0
         if isinstance(self.data, np.ndarray):
             return self.resample(left, top, right, bottom)
         elif isinstance(self.data, str):
@@ -164,7 +173,7 @@ class Subswath:
         
         Parameters
         ----------
-        input_file: str
+        filename: str
             Compressed subswath image
         load_main_data: bool
             If true, load the data of the main image, which can take a lot of
@@ -175,7 +184,7 @@ class Subswath:
         subswath: Subswath
             Loaded subswath object
         """
-        f = open(input_file, 'rb')
+        f = open(filename, 'rb')
         header = np.fromfile(f, count = NHEAD, dtype = np.int32)
         nrow0 = header[0]
         ncol0 = header[1]
@@ -188,7 +197,7 @@ class Subswath:
                     f, count = main_nrow * ncol, dtype = np.complex64)
             main_data = np.reshape(main_data,(main_nrow, ncol))
         else:
-            main_data = input_file
+            main_data = filename
             f.seek(main_nrow * ncol * 8, 1)
         main_img = CroppedImage(nrow0, ncol0, left, main_top, right,
                 main_bottom, main_data)
@@ -248,7 +257,7 @@ def compress(
     for top in range(nrow):
         if np.any(np.abs(main_img[top,:]) != 0):
             break
-    if top == nrow:
+    if top == nrow-1:
         return
     # bottom
     for bottom in range(nrow-1, -1, -1):
