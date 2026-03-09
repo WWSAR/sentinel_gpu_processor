@@ -45,9 +45,7 @@ def timeinseconds(timestring):
     secs=dt.hour*3600+dt.minute*60+dt.second+dt.microsecond/1000000.0
     return dt,secs
 
-def parse_orbit(orbfile, zipfile, outputfile = None):
-    if outputfile is None:
-        outputfile = zipfile.replace('.zip','.SAFE.orbtiming')
+def parse_orbit(orbfile, zipfile, outputfile):
     sent = sentinel_parser(zipfile)
     # expand start and stop times by 10 seconds
     start_time = sent['start_time']-timedelta(seconds=10)
