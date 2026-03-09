@@ -16,9 +16,11 @@ def main()->int:
     from s1proc.slc_pairs import create_slc_pair_list
     from s1proc.slc_pairs import mid_orbit
     from s1proc.stitch import main as stitch_ifg
+    from s1proc.interfere import interfere
     from s1proc.sentinel_stack import stack as stack
     tyro.extras.subcommand_cli_from_dict(
         {
+            "interfere": interfere,
             "slcpairs": create_slc_pair_list,
             "stitch": stitch_ifg,
             "midorb": mid_orbit,
