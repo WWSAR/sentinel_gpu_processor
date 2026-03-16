@@ -80,7 +80,7 @@ def valuef(c,tblname,name):
         print("Parameter '"+name+"' not found")
 
 def valuei(c,tblname,name):
-    # return float value of a parameter in database table
+    # return int value of a parameter in database table
     name = name.strip() #trim spaces, upper case
     try:
         c.execute("select name,value,units,type,comments from "+tblname+\
@@ -91,7 +91,7 @@ def valuei(c,tblname,name):
         print("Parameter '"+name+"' not found")
 
 def valuec(c,tblname,name):
-    # return float value of a parameter in database table
+    # return string value of a parameter in database table
     name = name.strip() #trim spaces, upper case
     try:
         c.execute("select name,value,units,type,comments from "+tblname+\
