@@ -14,11 +14,138 @@ from typing import Sequence
 
 from s1proc import sql_mod
 from s1proc._log import setup_logger, set_logging_level
-from s1proc.sario import sentinel_parser, compress
 from s1proc.geocoordinates import GeoCoordinates
+from s1proc.orbit import rah2ll
 from s1proc.precise_orbit import parse_orbit
+from s1proc.sario import sentinel_parser, compress
 from s1proc.sentinel_roidb import create_db
 logger = setup_logger(name = __name__, level = 'INFO')
+SOL = 299792458.
+
+def clip_polygon_with_rect(poly, lon_min, lat_min, lon_max, lat_max):
+
+    def inside_left(p):   return p[0] >= lon_min
+    def inside_right(p):  return p[0] <= lon_max
+    def inside_bottom(p): return p[1] >= lat_min
+    def inside_top(p):    return p[1] <= lat_max
+
+    def intersect(p1, p2, edge):
+        x1, y1 = p1
+        x2, y2 = p2
+
+        if edge == "left":
+            x = lon_min
+            y = y1 + (y2-y1)*(lon_min-x1)/(x2-x1)
+        elif edge == "right":
+            x = lon_max
+            y = y1 + (y2-y1)*(lon_max-x1)/(x2-x1)
+        elif edge == "bottom":
+            y = lat_min
+            x = x1 + (x2-x1)*(lat_min-y1)/(y2-y1)
+        elif edge == "top":
+            y = lat_max
+            x = x1 + (x2-x1)*(lat_max-y1)/(y2-y1)
+
+        return (x,y)
+
+    def clip(poly, inside, edge):
+        result = []
+        for i in range(len(poly)):
+            curr = poly[i]
+            prev = poly[i-1]
+
+            if inside(curr):
+                if not inside(prev):
+                    result.append(intersect(prev,curr,edge))
+                result.append(curr)
+            elif inside(prev):
+                result.append(intersect(prev,curr,edge))
+
+        return result
+
+    poly = clip(poly, inside_left, "left")
+    poly = clip(poly, inside_right, "right")
+    poly = clip(poly, inside_bottom, "bottom")
+    poly = clip(poly, inside_top, "top")
+
+    return poly
+
+def dem_bounds(footprint, rsc):
+    """
+    Get the bounds of the overlapped area between Sentinel-1 footprint and
+    the study area defined by the RSC
+    """
+    overlap_poly = clip_polygon_with_rect(
+        footprint,
+        rsc.lonmin, rsc.latmin, rsc.lonmax, rsc.latmax
+    )
+
+    if overlap_poly:
+        lons = [p[0] for p in overlap_poly]
+        lats = [p[1] for p in overlap_poly]
+
+        overlap_bbox = (
+            min(lons), min(lats),
+            max(lons), max(lats)
+        )
+    else:
+        overlap_bbox = None
+        return None
+    rowmin, colmin = rsc.ll2xy(overlap_bbox[3],overlap_bbox[0])
+    rowmax, colmax = rsc.ll2xy(overlap_bbox[1],overlap_bbox[2])
+    rowmin = int(np.maximum(rowmin, 0))
+    colmin = int(np.maximum(colmin, 0))
+    rowmax = int(np.minimum(rowmax, rsc.nlat))
+    colmax = int(np.minimum(colmax, rsc.nlon))
+    return colmin, rowmin, colmax, rowmax
+
+def footprint_bounds(orbfname:str, dbfname:str):
+    """
+    Get the lat/lon bounds of current subswath
+    """
+    # read orbit
+    with open(orbfname, 'r') as f:
+        firstline = f.readline()
+        nline = int(firstline.strip())
+        tt = np.zeros(nline, dtype=np.float64)
+        xx = np.zeros((nline,3), dtype=np.float64)
+        vv = np.zeros((nline,3), dtype=np.float64)
+        for i in range(nline):
+            line = f.readline()
+            words = line.split()
+            val = np.array([float(w) for w in words])
+            tt[i] = val[0]
+            xx[i,:] = val[1:4]
+            vv[i,:] = val[4:7]
+    con = sqlite3.connect(dbfname)
+    # create a cursor
+    c = con.cursor()
+    tblname = 'file'
+    prf = sql_mod.valuef(c,tblname,'prf')
+    azimuth_bursts = sql_mod.valuei(c,tblname,'azimuthBursts')
+    lines_per_burst = sql_mod.valuei(c,tblname,'linesPerBurst')
+    slant_range_time = sql_mod.valuef(c,tblname,'slantRangeTime') 
+    range_sampling_rate = sql_mod.valuef(c,tblname,'rangeSamplingRate')
+    nrange = sql_mod.valuei(c,tblname,'samplesPerBurst')
+    starttime = sql_mod.valuef(c, tblname, f'azimuthTimeSeconds1')
+    starttime_last = sql_mod.valuef(c, tblname,
+            f'azimuthTimeSeconds{azimuth_bursts}')
+    c.close()
+    con.close()
+    stoptime = starttime_last + lines_per_burst/prf
+    rngstart = slant_range_time*SOL/2.
+    dmrg = SOL/2./range_sampling_rate
+    rngend = rngstart + (nrange-1)*dmrg
+
+    rah = []
+    for t in [starttime, stoptime]:
+        for i, r in enumerate([rngstart, rngend]):
+            if i == 0:
+                rah.append([r,t,0])
+            else:
+                rah.append([r,t,10000])
+    lats,lons = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah))
+    return np.array(list(zip(lons, lats)))
 
 def sentinel_scene(
         zip_file: str,
@@ -64,7 +191,8 @@ def sentinel_scene(
     mission_id = sent['mission_id']
     unique_id = sent['unique_id']
     acq_date = sent['start_time'][0:8]
-    data_dir = os.path.join(proc_dir, zip_file.replace('.zip','.SAFE'))
+    basename = os.path.basename(zip_file)
+    data_dir = os.path.join(proc_dir, basename.replace('.zip','.SAFE'))
     os.makedirs(slc_dir, exist_ok = True)
 
     if not os.path.exists(data_dir):
@@ -81,6 +209,11 @@ def sentinel_scene(
     #   3.  Create orbtiming file with orbit state vectors
     #   4.  Rename and save the ancillary files needed for deramping the slc
     #   5.  Unpack the geotiff product into floating point slc
+
+    if orbfile is not None:
+        logger.debug('*** Using precise orbit ***')
+        parse_orbit(orbfile.strip(),zip_file,
+                os.path.join(proc_dir,f'{acq_date}.orbtiming'))
 
     swathfiles = []
     xmlfiles = []
@@ -99,6 +232,7 @@ def sentinel_scene(
                 f'*iw{subswath}*{polarization}*.xml'))[0])
 
     #  loop over subswaths
+    bounds_list = []
     for ifile,fn in enumerate(swathfiles):
         #    for itemp in range(1):  # remove to go back to usual
         #        file=swathfiles[ifile-1] # remove to go back to usual
@@ -133,6 +267,14 @@ def sentinel_scene(
         sql_mod.add_param(c,swathfile,'fmrateinfo')
         sql_mod.edit_param(c,swathfile,'fmrateinfo',fmratefname,'-','char','')
         con.commit()
+        c.close()
+        con.close()
+
+        footprint = footprint_bounds(orbfname, dbfname)
+        bounds = dem_bounds(footprint, rsc)
+        bounds_list.append(bounds)
+        if bounds is None:
+            continue
 
         # extract geotiff file, reversing lines and pixels if necessary
         linereverse='n'
@@ -149,17 +291,12 @@ def sentinel_scene(
                 linereverse+' '+pixelreverse
         logger.info(command)
         ret = subprocess.check_call(command, shell=True)
-        con.commit()
-        c.close()
-        con.close()
-
-    if orbfile is not None:
-        logger.debug('*** Using precise orbit ***')
-        parse_orbit(orbfile.strip(),zip_file,
-                os.path.join(proc_dir,f'{acq_date}.orbtiming'))
 
     # Now, process each subswath to a geocoded slc
     for ifile, fn in enumerate(swathfiles):
+        bounds = bounds_list[ifile]
+        if bounds is None:
+            continue
         subswath = subswath_list[ifile]
         slavedb = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.db')
         deramp_phase_file = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.phase')
@@ -197,16 +334,17 @@ def sentinel_scene(
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
         compress_slc_file = os.path.join(slc_dir,
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.geo')
-        command = 'geo2rdr_reramp '+slavedb.strip()+' '+ ' ' + deramp_phase_file + \
-                ' ' + main_slc_file + ' ' + sec_slc_file
+        command = f'geo2rdr_reramp {slavedb} {deramp_phase_file} ' + \
+                   f'{main_slc_file} {sec_slc_file} {bounds[0]} ' + \
+                   f'{bounds[1]} {bounds[2]} {bounds[3]}'
         logger.info(command)
         os.system(command)
 
-        compress(main_slc_file, sec_slc_file, compress_slc_file,
-                 rsc.nlat, rsc.nlon)
+        #compress(main_slc_file, sec_slc_file, compress_slc_file,
+        #         rsc.nlat, rsc.nlon)
         # remove the original slc files
-        os.remove(main_slc_file)
-        os.remove(sec_slc_file)
+        #os.remove(main_slc_file)
+        #os.remove(sec_slc_file)
         os.remove(origslcfile)
         os.remove(derampedslcfile)
         os.remove(deramp_phase_file)
