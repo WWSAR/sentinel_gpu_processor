@@ -142,6 +142,10 @@ int geo2rdr_reramp(const std::string &dbname,
                    const std::string &deramp_phase_file,
                    const std::string &slcoutfile,
                    const std::string &overlapfile,
+                   const int left,
+                   const int top,
+                   const int right,
+                   const int bottom,
                    std::string &slcinfile){
     sqlite3 *db; // database that stores relevant paramters
 
@@ -156,8 +160,9 @@ int geo2rdr_reramp(const std::string &dbname,
     std::size_t nstatvec, burstsize;
     rsc demrsc;
     int azimuth_bursts, lines_per_burst, nrange, blockSize=256, numBlocks;
-    int batch_lines = 3000, nbatch;
+    int batch_lines = 3000, nbatch, nrow, ncol;
     short int *dem, *d_dem;
+    std::int32_t main_header[NHEADER] = {0}, sec_header[NHEADER] = {0};
     double prf, wvl,slant_range_time,range_sampling_rate;
     double *startime, *tt, *xx, *vv, *xmid, *vmid;
     double *d_tt, *d_xx, *d_vv, *d_xmid, *d_vmid;
@@ -168,6 +173,8 @@ int geo2rdr_reramp(const std::string &dbname,
     double *deramp_phase, *d_deramp_phase; 
     bool written;
 
+    nrow = bottom - top;
+    ncol = right - left;
     demfile = get_params(db, tblname, "demfile");
     rscfile = get_params(db, tblname, "rscfile");
     nrange = get_parami(db,tblname,"samplesPerBurst");
@@ -215,36 +222,48 @@ int geo2rdr_reramp(const std::string &dbname,
         return -1;
     }
     demrsc = readrsc(rscfile);
+    // populate main_header
+    main_header[0] = demrsc.nlat;
+    main_header[1] = demrsc.nlon;
+    main_header[2] = left;
+    main_header[3] = top;
+    main_header[4] = right;
+    main_header[5] = bottom;
+    sec_header[0] = demrsc.nlat;
+    sec_header[1] = demrsc.nlon;
+    sec_header[2] = left;
+    sec_header[3] = right;
+    sec_header[4] = 0;
     read_orbit_ascii(orbfile,nstatvec,&tt,&xx,&vv);
-    outdata = (Complex*)malloc(sizeof(Complex)*demrsc.nlon*batch_lines);
-    overlapdata = (Complex*)malloc(sizeof(Complex)*demrsc.nlon*batch_lines);
-    dem = (short int*)malloc(sizeof(short int)*demrsc.nlon*batch_lines);
+    outdata = (Complex*)malloc(sizeof(Complex)*ncol*batch_lines);
+    overlapdata = (Complex*)malloc(sizeof(Complex)*ncol*batch_lines);
+    dem = (short int*)malloc(sizeof(short int)*ncol*batch_lines);
     cudaMalloc((void**)&d_tt,sizeof(double)*nstatvec);
     cudaMalloc((void**)&d_xx,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_vv,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_xmid,sizeof(double)*3);
     cudaMalloc((void**)&d_vmid,sizeof(double)*3);
-    cudaMalloc((void**)&d_dem,sizeof(short int)*demrsc.nlon*batch_lines);
-    cudaMalloc((void**)&d_outdata,sizeof(Complex)*demrsc.nlon*batch_lines);
-    cudaMalloc((void**)&d_overlapdata,sizeof(Complex)*demrsc.nlon*batch_lines);
+    cudaMalloc((void**)&d_dem,sizeof(short int)*ncol*batch_lines);
+    cudaMalloc((void**)&d_outdata,sizeof(Complex)*ncol*batch_lines);
+    cudaMalloc((void**)&d_overlapdata,sizeof(Complex)*ncol*batch_lines);
     cudaMalloc((void**)&d_burstdata,sizeof(Complex)*nrange*lines_per_burst);
     cudaMalloc((void**)&d_deramp_phase,sizeof(double)*nrange*lines_per_burst);
 
     cudaMemcpy(d_tt,tt,sizeof(double)*nstatvec,cudaMemcpyHostToDevice);
     cudaMemcpy(d_xx,xx,sizeof(double)*nstatvec*3,cudaMemcpyHostToDevice);
     cudaMemcpy(d_vv,vv,sizeof(double)*nstatvec*3,cudaMemcpyHostToDevice);
-    nbatch = (demrsc.nlat + batch_lines-1)/batch_lines;
+    nbatch = (nrow + batch_lines-1)/batch_lines;
     for (int ibatch = 0; ibatch < nbatch; ++ibatch){
         // calculate the first and the last lines of current batch of output file
-        std::size_t line_start = ibatch * batch_lines;
+        std::size_t line_start = ibatch * batch_lines + top;
         std::size_t line_end = line_start + batch_lines;
         line_end = line_end < demrsc.nlat ? line_end : demrsc.nlat;
         std::size_t nlines = line_end - line_start;
-        read_binary<short int>(demfile,line_start*demrsc.nlon,
-                nlines*demrsc.nlon,dem);
-        cudaMemcpy(d_dem,dem,sizeof(short int)*nlines*demrsc.nlon,
+        read_binary<short int>(demfile,demrsc.nlon,line_start,line_end,
+                left, right, dem);
+        cudaMemcpy(d_dem,dem,sizeof(short int)*nlines*ncol,
                 cudaMemcpyHostToDevice);
-        numBlocks = (nlines*demrsc.nlon+blockSize-1)/blockSize;
+        numBlocks = (nlines*ncol+blockSize-1)/blockSize;
         std::cout << "Batch " << ibatch << ", nlines: " << nlines << std::endl;
         
         for (int iburst=0; iburst<azimuth_bursts; ++iburst){
@@ -282,27 +301,26 @@ int geo2rdr_reramp(const std::string &dbname,
             // reprojection
             reproject<<<numBlocks,blockSize>>>(d_dem,d_burstdata,d_deramp_phase,
             d_outdata,d_overlapdata,d_tt,d_xx,d_vv,nstatvec,tmid,d_xmid,d_vmid, 
-            demrsc.latmax+demrsc.dlat*line_start,demrsc.lonmin,
-            demrsc.dlat,demrsc.dlon,demrsc.nlon,
+            demrsc.latmax+demrsc.dlat*line_start,demrsc.lonmin+demrsc.dlon*left,
+            demrsc.dlat,demrsc.dlon,ncol,
             latlons[0],latlons[1],latlons[2],latlons[3],rngstart,tstart,dmrg,dtaz,
             nrange, lines_per_burst, first_valid_line[iburst],
             last_valid_line[iburst], first_valid_sample[iburst],
-            last_valid_sample[iburst], wvl, written, nlines*demrsc.nlon);
+            last_valid_sample[iburst], wvl, written, nlines*ncol);
             cudaDeviceSynchronize();
         }
-        cudaMemcpy(outdata,d_outdata,sizeof(Complex)*demrsc.nlon*nlines,
+        cudaMemcpy(outdata,d_outdata,sizeof(Complex)*nlines*ncol,
                 cudaMemcpyDeviceToHost);
-        cudaMemcpy(overlapdata,d_overlapdata,sizeof(Complex)*demrsc.nlon*nlines,
+        cudaMemcpy(overlapdata,d_overlapdata,sizeof(Complex)*nlines*ncol,
                 cudaMemcpyDeviceToHost);
         if (ibatch == 0){
-            save_binary<Complex>(outdata,false,demrsc.nlon*nlines,slcoutfile);
-            save_binary<Complex>(overlapdata,false,demrsc.nlon*nlines,
-                    overlapfile);
+            save_binary<Complex>(outdata,nlines*ncol,main_header,NHEADER,
+                    slcoutfile);
         }else{
-            save_binary<Complex>(outdata,true,demrsc.nlon*nlines,slcoutfile);
-            save_binary<Complex>(overlapdata,true,demrsc.nlon*nlines,
-                    overlapfile);
+            save_binary<Complex>(outdata,true,nlines*ncol,slcoutfile);
         }
+        write_compressed_strips(sec_header, overlapdata, nlines, ncol,
+                line_start, overlapfile);
     }
 
     free(startime);
@@ -330,19 +348,25 @@ int geo2rdr_reramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
-    if (argc<5){
+    if (argc<9){
         std::cout << "Usage: geo2rdr_reramp dbname deramp_phase_file " <<
-            "slcoutfile overlapfile [slcinfile]" << std::endl;
+            "slcoutfile overlapfile left top right bottom [slcinfile]" <<
+            std::endl;
         return 0;
     }
     const std::string dbname = std::string(argv[1]);
     const std::string deramp_phase_file = std::string(argv[2]);
     const std::string slcoutfile = std::string(argv[3]);
     const std::string overlapfile = std::string(argv[4]);
+    const int left = std::stoi(argv[5]);
+    const int top = std::stoi(argv[6]);
+    const int right = std::stoi(argv[7]);
+    const int bottom = std::stoi(argv[8]);
     std::string slcinfile = "";
-    if (argc>5){
-        slcinfile = std::string(argv[5]);
+    if (argc>9){
+        slcinfile = std::string(argv[9]);
     }
-    geo2rdr_reramp(dbname,deramp_phase_file,slcoutfile,overlapfile,slcinfile);
+    geo2rdr_reramp(dbname,deramp_phase_file,slcoutfile,overlapfile,left,top,
+            right,bottom,slcinfile);
     return 0;
 }

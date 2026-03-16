@@ -5,8 +5,10 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 typedef float2 Complex;
+const int NHEADER = 64;
 
 struct rsc{
     int nlat;
@@ -29,10 +31,6 @@ void read_polynomials(const std::string& fname,
                       double **p1,
                       double **p2);
 
-void read_param_file(const std::string& fname,
-                     std::string& dem_fname,
-                     std::string& rsc_fname);
-
 void read_and_resample(
         const std::string& filename,
         Complex* dst,
@@ -42,6 +40,47 @@ void read_and_resample(
         const int bottom_dst,
         const int row_begin,
         const int row_end);
+
+void write_compressed_strips(
+        int32_t* header,
+        const float2* img,
+        const int nrow,
+        const int ncol,
+        const int top,
+        const std::string& outfile);
+
+template <typename T>
+void read_binary(const std::string& imgfile,
+                 const size_t width,
+                 const size_t row_start,
+                 const size_t row_end,
+                 const size_t col_start,
+                 const size_t col_end,
+                 T* img)
+{
+    std::ifstream fin(imgfile, std::ios::binary);
+
+    if (!fin) {
+        printf("File %s does not exist.\n", imgfile.c_str());
+        return;
+    }
+
+    size_t sub_width  = col_end - col_start;
+    size_t sub_height = row_end - row_start;
+
+    for (size_t r = 0; r < sub_height; r++) {
+
+        size_t file_offset =
+        ((row_start + r) * width + col_start) * sizeof(T);
+
+        fin.seekg(file_offset, std::ios::beg);
+
+        fin.read(reinterpret_cast<char*>(img + r * sub_width),
+        sub_width * sizeof(T));
+    }
+
+    fin.close();
+}
 
 template <typename T>
 void read_binary(const std::string& imgfile,
@@ -144,5 +183,42 @@ void save_binary(
     fout.write(reinterpret_cast<const char*>(img), sizeof(T) * n);
     fout.close();
 }
+
+class Strip
+{
+    public:
+    int nrow0;
+    int ncol0;
+    int left;
+    int top;
+    int right;
+    int bottom;
+    int start_line;
+
+    int nrow;
+    int ncol;
+    std::string fname;
+    Complex *data;
+
+    Strip(const int nrow0_, const int ncol0_,
+          const int left_, const int top_,
+          const int right_, const int bottom_,
+          const int start_line_,
+          std::string &fname_,
+          Complex* data_);
+};
+
+class Subswath
+{
+    public:
+    int nrow0;
+    int ncol0;
+    int left;
+    int right;
+    int nstrip;
+    std::string fname;
+    std::vector<Strip> data;
+    Subswath(std::string &fname_);
+};
 
 #endif

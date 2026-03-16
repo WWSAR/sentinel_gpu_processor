@@ -122,11 +122,10 @@ int crossmul(const std::string &slcfile1,
              const int rowlook, const int collook,
              std::string intfile=""){
     // delcaration
-    const int nheader = 64;
-    std::int32_t header1[nheader], header2[nheader], ifg_header[nheader];
+    std::int32_t header1[NHEADER], header2[NHEADER], ifg_header[NHEADER];
     Complex *slc1, *slc2, *ifglook;
     Complex *d_slc1, *d_slc2, *d_ifg, *d_ifg_collook, *d_ifglook;
-    int batch_lines = 2000, blockSize=256, batch_sm;
+    int batch_lines = 3000, blockSize=256, batch_sm;
     int nbatch, numBlocks, ncol_sm;
     // image parameters
     // image1
@@ -147,9 +146,9 @@ int crossmul(const std::string &slcfile1,
     }
     std::cout << "output filename: " << intfile << std::endl;
     // read the header of the first image
-    read_binary<std::int32_t>(slcfile1, nheader, header1);
+    read_binary<std::int32_t>(slcfile1, NHEADER, header1);
     // read the header of the second image
-    read_binary<std::int32_t>(slcfile2, nheader, header2);
+    read_binary<std::int32_t>(slcfile2, NHEADER, header2);
     // read the parameters of the first image
     left1 = header1[2];
     top1 = header1[3];
@@ -221,7 +220,7 @@ int crossmul(const std::string &slcfile1,
                    cudaMemcpyDeviceToHost));
         if(ibatch==0){
             save_binary<Complex>(ifglook,nlines/rowlook*ncol_sm,ifg_header,
-                    nheader,intfile);
+                    NHEADER,intfile);
         }else{
             save_binary<Complex>(ifglook,true,nlines/rowlook*ncol_sm,
                     intfile);
