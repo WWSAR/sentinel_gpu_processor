@@ -385,26 +385,16 @@ def create_db(
         #print(statelines[posstart:posstop])
         #print(statelines[velstart:velstop])
         
-    orbinfo=open(orbfname,'w')
-    if timeinseconds(zeroDopplerTimeFirstLine) < \
-            timeinseconds(zeroDopplerTimeLastLine):
-        orbinfo.write(str(timeinseconds(zeroDopplerTimeFirstLine))+'\n')
-        orbinfo.write(str(timeinseconds(zeroDopplerTimeLastLine))+'\n')
+    if not os.path.exists(orbfname):
+        orbinfo=open(orbfname,'w')
+        orbinfo.write(str(len(start))+'\n')
+        for i in range(len(start)):
+            orbinfo.write(str(timeinseconds(time[i]))+' '+str(x[i])+' '+str(y[i])+\
+                    ' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+\
+                    ' 0.0 0.0 0.0')
+            orbinfo.write('\n')
 
-    if timeinseconds(zeroDopplerTimeLastLine) < \
-            timeinseconds(zeroDopplerTimeFirstLine):
-        orbinfo.write(str(timeinseconds(zeroDopplerTimeLastLine))+'\n')
-        orbinfo.write(str(timeinseconds(zeroDopplerTimeFirstLine))+'\n')
-
-    orbinfo.write(str(numberOfLines)+'\n')
-    orbinfo.write(str(len(start))+'\n')
-    for i in range(len(start)):
-        orbinfo.write(str(timeinseconds(time[i]))+' '+str(x[i])+' '+str(y[i])+\
-                ' '+str(z[i])+' '+str(vx[i])+' '+str(vy[i])+' '+str(vz[i])+\
-                ' 0.0 0.0 0.0')
-        orbinfo.write('\n')
-
-    orbinfo.close()
+        orbinfo.close()
 
     #  burst deramp info
     #print(burstdata)
