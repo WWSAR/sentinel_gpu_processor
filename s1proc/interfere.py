@@ -45,6 +45,9 @@ def crossmul_strip(
         return None, 0
     if strip1.bottom <= strip2.top:
         return None, 1
+    # define the common grid to resample the two strips
+    nrow0 = strip1.nrow0
+    ncol0 = strip1.ncol0
     left = int(np.minimum(strip1.left, strip2.left))
     left = left // collook * collook
     right = int(np.maximum(strip1.right, strip2.right))
@@ -55,9 +58,32 @@ def crossmul_strip(
     res2 = strip2.resample(left, top, right, bottom)
     amp1 = np.abs(res1)
     amp2 = np.abs(res2)
-    nrow0 = strip1.nrow0
-    ncol0 = strip1.ncol0
-    mask1 = (amp1 > 0) & (amp2 == 0)
+
+    # create a mask representing the upper half of the strip
+    first_nonzero_col, last_nonzero_col = \
+            np.where(np.any(amp1>0,axis=0))[0][[0,-1]]
+    #print(f'first nonzero column, {first_nonzero_col}')
+    #print(f'last nonzero column, {last_nonzero_col}')
+    first_mean_idx = np.mean(np.where(amp1[:,first_nonzero_col]>0)[0])
+    last_mean_idx = np.mean(np.where(amp1[:,last_nonzero_col]>0)[0])
+    #print(f'mean row idx of the first nonzero column, {first_mean_idx}')
+    #print(f'mean row idx of the last nonzero column, {last_mean_idx}')
+    rr = np.outer(np.arange(bottom - top),
+            np.ones(right - left, dtype = int))
+    if first_mean_idx > last_mean_idx:
+        # ascending tracks
+        upper_mask = rr < (np.arange(right-left)-first_nonzero_col)/ \
+                (last_nonzero_col-first_nonzero_col)*(top-bottom) + bottom - top
+    else:
+        # descending tracks
+        upper_mask = rr < (np.arange(right-left)-first_nonzero_col)/ \
+                (last_nonzero_col-first_nonzero_col)*(bottom-top)
+
+    # find areas where the first strip is nonzero and the second strip is zero
+    mask1 = (amp1 > 0) & (amp2 == 0) & upper_mask
+    nonoverlap_rows = np.sum(mask1,axis=0)
+    mean_no_rows1 = np.median(
+            nonoverlap_rows[first_nonzero_col:last_nonzero_col])
     res1[~mask1] = 0.
     nonzero_rows = np.where(np.any(mask1, axis=1))[0]
     if len(nonzero_rows) < np.maximum(2, rowlook):
@@ -66,16 +92,25 @@ def crossmul_strip(
         rstart1, rend1 = nonzero_rows[0], nonzero_rows[-1]
         top1 = int(np.ceil((top + rstart1) / rowlook)) * rowlook
         bottom1 = (top + rend1 + 1) // rowlook * rowlook
-    
-    mask2 = (amp1 == 0) & (amp2 > 0)
+
+    # find areas where the first strip is zero and the second strip is nonzero
+    mask2 = (amp1 == 0) & (amp2 > 0) & upper_mask
+    nonoverlap_rows = np.sum(mask2,axis=0)
+    mean_no_rows2 = np.median(
+            nonoverlap_rows[first_nonzero_col:last_nonzero_col])
+    # return None if nonoverlapped areas are too narrow for multilooking
+    if np.maximum(mean_no_rows1, mean_no_rows2) <= rowlook:
+        return None, 2
     res2[~mask2] = 0
     nonzero_rows = np.where(np.any(mask2, axis=1))[0]
     if len(nonzero_rows) < np.maximum(2, rowlook):
         top2, bottom2 = None, None
     else:
         rstart2, rend2 = nonzero_rows[0], nonzero_rows[-1]
-        top2 = (top + rstart2) // rowlook * rowlook
-        bottom2 = int(np.ceil((top + rend2 + 1) / rowlook)) * rowlook
+        top2 = int(np.ceil((top + rstart2) / rowlook)) * rowlook
+        bottom2 = (top + rend2 + 1) // rowlook * rowlook
+    
+    # --- case 1: the two strips overlap perferctly ---
     if top1 is None and top2 is None:
         return None, 2
     elif top2 is None:
@@ -95,7 +130,7 @@ def crossmul_strip(
                 res2[top2 - top : bottom2 - top, :])
         return strip, 4
     return None, 2
-    
+
 def interfere_subswath(
     main_img_file: str,
     sec_img_file: str,
@@ -121,6 +156,7 @@ def interfere_subswath(
     command = f'crossmul {main_img_file} {sec_img_file} {rowlook} {collook}' + \
               f' {outfile}'
     os.system(command)
+    return
     f = open(outfile, 'r+b')
     ifg_header = np.fromfile(f, count = NHEAD, dtype = np.int32)
     ifg_left0, ifg_top0, ifg_right0, ifg_bottom0 = \
@@ -151,7 +187,7 @@ def interfere_subswath(
         else:
             idx1 += 1
             idx2 += 1
-        
+
         # load corresponding data strip from the main image of the other
         # subswath
         curr_top = strip.top
@@ -171,7 +207,7 @@ def interfere_subswath(
             ref_data = subswath1.main.load_data(
                     curr_left, curr_top, curr_right, curr_bottom)
         # form the multilooked interferogram
-        ifg = sario.cpxlooks(np.conj(ref_data)*sec_data, rowlook, collook) 
+        ifg = sario.cpxlooks(np.conj(ref_data)*sec_data, rowlook, collook)
         ifg_top = curr_top // rowlook
         ifg_bottom = curr_bottom // rowlook
         ifg_left = curr_left // collook
@@ -179,7 +215,7 @@ def interfere_subswath(
         mask = np.abs(ifg) > 0
 
         # move to the first requested line
-        offset = header_bytes + ifg_top * row_bytes
+        offset = header_bytes + (ifg_top-ifg_top0) * row_bytes
         f.seek(offset)
         # read rows
         nrow = ifg_bottom - ifg_top
@@ -298,9 +334,9 @@ def interfere_single_scene(
 def parse_fname(fn:str)->Tuple[str, str]:
     basename = os.path.basename(fn)
     date = basename[0:8]
-    data_id = basename[9:20] 
+    data_id = basename[9:20]
     return date, data_id
-    
+
 def interfere(
         img_pair_file: str,
         rscfile: str,
@@ -310,7 +346,7 @@ def interfere(
         collook: int = 1):
     """
     Form interferograms from a subswath list
-    
+
     Parameters
     ----------
     img_pair_file: str
@@ -330,7 +366,6 @@ def interfere(
     rsclook = rsc.take_look(rowlook,collook)
     rsclook.save_as_rsc(os.path.join(ifg_dir,'dem.rsc'))
 
-    fout = open(intlist_file,'w')
     img_pairs = []
     fin = open(img_pair_file,'r')
     lines = fin.readlines()
@@ -356,13 +391,16 @@ def interfere(
 
     line_idx = 0
     nlines = len(main_list)
+    intlist = []
     while line_idx < nlines:
         main_date = main_date_list[line_idx]
         sec_date = sec_date_list[line_idx]
         intfile = os.path.join(ifg_dir,f'{main_date}_{sec_date}.int')
+        logger.info(f'processing interferogram {intfile}')
         if os.path.exists(intfile):
-            fout.write(intfile)
-            fout.write('\n')
+            if len(intlist) == 0 or intlist[-1] != intfile:
+                intlist.append(intfile)
+            line_idx += 1
             continue
         subsets = []
         curr_main_imgs = []
@@ -396,6 +434,6 @@ def interfere(
                         rowlook,
                         collook))
         stitch(ifg_files, intfile)
-        fout.write(intfile)
-        fout.write('\n')
+    fout = open(intlist_file,'w')
+    fout.write('\n'.join(intlist))
     fout.close()
