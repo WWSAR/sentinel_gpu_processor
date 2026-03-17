@@ -28,7 +28,64 @@ Strip::Strip(const int nrow0_, const int ncol0_,
     ncol = right - left;
 }
 
-Subswath::Subswath(std::string &fname_): fname(fname_)
+Strip::Strip(
+      const std::string &fname_,
+      bool load_data_):fname(fname_)
+{
+    std::ifstream fin(fname_, std::ios::binary);
+    if (!fin)
+        throw std::runtime_error("Cannot open file");
+    int32_t header[64];
+    fin.read(reinterpret_cast<char*>(header), sizeof(header));
+    fin.close();
+    nrow0 = header[0];
+    ncol0 = header[1];
+    left = header[2];
+    top = header[3];
+    right = header[4];
+    bottom = header[5];
+    start_line = 0;
+    nrow = bottom - top;
+    ncol = right - left;
+    data = nullptr;
+    if (load_data_){
+        load_data(left, top, right, bottom);
+    }else{
+        data = nullptr;
+    }
+}
+
+void Strip::load_data(const int left, const int top,
+        const int right, const int bottom){
+    if (this->data){
+        free(this->data);
+        this->data = nullptr;
+    }
+    this->data = (Complex *)malloc(sizeof(Complex)*(bottom-top)*(right-left));
+    read_and_resample(this->fname, this->data,
+            this->left, this->top, this->right, this->bottom,
+            this->start_line, left, top, right, bottom, 0, bottom-top);
+    return;
+}
+
+void Strip::save_data(){
+    if (!this->data){
+        printf("Cannot save emtpy data.\n");
+        return;
+    }
+    std::int32_t header[64];
+    header[0] = this->nrow0;
+    header[1] = this->ncol0;
+    header[2] = this->left;
+    header[3] = this->top;
+    header[4] = this->right;
+    header[5] = this->bottom;
+    save_binary<Complex>(this->data,this->nrow*this->ncol,header,
+            NHEADER,"temp.int");
+    return;
+}
+
+Subswath::Subswath(const std::string &fname_): fname(fname_)
 {
     int start_line = 0;
     std::vector<Strip> data_ = {}; 
@@ -105,7 +162,6 @@ void readdem(const std::string& imgfile,
              const std::size_t n,
              short int *dem){
     std::ifstream fin(imgfile, std::ios::binary);
-    //std::cout << "dem to skip: " << toskip << std::endl;
     fin.seekg(toskip*sizeof(short int),std::ios::beg);
     if (!fin){
         printf("File %s does not exist.\n",imgfile.c_str());
@@ -153,9 +209,30 @@ void read_polynomials(const std::string& fname,
     return;
 }
 
+/**
+ read Complex data from a file and resample the data to a destination grid
+ * @param filename data file to read
+ * @param dst pointer to the stored data
+ * @param left_src left boundary of the source image
+ * @param top_src top boundary of the source image
+ * @param right_src left boundary of the source image
+ * @param bottom_src bottom boundary of the source image
+ * @param offset_rows number of rows to skip when reading from the data file
+ * @param left_dst left boundary of the destination image
+ * @param top_dst top boundary of the destination image
+ * @param right_dst left boundary of the destination image
+ * @param bottom_dst bottom boundary of the destination image
+ * @param row_begin first line to write to the destination image
+ * @param row_end last line to write to the destination image
+*/
 void read_and_resample(
     const std::string& filename,
     Complex* dst,
+    const int left_src,
+    const int top_src,
+    const int right_src,
+    const int bottom_src,
+    const int offset_rows,
     const int left_dst,
     const int top_dst,
     const int right_dst,
@@ -167,19 +244,9 @@ void read_and_resample(
     if (!fin)
         throw std::runtime_error("Cannot open file");
 
-    int32_t head[64];
-    fin.read(reinterpret_cast<char*>(head), sizeof(head));
-
-    int left_src   = head[2];
-    int top_src    = head[3];
-    int right_src  = head[4];
-    int bottom_src = head[5];
-
+    const size_t header_bytes = 64 * sizeof(int32_t);
     int src_w = right_src - left_src;
     int dst_w = right_dst - left_dst;
-
-    const size_t header_bytes = 64 * sizeof(int32_t);
-
     int overlap_left  = std::max(left_dst, left_src);
     int overlap_right = std::min(right_dst, right_src);
 
@@ -199,7 +266,7 @@ void read_and_resample(
 
     int copy_h = overlap_bottom - overlap_top;
 
-    int src_row0 = overlap_top - top_src;
+    int src_row0 = overlap_top - top_src + offset_rows;
     int dst_row0 = overlap_top - top_dst;
 
     /* read full rows */
@@ -213,6 +280,7 @@ void read_and_resample(
 
     fin.read(reinterpret_cast<char*>(buffer),
         (size_t)src_w * copy_h * sizeof(Complex));
+    fin.close();
 
     /* crop in memory */
     for (int r = 0; r < copy_h; ++r)
@@ -220,12 +288,38 @@ void read_and_resample(
         Complex* src_ptr = buffer + (size_t)r * src_w + src_col0;
 
         Complex* dst_ptr =
-        dst + (size_t)(dst_row0 + r - row_begin) * dst_w + dst_col0;
+            dst + (size_t)(dst_row0 + r - row_begin) * dst_w + dst_col0;
 
         std::memcpy(dst_ptr, src_ptr, copy_w * sizeof(Complex));
     }
 
     delete[] buffer;
+}
+
+void read_and_resample(
+    const std::string& filename,
+    Complex* dst,
+    const int left_dst,
+    const int top_dst,
+    const int right_dst,
+    const int bottom_dst,
+    const int row_begin,
+    const int row_end)
+{
+    std::ifstream fin(filename, std::ios::binary);
+    if (!fin)
+        throw std::runtime_error("Cannot open file");
+
+    int32_t head[64];
+    fin.read(reinterpret_cast<char*>(head), sizeof(head));
+    fin.close();
+
+    int left_src   = head[2];
+    int top_src    = head[3];
+    int right_src  = head[4];
+    int bottom_src = head[5];
+    read_and_resample(filename, dst, left_src, top_src, right_src, bottom_src,
+            0, left_dst, top_dst, right_dst, bottom_dst, row_begin, row_end);
 }
 
 /**

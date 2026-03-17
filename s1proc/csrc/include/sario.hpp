@@ -32,6 +32,21 @@ void read_polynomials(const std::string& fname,
                       double **p2);
 
 void read_and_resample(
+    const std::string& filename,
+    Complex* dst,
+    const int left_src,
+    const int top_src,
+    const int right_src,
+    const int bottom_src,
+    const int offset_rows,
+    const int left_dst,
+    const int top_dst,
+    const int right_dst,
+    const int bottom_dst,
+    const int row_begin,
+    const int row_end);
+
+void read_and_resample(
         const std::string& filename,
         Complex* dst,
         const int left_dst,
@@ -206,6 +221,13 @@ class Strip
           const int start_line_,
           std::string &fname_,
           Complex* data_);
+
+    Strip(const std::string &fname_, bool load_data_);
+
+    void load_data(const int left, const int top, const int right,
+            const int bottom);
+
+    void save_data();
 };
 
 class Subswath
@@ -218,7 +240,7 @@ class Subswath
     int nstrip;
     std::string fname;
     std::vector<Strip> data;
-    Subswath(std::string &fname_);
+    Subswath(const std::string &fname_);
 };
 
 #endif
