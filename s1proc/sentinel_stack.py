@@ -67,7 +67,7 @@ def stack(
     """
 
     # get list of geotiff products
-    zips = glob.glob(os.path.join(data_dir,'*.zip'))
+    zips = sorted(glob.glob(os.path.join(data_dir,'*.zip')))
     # get the precise orbit files
     preciseorbitlist = glob.glob(os.path.join(eof_dir,'*.EOF'))
     #with open('preciseorbitfiles','w') as f:
