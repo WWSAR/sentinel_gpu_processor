@@ -155,6 +155,14 @@ def interfere_subswath(
     """
     command = f'crossmul {main_img_file} {sec_img_file} {rowlook} {collook}' + \
               f' {outfile}'
+    logger.info(command)
+    os.system(command)
+    main_supp_img_file = main_img_file.replace('main','sec')
+    sec_supp_img_file = sec_img_file.replace('main','sec')
+    command = f'crossmul_sec {main_img_file} {main_supp_img_file} ' + \
+              f'{sec_img_file} {sec_supp_img_file} {outfile} ' + \
+              f'{rowlook} {collook}'
+    logger.info(command)
     os.system(command)
     return
     f = open(outfile, 'r+b')

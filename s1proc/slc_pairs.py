@@ -134,7 +134,7 @@ def create_slc_pair_list(
     # find all slc images in the parent directory
     subswath_lists = []
     for subswath in range(1,4):
-        subswath_list = glob.glob(os.path.join(slc_dir,f'*iw{subswath}*.geo'))
+        subswath_list = glob.glob(os.path.join(slc_dir,f'*iw{subswath}_main.geo'))
         if len(subswath_list) > 0:
             subswath_list = np.sort(subswath_list)
             subswath_lists.append(subswath_list)
