@@ -81,7 +81,7 @@ void Strip::save_data(){
     header[4] = this->right;
     header[5] = this->bottom;
     save_binary<Complex>(this->data,this->nrow*this->ncol,header,
-            NHEADER,"temp.int");
+            NHEADER,this->fname);
     return;
 }
 
@@ -350,8 +350,8 @@ void write_compressed_strips(
         fs.open(outfile, std::ios::binary | std::ios::out | std::ios::in);
         if (!fs) return;
         // Read the latest header
-        fs.seekg(0, std::ios::beg);
-        fs.read(reinterpret_cast<char*>(header), 64 * sizeof(int32_t));
+        //fs.seekg(0, std::ios::beg);
+        //fs.read(reinterpret_cast<char*>(header), 64 * sizeof(int32_t));
         // Move to the end to append new data
         fs.seekp(0, std::ios::end);
     }
@@ -400,7 +400,7 @@ void write_compressed_strips(
 
     // In case the last row of the input image has data
     if (in_strip) {
-        int end_row = nrow;
+        int end_row = nrow + top;
         if (nstrip > 0 && start_row == header[6 + 2 * (nstrip - 1)]) {
             header[6 + 2 * (nstrip - 1)] = end_row;
         } else {
