@@ -257,7 +257,7 @@ int geo2rdr_reramp(const std::string &dbname,
         // calculate the first and the last lines of current batch of output file
         std::size_t line_start = ibatch * batch_lines + top;
         std::size_t line_end = line_start + batch_lines;
-        line_end = line_end < demrsc.nlat ? line_end : demrsc.nlat;
+        line_end = line_end < bottom ? line_end : bottom;
         std::size_t nlines = line_end - line_start;
         read_binary<short int>(demfile,demrsc.nlon,line_start,line_end,
                 left, right, dem);
