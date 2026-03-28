@@ -475,24 +475,24 @@ void crossmul_strip(
         cudaFree(d_slc2);
         return;
     }
-    nrow_ifg = last_nonzero_row - first_nonzero_row;
+    nrow_ifg = nrow;
     nrow_sm = nrow_ifg / rowlook;
     ncol_sm = ncol / collook;
     CHECK_CUDA(cudaMalloc((void**)&d_main,sizeof(Complex)*ncol*nrow_ifg));
     CHECK_CUDA(cudaMalloc((void**)&d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm));
+    
     if (next_flag == 3){
-        main2->load_data(
-               left, first_nonzero_row + top, right, last_nonzero_row + bottom);
-        CHECK_CUDA(cudaMemcpy(d_main,main2->data,sizeof(Complex)*ncol*nrow_ifg,
+        main2->load_data(left, top, right, bottom);
+        CHECK_CUDA(cudaMemcpy(d_main,main2->data,sizeof(Complex)*ncol*nrow,
                 cudaMemcpyHostToDevice));
-        multilook(d_slc1,d_main,d_ifgsec,nrow_ifg,ncol,rowlook,collook);
+        multilook(d_slc1,d_main,d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc1);
     }else{
         main1->load_data(
-               left, first_nonzero_row + top, right, last_nonzero_row + bottom);
-        CHECK_CUDA(cudaMemcpy(d_main,main1->data,sizeof(Complex)*ncol*nrow_ifg,
+               left, top, right, top);
+        CHECK_CUDA(cudaMemcpy(d_main,main1->data,sizeof(Complex)*ncol*nrow,
                 cudaMemcpyHostToDevice));
-        multilook(d_main,d_slc2,d_ifgsec,nrow_ifg,ncol,rowlook,collook);
+        multilook(d_main,d_slc2,d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc2);
     }
     cudaFree(d_main);
@@ -513,10 +513,10 @@ void crossmul_strip(
     // calculate the average coherence of main and secondary interferogram
     // strips
     coh_main = reduce_sum(d_ifgmain_masked, nrow_sm*ncol_sm, block_size);
+    CHECK_CUDA(cudaMemcpy(d_ifgmain_masked,d_ifgsec,
+           sizeof(Complex)*ncol_sm*nrow_sm,cudaMemcpyDeviceToDevice));
+    coh_sec = reduce_sum(d_ifgmain_masked, nrow_sm*ncol_sm, block_size);
     cudaFree(d_ifgmain_masked);
-    coh_sec = reduce_sum(d_ifgsec, nrow_sm*ncol_sm, block_size);
-    std::cout << "average coherence of the main interferogram strip: " << coh_main << std::endl;
-    std::cout << "average coherence of the secondary interferogram strip: " << coh_sec << std::endl;
     if (coh_sec > coh_main){
         replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
         CHECK_CUDA(cudaDeviceSynchronize());

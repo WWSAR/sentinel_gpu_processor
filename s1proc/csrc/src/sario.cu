@@ -409,7 +409,7 @@ void write_compressed_strips(
             nstrip++;
         }
         size_t strip_size = (size_t)(end_row - start_row) * ncol * sizeof(float2);
-        fs.write(reinterpret_cast<const char*>(&img[start_row * ncol]), strip_size);
+        fs.write(reinterpret_cast<const char*>(&img[(start_row-top)* ncol]), strip_size);
     }
 
     // --- update the header ---

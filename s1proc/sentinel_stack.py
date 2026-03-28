@@ -69,7 +69,7 @@ def stack(
     # get list of geotiff products
     zips = sorted(glob.glob(os.path.join(data_dir,'*.zip')))
     # get the precise orbit files
-    preciseorbitlist = glob.glob(os.path.join(eof_dir,'*.EOF'))
+    preciseorbitlist = sorted(glob.glob(os.path.join(eof_dir,'*.EOF')))
     #with open('preciseorbitfiles','w') as f:
     #    f.write('\n'.join(preciseorbitlist))
     start_date,end_date = parse_orbitfilename(preciseorbitlist)
@@ -81,16 +81,25 @@ def stack(
         #  which precise orbit file for this scene?
         logger.info(f'Processing {zip_file}')
         sent = sentinel_parser(zip_file)
-        #geofile = sent['start_time'][0:8] + '.geo'
-        #if os.path.exists(geofile):
-        #    if reprocess:
-        #        os.remove(geofile)
-        #    else:
-        #        logger.warning(f'{geofile} exists')
-        #        continue
+        mission_id = sent['mission_id']
+        unique_id = sent['unique_id']
+        acq_date = sent['start_time'][0:8]
+        slcfiles = []
+        for subswath in subswath_list:
+            main_slc_file = os.path.join(slc_dir,
+                    f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_main.geo')
+            sec_slc_file = os.path.join(slc_dir,
+                    f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
+            slcfiles.append(main_slc_file)
+            slcfiles.append(sec_slc_file)
+
+        if all([os.path.exists(s) for s in slcfiles]) and not reprocess:
+            logger.warning(f'{main_slc_file} and {sec_slc_file} exist, skipping')
+            continue
 
         # Finding the date of acqusition following the naming rule
         current_date = sentinel_acq_time(zip_file)
+        orbitfilename = None
         for j in range(norbit):
             if start_date[j] <= current_date and end_date[j] >= current_date:
                 orbitfilename = preciseorbitlist[j]
