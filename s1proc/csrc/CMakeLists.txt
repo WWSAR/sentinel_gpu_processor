@@ -17,17 +17,11 @@ if(WIN32)
     else()
         message(FATAL_ERROR "VCPKG_ROOT environment variable not set. Please set it to your vcpkg installation directory.")
     endif()
-elseif(UNIX AND NOT APPLE)
+elseif(UNIX)
     # Linux: Try conda first, then system
     if(DEFINED ENV{CONDA_PREFIX})
         include_directories("$ENV{CONDA_PREFIX}/include")
         link_directories("$ENV{CONDA_PREFIX}/lib")
-    endif()
-elseif(APPLE)
-    # macOS: Homebrew support
-    if(DEFINED ENV{HOMEBREW_PREFIX})
-        include_directories("$ENV{HOMEBREW_PREFIX}/include")
-        link_directories("$ENV{HOMEBREW_PREFIX}/lib")
     endif()
 endif()
 
@@ -36,8 +30,6 @@ find_package(TIFF REQUIRED)
 
 if(WIN32)
     find_package(unofficial-sqlite3 CONFIG REQUIRED)
-else()
-    find_package(SQLite3 REQUIRED)
 endif()
 
 # Add source files
@@ -65,8 +57,8 @@ if(WIN32)
     target_link_libraries(deramp_burst PRIVATE TIFF::TIFF unofficial::sqlite3::sqlite3)
     target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF unofficial::sqlite3::sqlite3)
 else()
-    target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite::SQLite3)
-    target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite::SQLite3)
+    target_link_libraries(deramp_burst PRIVATE TIFF::TIFF sqlite3)
+    target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF sqlite3)
 endif()
 
 # Install CUDA executables into the Python package: s1proc/bin/
