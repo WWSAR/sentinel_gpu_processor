@@ -139,15 +139,20 @@ def footprint_bounds(orbfname:str, dbfname:str):
     dmrg = SOL/2./range_sampling_rate
     rngend = rngstart + (nrange-1)*dmrg
 
-    rah = []
-    for t in [starttime, stoptime]:
-        for i, r in enumerate([rngstart, rngend]):
-            if i == 0:
-                rah.append([r,t,0])
-            else:
-                rah.append([r,t,10000])
-    lats,lons = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah))
-    return np.array(list(zip(lons, lats)))
+    rah1 = []
+    rah2 = []
+    corners = [(starttime, rngstart),
+               (starttime, rngend),
+               (stoptime, rngend),
+               (stoptime, rngstart),
+               (starttime, rngstart)]
+    
+    for t, r in corners:
+        rah1.append([r,t,0])
+        rah2.append([r,t,10000])
+    lats1,lons1 = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah1))
+    lats2,lons2 = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah2))
+    return np.array(list(zip(lons1, lats1))), np.array(list(zip(lons2, lats2)))
 
 def sentinel_scene(
         zip_file: str,
@@ -276,8 +281,16 @@ def sentinel_scene(
         c.close()
         con.close()
 
-        footprint = footprint_bounds(orbfname, dbfname)
-        bounds = dem_bounds(footprint, rsc)
+        footprint1, footprint2 = footprint_bounds(orbfname, dbfname)
+        bounds1 = dem_bounds(footprint1, rsc)
+        bounds2 = dem_bounds(footprint2, rsc)
+        if bounds1 is None:
+            bounds = bounds2
+        elif bounds2 is None:
+            bounds = bounds1
+        else:
+            bounds = [min(bounds1[0], bounds2[0]),min(bounds1[1], bounds2[1]),
+                      max(bounds1[2], bounds2[2]),max(bounds1[3], bounds2[3])]
         bounds_list.append(bounds)
         if bounds is None:
             continue
