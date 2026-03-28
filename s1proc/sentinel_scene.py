@@ -93,6 +93,8 @@ def dem_bounds(footprint, rsc):
         return None
     rowmin, colmin = rsc.ll2xy(overlap_bbox[3],overlap_bbox[0])
     rowmax, colmax = rsc.ll2xy(overlap_bbox[1],overlap_bbox[2])
+    rowmax = rowmax + 1
+    colmax = colmax + 1
     rowmin = int(np.maximum(rowmin, 0))
     colmin = int(np.maximum(colmin, 0))
     rowmax = int(np.minimum(rowmax, rsc.nlat))
@@ -358,7 +360,7 @@ def sentinel_scene(
         os.remove(zip_file)
     # Clean up unzipped SAFE folders to lessen disk space requirements
     if rm_folder:
-        shutil.rmtree(dir)
+        shutil.rmtree(data_dir)
 
     logger.info('Loop over swaths complete.')
 
