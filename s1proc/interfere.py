@@ -155,7 +155,7 @@ def interfere_subswath(
         Number of looks in the column direction
     """
     crossmul = get_bin_path('crossmul')
-    crossmul_sec = get_bin_path('corssmul_sec')
+    crossmul_sec = get_bin_path('crossmul_sec')
     command = f'{crossmul} {main_img_file} {sec_img_file} {rowlook} {collook}' + \
               f' {outfile}'
     logger.info(command)
