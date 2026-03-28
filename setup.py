@@ -28,31 +28,17 @@ class CMakeBuild(build_ext):
             )
             subprocess.check_call(["cmake", "--build", str(build_dir)])
             subprocess.check_call(["cmake", "--install", str(build_dir)])
-        super().run()
 
 # CMake will have built the .so/.pyd directly into ext_dir — no need to copy manually
 
-if os.name == 'nt':
-    setup(
-        name="s1proc",
-        version="0.1.0",
-        packages=["s1proc"],
-        cmdclass={"build_ext": CMakeBuild},
-        include_package_data=True,
-        package_data={
-            "s1proc": ["bin/*"],
-        }
-    )
-else:
-    setup(
-        name="s1proc",
-        version="0.1.0",
-        packages=["s1proc"],
-        ext_modules=[Extension("s1proc_cuda", sources=[])],
-        cmdclass={"build_ext": CMakeBuild},
-        include_package_data=True,
-        package_data={
-            "s1proc": ["bin/*"],
-        }
-    )
-
+setup(
+    name="s1proc",
+    version="0.1.0",
+    packages=["s1proc"],
+    ext_modules=[Extension("s1proc_cuda", sources=[])],
+    cmdclass={"build_ext": CMakeBuild},
+    include_package_data=True,
+    package_data={
+        "s1proc": ["bin/*"],
+    }
+)
