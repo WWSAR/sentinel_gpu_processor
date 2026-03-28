@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path
 from typing import Sequence
 
-from s1proc import sql_mod
+from s1proc import sql_mod, get_bin_path
 from s1proc._log import setup_logger, set_logging_level
 from s1proc.geocoordinates import GeoCoordinates
 from s1proc.orbit import rah2ll
@@ -187,6 +187,10 @@ def sentinel_scene(
     logger.info(f'Processing: {zip_file} to a geocoded SLC')
     logger.debug(f'input orbit file: {orbfile}')
 
+    readgeotiff = get_bin_path('readgeotiff')
+    deramp_burst = get_bin_path('deramp_burst')
+    geo2rdr_reramp = get_bin_path('geo2rdr_reramp')
+
     sent = sentinel_parser(zip_file)
     mission_id = sent['mission_id']
     unique_id = sent['unique_id']
@@ -287,7 +291,7 @@ def sentinel_scene(
 
         basename = os.path.basename(fn)
         output_slc_file = os.path.join(data_dir,basename.replace('tiff','rawslc'))
-        command= 'readgeotiff '+fn.rstrip()+' '+output_slc_file+' '+\
+        command= readgeotiff+' '+fn.rstrip()+' '+output_slc_file+' '+\
                 linereverse+' '+pixelreverse
         logger.info(command)
         ret = subprocess.check_call(command, shell=True)
@@ -323,7 +327,7 @@ def sentinel_scene(
         con.close()
 
         # deramp the slave file
-        command='deramp_burst '+slavedb.strip()+' '+rawslcfile+' '+deramp_phase_file
+        command=deramp_burst+' '+slavedb.strip()+' '+rawslcfile+' '+deramp_phase_file
         logger.info(command)
         os.system(command)
 
@@ -334,7 +338,7 @@ def sentinel_scene(
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
         compress_slc_file = os.path.join(slc_dir,
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.geo')
-        command = f'geo2rdr_reramp {slavedb} {deramp_phase_file} ' + \
+        command = f'{geo2rdr_reramp} {slavedb} {deramp_phase_file} ' + \
                    f'{main_slc_file} {sec_slc_file} {bounds[0]} ' + \
                    f'{bounds[1]} {bounds[2]} {bounds[3]}'
         logger.info(command)

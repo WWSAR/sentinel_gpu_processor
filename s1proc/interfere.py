@@ -4,6 +4,7 @@ import os
 import shutil
 from typing import Tuple, Sequence
 
+from s1proc import get_bin_path
 from s1proc import geocoordinates
 from s1proc import sario
 from s1proc.sario import CroppedImage, Subswath, NHEAD
@@ -153,96 +154,20 @@ def interfere_subswath(
     collook: int
         Number of looks in the column direction
     """
-    command = f'crossmul {main_img_file} {sec_img_file} {rowlook} {collook}' + \
+    crossmul = get_bin_path('crossmul')
+    crossmul_sec = get_bin_path('corssmul_sec')
+    command = f'{crossmul} {main_img_file} {sec_img_file} {rowlook} {collook}' + \
               f' {outfile}'
     logger.info(command)
     os.system(command)
     main_supp_img_file = main_img_file.replace('main','sec')
     sec_supp_img_file = sec_img_file.replace('main','sec')
-    command = f'crossmul_sec {main_img_file} {main_supp_img_file} ' + \
+    command = f'{crossmul_sec} {main_img_file} {main_supp_img_file} ' + \
               f'{sec_img_file} {sec_supp_img_file} {outfile} ' + \
               f'{rowlook} {collook}'
     logger.info(command)
     os.system(command)
     return
-    f = open(outfile, 'r+b')
-    ifg_header = np.fromfile(f, count = NHEAD, dtype = np.int32)
-    ifg_left0, ifg_top0, ifg_right0, ifg_bottom0 = \
-            ifg_header[2], ifg_header[3], ifg_header[4], ifg_header[5]
-    ncol0 = ifg_right0 - ifg_left0
-    subswath1 = Subswath.from_file(main_img_file)
-    subswath2 = Subswath.from_file(sec_img_file)
-    nstrip1 = len(subswath1.sec)
-    nstrip2 = len(subswath2.sec)
-    idx1 = idx2 = 0
-    header_bytes = NHEAD * 4
-    row_bytes = (ifg_right0 - ifg_left0)*8
-    while idx1 < nstrip1 and idx2 < nstrip2:
-        strip1 = subswath1.sec[idx1]
-        strip2 = subswath2.sec[idx2]
-        strip, next_flag = crossmul_strip(strip1, strip2, rowlook, collook)
-        if strip is None:
-            if next_flag == 0:
-                idx1 += 1
-                continue
-            elif next_flag == 1:
-                idx2 += 1
-                continue
-            elif next_flag == 2:
-                idx1 += 1
-                idx2 += 1
-                continue
-        else:
-            idx1 += 1
-            idx2 += 1
-
-        # load corresponding data strip from the main image of the other
-        # subswath
-        curr_top = strip.top
-        curr_bottom = strip.bottom
-        curr_left = strip.left
-        curr_right = strip.right
-        if next_flag == 3:
-            # strip is extracted from strip1, need to interfere it with
-            # subswath2
-            ref_data = strip.data
-            sec_data = subswath2.main.load_data(
-                    curr_left, curr_top, curr_right, curr_bottom)
-        else:
-            # strip is extracted from strip2, need to interfere it with
-            # subswath1
-            sec_data = strip.data
-            ref_data = subswath1.main.load_data(
-                    curr_left, curr_top, curr_right, curr_bottom)
-        # form the multilooked interferogram
-        ifg = sario.cpxlooks(np.conj(ref_data)*sec_data, rowlook, collook)
-        ifg_top = curr_top // rowlook
-        ifg_bottom = curr_bottom // rowlook
-        ifg_left = curr_left // collook
-        ifg_right = curr_right // collook
-        mask = np.abs(ifg) > 0
-
-        # move to the first requested line
-        offset = header_bytes + (ifg_top-ifg_top0) * row_bytes
-        f.seek(offset)
-        # read rows
-        nrow = ifg_bottom - ifg_top
-        ncol = ifg_right - ifg_left
-        data = np.fromfile(f, dtype = np.complex64, count=nrow*ncol0)
-        data = data.reshape(nrow, ncol0)
-        data_overlap = data[:,ifg_left - ifg_left0 : ifg_right - ifg_left0]
-        data_overlap[mask] = ifg[mask]
-        #data[:,ifg_left - ifg_left0 : ifg_right - ifg_left0] = data_overlap
-        #fig, ax = plt.subplots(2,1)
-        #ax[0].imshow(np.angle(data),cmap='jet')
-        #ax[1].imshow(np.angle(ifg),cmap='jet')
-        #plt.show()
-        #plt.close()
-        # go back to the same position
-        f.seek(offset)
-        # write back
-        data.astype(np.complex64).tofile(f)
-    f.close()
 
 def stitch(
         ifg_files: Sequence[str],
