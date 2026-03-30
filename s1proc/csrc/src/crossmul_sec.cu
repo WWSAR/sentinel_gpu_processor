@@ -24,6 +24,7 @@ if (err != cudaSuccess) { \
     exit(1); \
 } } while(0)
 
+
 template<unsigned int block_size>
 __device__ void warpReduce(volatile float *sdata, unsigned int tid){
     if(block_size>=64){
@@ -111,15 +112,13 @@ __global__ void find_first_last_nonzero_row_warp(
     int ncol,
     int* first_row,
     int* last_row)
+
 {
     int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / warpSize;
     int lane    = threadIdx.x % warpSize;
-
     if (warp_id >= nrow)
         return;
-
     const int* row_ptr = data + warp_id * ncol;
-
     bool found = false;
 
     // Scan columns in stride of warpSize
@@ -131,9 +130,7 @@ __global__ void find_first_last_nonzero_row_warp(
             break;
         }
     }
-
     unsigned mask = __ballot_sync(0xffffffff, found);
-
     if (mask && lane == 0)
     {
         // Update first and last row atomically
@@ -144,38 +141,34 @@ __global__ void find_first_last_nonzero_row_warp(
 
 int get_first_last_nonzero_row(int* d_data, int nrow, int ncol,
                                int &first, int &last)
+
 {
     int h_first = nrow;  // initialize to nrow for atomicMin
     int h_last  = -1;    // initialize to -1 for atomicMax
-
     int *d_first, *d_last;
+
     CHECK_CUDA(cudaMalloc(&d_first, sizeof(int)));
     CHECK_CUDA(cudaMalloc(&d_last,  sizeof(int)));
-
     CHECK_CUDA(cudaMemcpy(d_first, &h_first, sizeof(int),
                 cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_last,  &h_last,  sizeof(int),
                 cudaMemcpyHostToDevice));
-
     int threads = 256;
     int warps_per_block = threads / 32;
     int blocks = (nrow + warps_per_block - 1) / warps_per_block;
-
     find_first_last_nonzero_row_warp<<<blocks, threads>>>(
         d_data, nrow, ncol, d_first, d_last);
+
     CHECK_CUDA(cudaDeviceSynchronize());
     CHECK_CUDA(cudaMemcpy(&h_first, d_first, sizeof(int),
                 cudaMemcpyDeviceToHost));
     CHECK_CUDA(cudaMemcpy(&h_last,  d_last,  sizeof(int),
                 cudaMemcpyDeviceToHost));
-
     cudaFree(d_first);
     cudaFree(d_last);
-
     // If no non-zero row exists
     first = (h_first == nrow) ? -1 : h_first;
     last  = h_last;
-
     return 0;
 }
 
@@ -228,9 +221,7 @@ void cpx_col_look(Complex *a, Complex *b, const int collook,
     std::size_t stride = blockDim.x * gridDim.x;
     std::size_t ncol_sm = ncol/collook, row, col, idx0;
     Complex temp, sum;
-    int count;
     for (std::size_t i = index; i < n; i += stride){
-        count = 0;
         sum.x = 0;
         sum.y = 0;
         row = i/ncol_sm;
@@ -238,19 +229,11 @@ void cpx_col_look(Complex *a, Complex *b, const int collook,
         idx0 = row*ncol+col*collook;
         for (std::size_t j = 0; j < collook; j++) {
             temp = a[idx0+j];
-            if (temp.x != 0){
-                count++;
-            }
             sum.x = sum.x + temp.x;
             sum.y = sum.y + temp.y;
         }
-        if (count <= 1){
-            sum.x = 0;
-            sum.y = 0;
-        }else{
-            sum.x = sum.x/collook;
-            sum.y = sum.y/collook;
-        }
+        sum.x = sum.x/collook;
+        sum.y = sum.y/collook;
         b[i] = sum;
     }
 }
@@ -262,10 +245,8 @@ void cpx_row_look(Complex *a, Complex *b, const std::size_t rowlook,
     std::size_t stride = blockDim.x * gridDim.x;
     std::size_t row,col,idx0;
     Complex temp, sum;
-    int count;
 
     for (std::size_t i = index; i < n; i += stride){
-        count = 0;
         sum.x = 0;
         sum.y = 0;
         row = i/ncol;
@@ -273,19 +254,11 @@ void cpx_row_look(Complex *a, Complex *b, const std::size_t rowlook,
         idx0 = row*rowlook*ncol+col;
         for (std::size_t j = 0; j < rowlook; ++j) {
             temp = a[idx0+j*ncol];
-            if (temp.x != 0) {
-                count++;
-            }
             sum.x = sum.x + temp.x;
             sum.y = sum.y + temp.y;
         }
-        if (count <= 1){
-            sum.x = 0;
-            sum.y = 0;
-        }else{
-            sum.x = sum.x/rowlook;
-            sum.y = sum.y/rowlook;
-        }
+        sum.x = sum.x/rowlook;
+        sum.y = sum.y/rowlook;
         b[i] = sum;
     }
 }
@@ -310,7 +283,7 @@ void non_overlap_mask(
             mask1[i] = 1;
             mask2[i] = 0;
             b[i] = zero;
-        }else if(ax == 0 && bx == 1){
+        }else if(ax == 0 && bx != 0){
             mask1[i] = 0;
             mask2[i] = 1;
             a[i] = zero;
@@ -355,6 +328,126 @@ void multilook(
     cudaFree(d_ifg_collook);
 }
 
+__global__
+void point_power(Complex *a, float *b, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    Complex ai;
+    for (std::size_t i = index; i < n; i += stride){
+        ai = a[i];
+        b[i] = ai.x*ai.x+ai.y*ai.y;
+    }
+}
+
+__global__
+void coherence_kernel(Complex *d_ifg, float *d_amp, float *d_coh, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    Complex ai;
+    for (std::size_t i = index; i < n; i += stride){
+        ai = d_ifg[i];
+        if (d_amp[i] > 0){
+            d_coh[i] = (ai.x*ai.x+ai.y*ai.y)/d_amp[i];
+        }else{
+            d_coh[i] = 0;
+        }
+    }
+}
+
+__global__
+void col_look(float *a, float *b, const int collook,
+              const std::size_t ncol, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    std::size_t ncol_sm = ncol/collook, row, col, idx0;
+    float sum;
+    for (std::size_t i = index; i < n; i += stride){
+        row = i/ncol_sm;
+        col = i - row*ncol_sm;
+        idx0 = row*ncol+col*collook;
+        sum = 0.;
+        for (std::size_t j = 0; j < collook; j++) {
+            sum += a[idx0+j];
+        }
+        b[i] = sum/collook;
+    }
+}
+
+__global__
+void row_look(float *a, float *b, const std::size_t rowlook,
+              const std::size_t ncol, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    std::size_t row,col,idx0;
+    float sum;
+
+    for (std::size_t i = index; i < n; i += stride){
+        row = i/ncol;
+        col = i%ncol;
+        idx0 = row*rowlook*ncol+col;
+        sum = 0.;
+        for (std::size_t j = 0; j < rowlook; ++j) {
+            sum += a[idx0+j*ncol];
+        }
+        b[i] = sum/rowlook;
+    }
+}
+
+float cal_coherence(Complex *d_ifg, const int nrow, const int ncol){
+    const int block_size = 256;
+    const int rowlook = 5, collook = 5;
+    int num_blocks = (nrow*ncol+block_size-1)/block_size;
+    int nrow_sm = nrow/rowlook;
+    int ncol_sm = ncol/collook;
+    if (nrow_sm <= 0 || ncol_sm <= 0){
+        return 0;
+    }
+    float coh;
+    Complex *d_ifg_collook, *d_ifg_look;
+    float *d_amp, *d_amp_collook, *d_amp_look;
+    // allocate memory
+    CHECK_CUDA(cudaMalloc((void**)&d_ifg_collook,sizeof(Complex)*nrow*ncol_sm));
+    CHECK_CUDA(cudaMalloc((void**)&d_ifg_look,sizeof(Complex)*nrow_sm*ncol_sm));
+    CHECK_CUDA(cudaMalloc((void**)&d_amp,sizeof(float)*nrow*ncol));
+    CHECK_CUDA(cudaMalloc((void**)&d_amp_collook,sizeof(float)*nrow*ncol_sm));
+    CHECK_CUDA(cudaMalloc((void**)&d_amp_look,sizeof(float)*nrow_sm*ncol_sm));
+
+    // calculate amplitude
+    point_power<<<num_blocks,block_size>>>(d_ifg,d_amp,nrow*ncol);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    // column look
+    cpx_col_look<<<num_blocks,block_size>>>(d_ifg,d_ifg_collook,
+                                          collook,ncol,nrow*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    col_look<<<num_blocks,block_size>>>(d_amp,d_amp_collook,
+                                          collook,ncol,nrow*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    // row look
+    num_blocks = (nrow_sm*ncol_sm+block_size-1)/block_size;
+    cpx_row_look<<<num_blocks,block_size>>>(d_ifg_collook,d_ifg_look,
+                                            rowlook,ncol_sm,nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    row_look<<<num_blocks,block_size>>>(d_amp_collook,d_amp_look,
+                                        rowlook,ncol_sm,nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    // coherence calculation
+    coherence_kernel<<<num_blocks,block_size>>>(
+        d_ifg_look,d_amp_look,d_amp_look,nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    coh = reduce_sum(d_amp_look, nrow_sm*ncol_sm, block_size);
+    coh = coh/(nrow_sm*ncol_sm);
+    cudaFree(d_amp);
+    cudaFree(d_amp_collook);
+    cudaFree(d_amp_look);
+    cudaFree(d_ifg_collook);
+    cudaFree(d_ifg_look);
+    return coh;
+}
+
 void crossmul_strip(
         Strip *strip1,
         Strip *strip2,
@@ -374,6 +467,7 @@ void crossmul_strip(
     Complex *d_slc1, *d_slc2, *d_main, *d_ifgsec;
     Complex *d_ifgmain, *d_ifgmain_masked;
     int *d_mask1, *d_mask2;
+    float coh_main, coh_sec;
 
     if (strip1->top > strip2->bottom){
         next_flag = 0;
@@ -417,6 +511,8 @@ void crossmul_strip(
     get_first_last_nonzero_row(d_mask2, nrow, ncol,
             first_nonzero_row2, last_nonzero_row2);
     cudaFree(d_mask2);
+    std::cout << "first nonzero row strip1 " << first_nonzero_row1 << ", last nonzero row strip1 " << last_nonzero_row1 << std::endl;
+    std::cout << "first nonzero row strip2 " << first_nonzero_row2 << ", last nonzero row strip2 " << last_nonzero_row2 << std::endl;
 
     // decide which mask will be used for interferogram generation
     if (first_nonzero_row1 == -1 && first_nonzero_row2 == -1){
@@ -469,25 +565,14 @@ void crossmul_strip(
         multilook(d_slc1,d_main,d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc1);
     }else{
-        main1->load_data(
-               left, top, right, top);
+        main1->load_data(left, top, right, bottom);
         CHECK_CUDA(cudaMemcpy(d_main,main1->data,sizeof(Complex)*ncol*nrow,
                 cudaMemcpyHostToDevice));
         multilook(d_main,d_slc2,d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc2);
     }
-    //Complex *ifgsec, *slcmain;
-    //slcmain = (Complex*)malloc(sizeof(Complex)*nrow*ncol);
-    //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
-    //CHECK_CUDA(cudaMemcpy(slcmain,d_main,sizeof(Complex)*nrow*ncol,
-    //           cudaMemcpyDeviceToHost));
-    //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
-    //           cudaMemcpyDeviceToHost));
-    //save_binary<Complex>(ifgsec, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+".int");
-    //save_binary<Complex>(slcmain, 0, nrow*ncol, std::to_string(top/rowlook - ifg->top)+".slc");
-    //cudaFree(d_main);
-    //free(ifgsec);
-    //free(slcmain);
+    cudaFree(d_main);
+    
 
     // load main interferogram strip
     CHECK_CUDA(cudaMalloc((void**)&d_ifgmain,sizeof(Complex)*nrow_sm*ncol_sm));
@@ -501,13 +586,30 @@ void crossmul_strip(
     apply_mask<<<num_blocks, block_size>>>(d_ifgmain, d_ifgmain_masked,
             d_ifgsec, nrow_sm*ncol_sm);
     CHECK_CUDA(cudaDeviceSynchronize());
-
-    replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
-            d_ifgmain,sizeof(Complex)*ncol_sm*nrow_sm,
-            cudaMemcpyDeviceToHost));
-    updated = true;
+    //Complex *ifgsec, *ifgmain;
+    //ifgmain = (Complex*)malloc(sizeof(Complex)*nrow_sm*ncol_sm);
+    //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
+    //CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain_masked,sizeof(Complex)*nrow_sm*ncol_sm,
+    //           cudaMemcpyDeviceToHost));
+    //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
+    //           cudaMemcpyDeviceToHost));
+    //save_binary<Complex>(ifgsec, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_sec.int");
+    //save_binary<Complex>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
+    //free(ifgsec);
+    //free(ifgmain);
+    
+    coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
+    coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
+    std::cout << "coh main " << coh_main << ", coh sec " << coh_sec << std::endl;
+    if (coh_sec > coh_main){
+        // replace main interferogram with secondary interferogram
+        replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
+                d_ifgmain,sizeof(Complex)*ncol_sm*nrow_sm,
+                cudaMemcpyDeviceToHost));
+        updated = true;
+    }
     cudaFree(d_ifgsec);
     cudaFree(d_ifgmain);
     return;
@@ -529,13 +631,12 @@ int crossmul_sec(
     Strip main2(main_slcfile2, false);
     Strip ifg(intfile, true);
     // end of declaration
-
     while (strip_idx1 < sec1.nstrip && strip_idx2 < sec2.nstrip){
         Strip strip1 = sec1.data[strip_idx1];
         Strip strip2 = sec2.data[strip_idx2];
         crossmul_strip(&strip1, &strip2, &main1, &main2, &ifg, rowlook, collook,
                 next_flag, updated);
-        std::cout << "strip idx1 " << strip_idx1 << ", strip_idx2 " << strip_idx2 << ", next flag " << next_flag << std::endl;
+        std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 << ", next_flag " << next_flag << std::endl;
         if (next_flag == 0){
             strip_idx2++;
             continue;
