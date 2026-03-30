@@ -25,77 +25,55 @@ if (err != cudaSuccess) { \
 } } while(0)
 
 template<unsigned int block_size>
-__device__ void warpReduce(volatile Complex *sdata, unsigned int tid){
+__device__ void warpReduce(volatile float *sdata, unsigned int tid){
     if(block_size>=64){
-        sdata[tid].x += sdata[tid+32].x;
-        sdata[tid].y += sdata[tid+32].y;
+        sdata[tid] += sdata[tid+32];
     }
     if(block_size>=32){
-        sdata[tid].x += sdata[tid+16].x;
-        sdata[tid].y += sdata[tid+16].y;
+        sdata[tid] += sdata[tid+16];
     }
     if(block_size>=16){
-        sdata[tid].x += sdata[tid+8].x;
-        sdata[tid].y += sdata[tid+8].y;
+        sdata[tid] += sdata[tid+8];
     }
     if(block_size>=8){
-        sdata[tid].x += sdata[tid+4].x;
-        sdata[tid].y += sdata[tid+4].y;
+        sdata[tid] += sdata[tid+4];
     }
     if(block_size>=4){
-        sdata[tid].x += sdata[tid+2].x;
-        sdata[tid].y += sdata[tid+2].y;
+        sdata[tid] += sdata[tid+2];
     }
     if(block_size>=2){
-        sdata[tid].x += sdata[tid+1].x;
-        sdata[tid].y += sdata[tid+1].y;
+        sdata[tid] += sdata[tid+1];
     }
     return;
 }
 
 template<unsigned int block_size>
-__global__ void reduce(Complex *idata,unsigned int n){
-    extern __shared__ Complex sdata[];
+__global__ void reduce(float *idata,unsigned int n){
+    extern __shared__ float sdata[];
     unsigned int tid = threadIdx.x;
     unsigned int i = blockIdx.x*(block_size*2)+tid;
     unsigned int gridSize = block_size*2*gridDim.x;
-    Complex a, b, zero;
-    float amp;
-    zero.x = 0.;
-    zero.y = 0.;
-    sdata[tid] = zero;
+    sdata[tid] = 0;
     while (i<n) {
-        a = idata[i];
-        b = idata[i+block_size];
-        amp = sqrt(a.x*a.x+a.y*a.y+1e-12);
-        a.x = a.x/amp;
-        a.y = a.y/amp;
-        amp = sqrt(b.x*b.x+b.y*b.y+1e-12);
-        b.x = b.x/amp;
-        b.y = b.y/amp;
-        sdata[tid].x += a.x+b.x;
-        sdata[tid].y += a.y+b.y;
+        sdata[tid] += idata[i] + idata[i+block_size];
         i+=gridSize;
     }
     __syncthreads();
     if (block_size >= 512){
         if (tid<256){
-            sdata[tid].x += sdata[tid+256].x;
-            sdata[tid].y += sdata[tid+256].y;
+            sdata[tid] += sdata[tid+256];
         }
         __syncthreads();
     }
     if (block_size >= 256){
         if (tid<128){
-            sdata[tid].x += sdata[tid+128].x;
-            sdata[tid].y += sdata[tid+128].y;
+            sdata[tid] += sdata[tid+128];
         }
         __syncthreads();
     }
     if (block_size >= 128){
         if (tid<64){
-            sdata[tid].x += sdata[tid+64].x;
-            sdata[tid].y += sdata[tid+64].y;
+            sdata[tid] += sdata[tid+64];
         }
         __syncthreads();
     }
@@ -106,9 +84,9 @@ __global__ void reduce(Complex *idata,unsigned int n){
     return;
 }
 
-float reduce_sum(Complex *d_c, unsigned int n, const unsigned int block_size){
-    Complex sum;
-    unsigned int smem_size=block_size*sizeof(Complex);
+float reduce_sum(float *d_c, unsigned int n, const unsigned int block_size){
+    float sum;
+    unsigned int smem_size = block_size*sizeof(float);
     unsigned int num_blocks = (n + block_size - 1)/block_size;
     while (1){
         if (block_size==512){
@@ -123,8 +101,8 @@ float reduce_sum(Complex *d_c, unsigned int n, const unsigned int block_size){
         }
         num_blocks = (n+block_size-1)/block_size;
     }
-    CHECK_CUDA(cudaMemcpy(&sum,d_c,sizeof(Complex),cudaMemcpyDeviceToHost));
-    return sum.x*sum.x + sum.y*sum.y;
+    CHECK_CUDA(cudaMemcpy(&sum,d_c,sizeof(float),cudaMemcpyDeviceToHost));
+    return sum;
 }
 
 __global__ void find_first_last_nonzero_row_warp(
@@ -250,27 +228,30 @@ void cpx_col_look(Complex *a, Complex *b, const int collook,
     std::size_t stride = blockDim.x * gridDim.x;
     std::size_t ncol_sm = ncol/collook, row, col, idx0;
     Complex temp, sum;
+    int count;
     for (std::size_t i = index; i < n; i += stride){
-       sum.x = 0;
-       sum.y = 0;
-       row = i/ncol_sm;
-       col = i - row*ncol_sm;
-       idx0 = row*ncol+col*collook;
-       for (std::size_t j = 0; j < collook; j++) {
+        count = 0;
+        sum.x = 0;
+        sum.y = 0;
+        row = i/ncol_sm;
+        col = i - row*ncol_sm;
+        idx0 = row*ncol+col*collook;
+        for (std::size_t j = 0; j < collook; j++) {
             temp = a[idx0+j];
-            //if(i==1999*ncol_sm+ncol_sm/2){
-            //    printf("ncol_sm:%llu,j:%llu,temp.x=%f,temp.y=%f\n",ncol_sm,j,temp.x,temp.y);
-            //}
+            if (temp.x != 0){
+                count++;
+            }
             sum.x = sum.x + temp.x;
             sum.y = sum.y + temp.y;
-       }
-       //if(i==200000){
-       // printf("collook:%d\n",collook);
-       // printf("idx = %u, sum.x = %f, sum.y =%f\n",idx0,sum.x,sum.y);
-       //}
-       sum.x = sum.x/collook;
-       sum.y = sum.y/collook;
-       b[i] = sum;
+        }
+        if (count <= 1){
+            sum.x = 0;
+            sum.y = 0;
+        }else{
+            sum.x = sum.x/collook;
+            sum.y = sum.y/collook;
+        }
+        b[i] = sum;
     }
 }
 
@@ -281,30 +262,31 @@ void cpx_row_look(Complex *a, Complex *b, const std::size_t rowlook,
     std::size_t stride = blockDim.x * gridDim.x;
     std::size_t row,col,idx0;
     Complex temp, sum;
+    int count;
 
     for (std::size_t i = index; i < n; i += stride){
-       sum.x = 0;
-       sum.y = 0;
-       row = i/ncol;
-       col = i%ncol;
-       idx0 = row*rowlook*ncol+col;
-       //if(row==1 && col == 1){
-       // printf("row:%llu,col:%llu\n",row,col);
-       // printf("idx0:%llu\n",idx0);
-       // printf("rowlook:%llu\n",rowlook);
-       // printf("ncol:%llu\n",ncol);
-       // temp = a[idx0+ncol];
-       // printf("temp.x:%f,temp.y:%f\n",temp.x,temp.y);
-       // ////printf("idx = %u, sum.x = %f, sum.y =%f\n",idx0,sum.x,sum.y);
-       //}
-       for (std::size_t j = 0; j < rowlook; ++j) {
+        count = 0;
+        sum.x = 0;
+        sum.y = 0;
+        row = i/ncol;
+        col = i%ncol;
+        idx0 = row*rowlook*ncol+col;
+        for (std::size_t j = 0; j < rowlook; ++j) {
             temp = a[idx0+j*ncol];
+            if (temp.x != 0) {
+                count++;
+            }
             sum.x = sum.x + temp.x;
             sum.y = sum.y + temp.y;
-       }
-       sum.x = sum.x/rowlook;
-       sum.y = sum.y/rowlook;
-       b[i] = sum;
+        }
+        if (count <= 1){
+            sum.x = 0;
+            sum.y = 0;
+        }else{
+            sum.x = sum.x/rowlook;
+            sum.y = sum.y/rowlook;
+        }
+        b[i] = sum;
     }
 }
 
@@ -389,7 +371,6 @@ void crossmul_strip(
     int first_nonzero_row, first_nonzero_row1, first_nonzero_row2;
     int last_nonzero_row, last_nonzero_row1, last_nonzero_row2;
     int block_size = 256, num_blocks;
-    float coh_main, coh_sec;
     Complex *d_slc1, *d_slc2, *d_main, *d_ifgsec;
     Complex *d_ifgmain, *d_ifgmain_masked;
     int *d_mask1, *d_mask2;
@@ -495,7 +476,18 @@ void crossmul_strip(
         multilook(d_main,d_slc2,d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc2);
     }
-    cudaFree(d_main);
+    //Complex *ifgsec, *slcmain;
+    //slcmain = (Complex*)malloc(sizeof(Complex)*nrow*ncol);
+    //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
+    //CHECK_CUDA(cudaMemcpy(slcmain,d_main,sizeof(Complex)*nrow*ncol,
+    //           cudaMemcpyDeviceToHost));
+    //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
+    //           cudaMemcpyDeviceToHost));
+    //save_binary<Complex>(ifgsec, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+".int");
+    //save_binary<Complex>(slcmain, 0, nrow*ncol, std::to_string(top/rowlook - ifg->top)+".slc");
+    //cudaFree(d_main);
+    //free(ifgsec);
+    //free(slcmain);
 
     // load main interferogram strip
     CHECK_CUDA(cudaMalloc((void**)&d_ifgmain,sizeof(Complex)*nrow_sm*ncol_sm));
@@ -510,21 +502,12 @@ void crossmul_strip(
             d_ifgsec, nrow_sm*ncol_sm);
     CHECK_CUDA(cudaDeviceSynchronize());
 
-    // calculate the average coherence of main and secondary interferogram
-    // strips
-    coh_main = reduce_sum(d_ifgmain_masked, nrow_sm*ncol_sm, block_size);
-    CHECK_CUDA(cudaMemcpy(d_ifgmain_masked,d_ifgsec,
-           sizeof(Complex)*ncol_sm*nrow_sm,cudaMemcpyDeviceToDevice));
-    coh_sec = reduce_sum(d_ifgmain_masked, nrow_sm*ncol_sm, block_size);
-    cudaFree(d_ifgmain_masked);
-    if (coh_sec > coh_main){
-        replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
-        CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
-                d_ifgmain,sizeof(Complex)*ncol_sm*nrow_sm,
-                cudaMemcpyDeviceToHost));
-        updated = true;
-    }
+    replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
+            d_ifgmain,sizeof(Complex)*ncol_sm*nrow_sm,
+            cudaMemcpyDeviceToHost));
+    updated = true;
     cudaFree(d_ifgsec);
     cudaFree(d_ifgmain);
     return;
