@@ -18,13 +18,15 @@ def main()->int:
     from s1proc.stitch import main as stitch_ifg
     from s1proc.interfere import interfere
     from s1proc.sentinel_stack import stack as stack
+    from s1proc.unwrap import batch_snaphu
     tyro.extras.subcommand_cli_from_dict(
         {
             "interfere": interfere,
             "slcpairs": create_slc_pair_list,
             "stitch": stitch_ifg,
             "midorb": mid_orbit,
-            "stack": stack
+            "stack": stack,
+            "unwrap": batch_snaphu
         })
     return os.EX_OK
 
