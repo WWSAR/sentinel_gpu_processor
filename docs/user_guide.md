@@ -6,7 +6,7 @@ The Sentinel GPU Processor is a command-line tool for processing Sentinel-1 SAR 
 
 ## Available Commands
 
-The tool provides six main subcommands for different processing stages:
+The tool provides four main subcommands for different processing stages:
 
 1. **`stack`**  
    Process a Sentinel-1 data stack into geocoded SLCs (Single Look Complex images).  
