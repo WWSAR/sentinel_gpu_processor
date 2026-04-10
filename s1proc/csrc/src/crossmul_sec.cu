@@ -191,11 +191,18 @@ __global__ void apply_mask(Complex *a, Complex *b, Complex *mask,
 __global__ void replace(Complex *a, Complex *b, const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
-    Complex bi;
+    Complex ai, bi;
+    float ai_amp, bi_amp, ratio;
     for (std::size_t i = index; i < n; i += stride){
-        bi = b[i];
         if (bi.x != 0){
-            a[i] = bi;
+            bi = b[i];
+            ai = a[i];
+            ai_amp = sqrtf(ai.x*ai.x + ai.y*ai.y);
+            bi_amp = sqrtf(bi.x*bi.x + bi.y*bi.y);
+            ratio = ai_amp/(bi_amp + 1e-10);
+            ai.x = bi.x * ratio;
+            ai.y = bi.y * ratio; 
+            a[i] = ai;
         }
     }
 }
