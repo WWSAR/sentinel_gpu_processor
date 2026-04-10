@@ -40,6 +40,7 @@ add_executable(geo2rdr_reramp src/geo2rdr_reramp.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu src/bounds.cu)
 add_executable(crossmul src/crossmul.cu src/sario.cu)
 add_executable(crossmul_sec src/crossmul_sec.cu src/sario.cu)
+add_executable(multilook_amp src/multilook_amp.cu src/sario.cu)
 
 set_target_properties(geo2rdr_reramp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
@@ -49,6 +50,7 @@ target_include_directories(deramp_burst PRIVATE "include")
 target_include_directories(geo2rdr_reramp PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
 target_include_directories(crossmul_sec PRIVATE "include")
+target_include_directories(multilook_amp PRIVATE "include")
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
@@ -62,6 +64,6 @@ else()
 endif()
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec
+install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp
         RUNTIME DESTINATION s1proc/bin
 )

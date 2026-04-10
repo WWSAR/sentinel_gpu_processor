@@ -11,7 +11,7 @@ BLOCK = 512
 
 class CroppedImage:
     def __init__(self, nrow0:int, ncol0:int, left:int, top:int, right:int,
-            bottom:int, data:np.ndarray|None|str):
+            bottom:int, data:np.ndarray|None|str, dtype:type = np.complex64):
         """
         Initialize a Cropped Image object
 
@@ -26,6 +26,8 @@ class CroppedImage:
             np.ndarray: fully loaded cropped image
             str: filename of the cropped image
             None: placeholder
+        dtype: type
+            Type of the image data
         """
         self.nrow0 = nrow0
         self.ncol0 = ncol0
@@ -36,9 +38,11 @@ class CroppedImage:
         self.data = data
         self.nrow = bottom - top
         self.ncol = right - left
+        self.dtype = dtype
 
     @classmethod
-    def from_file(cls, filename: str, load_data: bool = False):
+    def from_file(cls, filename: str, load_data: bool = False,
+                  dtype: type = np.complex64):
         """
         Initialize from a file
 
@@ -49,6 +53,8 @@ class CroppedImage:
         load_data: bool
             If true, load all data to the data field. Otherwise, the data
             field is set to `filename`
+        dtype: type
+            Type of the image data
 
         Returns
         -------
@@ -65,11 +71,11 @@ class CroppedImage:
             ncol = right - left
             if load_data:
                 data = np.fromfile(
-                        f, count = nrow * ncol, dtype = np.complex64)
+                        f, count = nrow * ncol, dtype = dtype)
                 data = np.reshape(data,(nrow, ncol))
             else:
                 data = filename
-            return cls(nrow0, ncol0, left, top, right, bottom, data)
+            return cls(nrow0, ncol0, left, top, right, bottom, data, dtype)
 
     def resample(self, left:int, top:int, right:int, bottom:int):
         """
@@ -131,11 +137,12 @@ class CroppedImage:
             with open(self.data, 'rb') as f:
                 overlap_top = np.maximum(top, self.top)
                 overlap_bottom = np.minimum(bottom, self.bottom)
-                f.seek(NHEAD*4 + (overlap_top - self.top)*self.ncol*8)
+                f.seek(NHEAD*4 + (overlap_top - self.top) * self.ncol *
+                                 np.dtype(self.dtype).itemsize)
                 d = np.fromfile(
                         f, 
                         count = (overlap_bottom - overlap_top)*self.ncol,
-                        dtype = np.complex64)
+                        dtype = self.dtype)
                 d = np.reshape(d, (overlap_bottom - overlap_top, self.ncol))
             # create a new CroppedImage for image resampling
             temp = CroppedImage(self.nrow0, self.ncol0, self.left,

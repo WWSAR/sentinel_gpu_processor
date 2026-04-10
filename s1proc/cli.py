@@ -19,6 +19,7 @@ def main()->int:
     from s1proc.interfere import interfere
     from s1proc.sentinel_stack import stack as stack
     from s1proc.unwrap import batch_snaphu
+    from s1proc.coherence import multilook_amp, coherence
     tyro.extras.subcommand_cli_from_dict(
         {
             "interfere": interfere,
@@ -26,7 +27,9 @@ def main()->int:
             "stitch": stitch_ifg,
             "midorb": mid_orbit,
             "stack": stack,
-            "unwrap": batch_snaphu
+            "unwrap": batch_snaphu,
+            "amp": multilook_amp,
+            "coh": coherence
         })
     return os.EX_OK
 
