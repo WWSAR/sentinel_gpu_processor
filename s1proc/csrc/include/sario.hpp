@@ -10,6 +10,52 @@
 typedef float2 Complex;
 const int NHEADER = 64;
 
+// classes
+class Strip
+{
+    public:
+    int nrow0;
+    int ncol0;
+    int left;
+    int top;
+    int right;
+    int bottom;
+    int start_line;
+
+    int nrow;
+    int ncol;
+    std::string fname;
+    Complex *data;
+
+    Strip(const int nrow0_, const int ncol0_,
+          const int left_, const int top_,
+          const int right_, const int bottom_,
+          const int start_line_,
+          std::string &fname_,
+          Complex* data_);
+
+    Strip(const std::string &fname_, bool load_data_);
+
+    void load_data(const int left, const int top, const int right,
+            const int bottom);
+
+    void save_data();
+};
+
+class Subswath
+{
+    public:
+    int nrow0;
+    int ncol0;
+    int left;
+    int right;
+    int nstrip;
+    std::string fname;
+    std::vector<Strip> data;
+    Subswath(const std::string &fname_);
+};
+
+// rsc structure
 struct rsc{
     int nlat;
     int nlon;
@@ -23,6 +69,7 @@ struct rsc{
 
 rsc readrsc(const std::string& rscfile);
 
+// io functions
 void read_polynomials(const std::string& fname,
                       int& n,
                       double **t,
@@ -199,48 +246,31 @@ void save_binary(
     fout.close();
 }
 
-class Strip
-{
-    public:
-    int nrow0;
-    int ncol0;
-    int left;
-    int top;
-    int right;
-    int bottom;
-    int start_line;
+// CUDA functions
 
-    int nrow;
-    int ncol;
-    std::string fname;
-    Complex *data;
+__global__
+void conj_mul(Complex *a, Complex *b, Complex *c, const std::size_t n);
 
-    Strip(const int nrow0_, const int ncol0_,
-          const int left_, const int top_,
-          const int right_, const int bottom_,
-          const int start_line_,
-          std::string &fname_,
-          Complex* data_);
+__global__
+void point_power(Complex *a, float *b, const std::size_t n);
 
-    Strip(const std::string &fname_, bool load_data_);
+__global__
+void point_sqrt(float *a, float *b, const std::size_t n);
 
-    void load_data(const int left, const int top, const int right,
-            const int bottom);
+__global__
+void cpx_col_look(Complex *a, Complex *b, const int collook,
+                  const std::size_t ncol, const std::size_t n);
 
-    void save_data();
-};
+__global__
+void cpx_row_look(Complex *a, Complex *b, const int rowlook,
+                  const std::size_t ncol, const std::size_t n);
 
-class Subswath
-{
-    public:
-    int nrow0;
-    int ncol0;
-    int left;
-    int right;
-    int nstrip;
-    std::string fname;
-    std::vector<Strip> data;
-    Subswath(const std::string &fname_);
-};
+__global__
+void col_look(float *a, float *b, const int collook,
+              const std::size_t ncol, const std::size_t n);
+
+__global__
+void row_look(float *a, float *b, const int rowlook,
+              const std::size_t ncol, const std::size_t n);
 
 #endif

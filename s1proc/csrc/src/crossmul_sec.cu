@@ -201,69 +201,6 @@ __global__ void replace(Complex *a, Complex *b, const std::size_t n){
 }
 
 __global__
-void conj_mul(Complex *a, Complex *b, Complex *c, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    Complex ai, bi, s;
-    for (std::size_t i = index; i < n; i += stride){
-       ai = a[i];
-       bi = b[i];
-       s.x = ai.x*bi.x+ai.y*bi.y;
-       s.y = -ai.y*bi.x+ai.x*bi.y;
-       c[i] = s;
-    }
-}
-
-__global__
-void cpx_col_look(Complex *a, Complex *b, const int collook,
-                  const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t ncol_sm = ncol/collook, row, col, idx0;
-    Complex temp, sum;
-    for (std::size_t i = index; i < n; i += stride){
-        sum.x = 0;
-        sum.y = 0;
-        row = i/ncol_sm;
-        col = i - row*ncol_sm;
-        idx0 = row*ncol+col*collook;
-        for (std::size_t j = 0; j < collook; j++) {
-            temp = a[idx0+j];
-            sum.x = sum.x + temp.x;
-            sum.y = sum.y + temp.y;
-        }
-        sum.x = sum.x/collook;
-        sum.y = sum.y/collook;
-        b[i] = sum;
-    }
-}
-
-__global__
-void cpx_row_look(Complex *a, Complex *b, const std::size_t rowlook,
-                  const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t row,col,idx0;
-    Complex temp, sum;
-
-    for (std::size_t i = index; i < n; i += stride){
-        sum.x = 0;
-        sum.y = 0;
-        row = i/ncol;
-        col = i%ncol;
-        idx0 = row*rowlook*ncol+col;
-        for (std::size_t j = 0; j < rowlook; ++j) {
-            temp = a[idx0+j*ncol];
-            sum.x = sum.x + temp.x;
-            sum.y = sum.y + temp.y;
-        }
-        sum.x = sum.x/rowlook;
-        sum.y = sum.y/rowlook;
-        b[i] = sum;
-    }
-}
-
-__global__
 void non_overlap_mask(
         Complex *a,
         Complex *b,
@@ -329,17 +266,6 @@ void multilook(
 }
 
 __global__
-void point_power(Complex *a, float *b, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    Complex ai;
-    for (std::size_t i = index; i < n; i += stride){
-        ai = a[i];
-        b[i] = ai.x*ai.x+ai.y*ai.y;
-    }
-}
-
-__global__
 void coherence_kernel(Complex *d_ifg, float *d_amp, float *d_coh, const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
@@ -351,45 +277,6 @@ void coherence_kernel(Complex *d_ifg, float *d_amp, float *d_coh, const std::siz
         }else{
             d_coh[i] = 0;
         }
-    }
-}
-
-__global__
-void col_look(float *a, float *b, const int collook,
-              const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t ncol_sm = ncol/collook, row, col, idx0;
-    float sum;
-    for (std::size_t i = index; i < n; i += stride){
-        row = i/ncol_sm;
-        col = i - row*ncol_sm;
-        idx0 = row*ncol+col*collook;
-        sum = 0.;
-        for (std::size_t j = 0; j < collook; j++) {
-            sum += a[idx0+j];
-        }
-        b[i] = sum/collook;
-    }
-}
-
-__global__
-void row_look(float *a, float *b, const std::size_t rowlook,
-              const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t row,col,idx0;
-    float sum;
-
-    for (std::size_t i = index; i < n; i += stride){
-        row = i/ncol;
-        col = i%ncol;
-        idx0 = row*rowlook*ncol+col;
-        sum = 0.;
-        for (std::size_t j = 0; j < rowlook; ++j) {
-            sum += a[idx0+j*ncol];
-        }
-        b[i] = sum/rowlook;
     }
 }
 

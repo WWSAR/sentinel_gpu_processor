@@ -25,85 +25,6 @@ if (err != cudaSuccess) { \
 } } while(0)
 
 
-__global__
-void conj_mul(Complex *a, Complex *b, Complex *c, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    Complex ai, bi, s;
-    for (std::size_t i = index; i < n; i += stride){ 
-       ai = a[i];
-       bi = b[i];
-       s.x = ai.x*bi.x+ai.y*bi.y;
-       s.y = -ai.y*bi.x+ai.x*bi.y;
-       c[i] = s;
-    }
-}
-
-__global__
-void cpx_col_look(Complex *a, Complex *b, const int collook,
-                  const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t ncol_sm = ncol/collook, row, col, idx0;
-    Complex temp, sum;
-    for (std::size_t i = index; i < n; i += stride){ 
-       sum.x = 0;
-       sum.y = 0;
-       row = i/ncol_sm;
-       col = i - row*ncol_sm;
-       idx0 = row*ncol+col*collook;
-       for (std::size_t j = 0; j < collook; j++) {
-            temp = a[idx0+j];
-            //if(i==1999*ncol_sm+ncol_sm/2){
-            //    printf("ncol_sm:%llu,j:%llu,temp.x=%f,temp.y=%f\n",ncol_sm,j,temp.x,temp.y);
-            //}
-            sum.x = sum.x + temp.x;
-            sum.y = sum.y + temp.y;
-       }
-       //if(i==200000){
-       // printf("collook:%d\n",collook);
-       // printf("idx = %u, sum.x = %f, sum.y =%f\n",idx0,sum.x,sum.y);
-       //}
-       sum.x = sum.x/collook;
-       sum.y = sum.y/collook;
-       b[i] = sum;
-    }
-}
-
-__global__
-void cpx_row_look(Complex *a, Complex *b, const std::size_t rowlook,
-                  const std::size_t ncol, const std::size_t n){
-    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-    std::size_t stride = blockDim.x * gridDim.x;
-    std::size_t row,col,idx0;
-    Complex temp, sum;
-    
-    for (std::size_t i = index; i < n; i += stride){ 
-       sum.x = 0;
-       sum.y = 0;
-       row = i/ncol;
-       col = i%ncol;
-       idx0 = row*rowlook*ncol+col;
-       //if(row==1 && col == 1){
-       // printf("row:%llu,col:%llu\n",row,col);
-       // printf("idx0:%llu\n",idx0);
-       // printf("rowlook:%llu\n",rowlook);
-       // printf("ncol:%llu\n",ncol);
-       // temp = a[idx0+ncol];
-       // printf("temp.x:%f,temp.y:%f\n",temp.x,temp.y);
-       // ////printf("idx = %u, sum.x = %f, sum.y =%f\n",idx0,sum.x,sum.y);
-       //}
-       for (std::size_t j = 0; j < rowlook; ++j) {
-            temp = a[idx0+j*ncol];
-            sum.x = sum.x + temp.x;
-            sum.y = sum.y + temp.y;
-       }
-       sum.x = sum.x/rowlook;
-       sum.y = sum.y/rowlook;
-       b[i] = sum;
-    }
-}
-
 std::string extract_date(const std::string &s){
     std::size_t last_slash_pos;
     #ifdef _WIN32
@@ -161,22 +82,22 @@ int crossmul(const std::string &slcfile1,
     bottom2 = header2[5];
     // determine the size of the interferogram 
     left = left1 < left2 ? left1 : left2;
-    left = int(left / collook) * collook;
+    left = (left + collook - 1) / collook * collook;
     right = right1 > right2 ? right1 : right2;
-    right = int(right / collook) * collook;
+    right = right / collook * collook;
     top = top1 < top2 ? top1 : top2;
-    top = int(top / rowlook) * rowlook;
+    top = (top + rowlook -1) / rowlook * rowlook;
     bottom = bottom1 > bottom2 ? bottom1 : bottom2;
-    bottom = int(bottom/rowlook)*rowlook;
+    bottom = bottom / rowlook * rowlook;
     nrow = bottom - top;
     ncol = right - left;
     // fill ifg_header
-    ifg_header[0] = int(header1[0] / rowlook);
-    ifg_header[1] = int(header1[1] / collook);
-    ifg_header[2] = int(left / collook);
-    ifg_header[3] = int(top / rowlook);
-    ifg_header[4] = int(right / collook);
-    ifg_header[5] = int(bottom / rowlook);
+    ifg_header[0] = header1[0] / rowlook;
+    ifg_header[1] = header1[1] / collook;
+    ifg_header[2] = left / collook;
+    ifg_header[3] = top / rowlook;
+    ifg_header[4] = right / collook;
+    ifg_header[5] = bottom / rowlook;
     
     nbatch = (nrow + batch_lines-1)/batch_lines;
     ncol_sm = ncol/collook;
