@@ -1,11 +1,12 @@
-from datetime import datetime
 import glob
-from matplotlib import pyplot as plt
-from matplotlib.colors import ListedColormap
-from typing import List
 import numpy as np
 import os
 import re
+
+from datetime import datetime
+from matplotlib import pyplot as plt
+from matplotlib.colors import ListedColormap
+from typing import List
 NHEAD = 64
 BLOCK = 512
 
@@ -419,20 +420,6 @@ def readc(f,nrg):
     c = data[:,0:nrg]+1j*data[:,nrg:]
     return c
 
-def readcs(filepath,ext,nrg):
-    cs = []
-    filelist = glob.glob(os.path.join(filepath,'*.'+ext))
-    for f in filelist:
-        cs.append(readc(os.path.join(filepath,f),nrg))
-    return cs
-
-def readigrams(filepath,ext,nrg):
-    igrams = []
-    filelist = glob.glob(os.path.join(filepath,'*.'+ext))
-    for f in filelist:
-        igrams.append(readigram(os.path.join(filepath,f),nrg))
-    return igrams
-
 def savec(c,filename):
     naz,nrg = c.shape
     tosave = np.zeros((naz,nrg*2),dtype='float32')
@@ -441,93 +428,6 @@ def savec(c,filename):
     f = open(filename,'w')
     tosave.tofile(f)
     f.close()
-
-def plotc(c):
-    plotdata(np.imag(c))
-
-def plotdata(img):
-    plt.imshow(img,vmax=np.percentile(img,99),
-            vmin=np.percentile(img,1),cmap='jet')
-    plt.show()
-
-def readpixel(unwpath,sbaslist,nx,ny,x,y):
-    s = np.zeros(len(sbaslist))
-    offset = (nx*(2*y+1)+x)*4
-    for i in range(len(sbaslist)):
-        if i%100==0:
-            print(i)
-        if sbaslist['deramp'][i]:
-            filename = os.path.join(unwpath, \
-                                    'unw_deramp',
-                                    sbaslist['image1'][i]+'_'+ \
-                                    sbaslist['image2'][i]+'.unw')
-        else:
-            filename = os.path.join(unwpath, \
-                                    sbaslist['image1'][i]+'_'+ \
-                                    sbaslist['image2'][i]+'.unw')
-        with open(filename,'r') as f:
-            f.seek(offset)
-            s[i] = np.fromfile(f, dtype='float32', count=1)[0]
-            f.close()
-    return s
-
-def readstack(unwpath,sbaslist,nx,ny,idx1,idx2):
-    x1 = idx1%nx
-    y1 = idx1//nx
-    x2 = idx2%nx
-    y2 = idx2//nx
-    if y2 == ny:
-        y2 = ny - 1
-    offset = nx*2*y1*4
-    count = (y2-y1+1)*nx*2
-    s = np.zeros((len(sbaslist),idx2-idx1))
-    for i in range(len(sbaslist)):
-        if sbaslist['deramp'][i]:
-            filename = os.path.join(unwpath, \
-                                    sbaslist['image1'][i]+'_'+ \
-                                    sbaslist['image2'][i]+'.unw.deramp')
-        else:
-            filename = os.path.join(unwpath, \
-                                    sbaslist['image1'][i]+'_'+ \
-                                    sbaslist['image2'][i]+'.unw')
-        with open(filename,'r') as f:
-            f.seek(offset)
-            patch = np.fromfile(f,dtype='float32', count=count)
-            patch = np.reshape(patch,(y2-y1+1,2*nx))
-            patch = patch[:,nx:].ravel()
-            if y2 == ny -1:
-                s[i,:] = patch[x1:]
-            else:
-                s[i,:] = patch[x1:-(nx-x2)]
-            f.close()
-    return s
-    
-def readtile(ifglist,geo,idx11,idx12,idx21,idx22,filepath=None):
-    n = len(ifglist)
-    #s = np.zeros((n,idx12-idx11,idx22-idx21),dtype=np.float32)
-    s = np.zeros((n,idx12-idx11,idx22-idx21),dtype=np.complex64)
-    if filepath is None:
-        filepath = os.path.join(os.getcwd(),'ps_data')
-    for i in range(n):
-        filename = os.path.join(filepath, \
-                                ifglist['image1'][i]+'_'+ \
-                                ifglist['image2'][i]+'.rephase') 
-        res = readslc(filename,geo.nlon)
-        s[i,:,:] = res[idx11:idx12,idx21:idx22]
-        #with open(filename,'r') as f:
-        #    phase = np.fromfile(f,dtype=np.float32)
-        #    phase = np.reshape(phase,(geo.nlat,geo.nlon))
-        #    s[i,:,:] = phase[idx11:idx12,idx21:idx22]
-        #    f.close()
-    return s
-
-def loadtile(tilename):
-    tiledata = np.fromfile(tilename,dtype=np.float32)
-    n = int(tiledata[0])
-    n1 = int(tiledata[2]-tiledata[1])
-    n2 = int(tiledata[4]-tiledata[3])
-    header = tiledata[0:5].astype(int)
-    return header,np.reshape(tiledata[5:],(n,n1,n2))
 
 def cpxlooks(imgbg,nlookaz,nlookrg):
     naz,nrg = imgbg.shape
@@ -550,9 +450,11 @@ def cpxlooks(imgbg,nlookaz,nlookrg):
 def powlooks(imgbg,nlookaz,nlookrg):
     return np.abs(cpxlooks(np.abs(imgbg)**2,nlookrg,nlookaz))
 
-def multilooks(imgfile,outfile,nr,nc,nrlook,nclook,chuncksize=1e9):
+def multilooks(imgfile: str, outfile: str, dtype:type,
+               nr: int, nc: int, nrlook:int, nclook:int,
+               chuncksize:float=1e9):
     """
-    Take multilook of a large slc image (>10 G)
+    Take multilook of a large image (>10 G)
 
     Parameters
     ----------
@@ -560,6 +462,8 @@ def multilooks(imgfile,outfile,nr,nc,nrlook,nclook,chuncksize=1e9):
         slcfile to read
     outfile : string
         output amplitude file to write
+    dtype: type
+        type of the element in the image to multilook
     nr : int
         number of rows (nlat or naz)
     nc : int
@@ -571,23 +475,50 @@ def multilooks(imgfile,outfile,nr,nc,nrlook,nclook,chuncksize=1e9):
     chunckisize : int
         number of bytes to read each time
     """
+    try:
+        byte_per_element = np.dtype(dtype).itemsize
+    except TypeError:
+        raise TypeError(f"Unrecognized type: {dtype}")
+    nrpatch = int(int(chuncksize/(nc*byte_per_element))//nrlook*nrlook)
+    npatch = int(np.ceil(nr/nrpatch))
+    with open(outfile, 'wb') as fout:
+        with open(imgfile, 'rb') as f:
+            for i in range(npatch):
+                print(f'patch {i+1}/{npatch}')
+                line_start = nrpatch*i
+                line_end = line_start + nrpatch
+                line_end = np.minimum(line_end,nr)
+                nlines = line_end-line_start
+                patch = np.fromfile(f, dtype=dtype, count=nlines*nc)
+                patch = np.reshape(patch, (nlines, nc))
+                patch = cpxlooks(patch*1., nrlook, nclook).astype(dtype)
+                patch.tofile(fout)
 
-    nrsmall = nr//nrlook
-    nrpatch = int(int(chuncksize/(nc*4))//nrlook*nrlook)
-    nr_read = 0
-    with open(outfile,'w') as fout:
-        with open(imgfile,'r') as f:
-            while nr_read < nr-nrlook+1:
-                rcount = int(np.minimum(nrpatch,nr-nr_read))
-                nr_read = nr_read + rcount
-                patch = np.fromfile(f, dtype=np.float32, count=rcount*nc*2)
-                patch = np.reshape(patch,(rcount,2*nc))
-                patch = patch[:,0:2*nc:2] + 1j * patch[:,1:2*nc:2]
-                patch = np.sqrt(powlooks(patch,nrlook,nclook)).astype(np.float32)
-                fout.write(patch)
+def read_orbit(orbfile:str)->np.ndarray:
+    """
+    read an orbitiming file
 
-def interferogram(slc1,slc2,nlookaz,nlookrg):
-    return cpxlooks(slc1*np.conj(slc2),nlookrg,nlookaz)
+    Parameters
+    ----------
+    orbfile: str
+        orbit file
+
+    Returns
+    -------
+    orb: np.ndarray
+        orbit vector
+    """
+    with open(orbfile,"r") as f:
+        line = f.readline()
+        line = line.strip()
+        nstatvec = int(line.strip())
+        orb = np.zeros((nstatvec,7))
+        for i in range(nstatvec):
+            line = f.readline()
+            words = line.split()
+            for j in range(7):
+                orb[i,j] = float(words[j])
+    return orb
 
 def correlation(slc1,slc2,nlookaz,nlookrg,igram=None):
     if igram is None:

@@ -13,8 +13,8 @@ def main()->int:
         raise SystemExit(os.EX_OK)
 
     import tyro
-    from s1proc.slc_pairs import create_slc_pair_list
-    from s1proc.slc_pairs import mid_orbit
+    from s1proc.utils import create_slc_pair_list
+    from s1proc.utils import mid_orbit, los
     from s1proc.stitch import main as stitch_ifg
     from s1proc.interfere import interfere
     from s1proc.sentinel_stack import stack as stack
@@ -29,7 +29,8 @@ def main()->int:
             "stack": stack,
             "unwrap": batch_snaphu,
             "amp": multilook_amp,
-            "coh": coherence
+            "coh": coherence,
+            "los": los
         })
     return os.EX_OK
 

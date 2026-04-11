@@ -5,14 +5,16 @@ import glob
 import re
 import numpy as np
 import os
+import shutil
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Tuple
 
 from s1proc import geocoordinates
 from s1proc import geometry
 from s1proc import orbit
+from s1proc import sario
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
@@ -234,3 +236,99 @@ def mid_orbit(
     logger.info(f'Middle orbit file: {mid_orb_file}')
     return mid_orb_file
 
+def _los(
+        orb: np.ndarray,
+        dem: np.ndarray,
+        rsc: geocoordinates.GeoCoordinates
+        ) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Calculate Line-Of-Sight (LOS) vectors for all grid points
+
+    Parameters
+    ----------
+    orb: np.ndarray
+        orbit array containing seven columns:
+        time, x, y, z, vx, vy, vz
+    dem: np.ndarray
+        DEM (potentially multilooked)
+    rsc: geocoordinates.GeoCoordinates
+        rsc object describing the geographic information of DEM 
+
+    Returns
+    -------
+    los: np.ndarray
+        LOS vectors
+    theta: np.ndarray
+        look angle
+
+    Notes
+    -------
+    This function first read orbit information from an orbtiming file in the
+    parent directory. For each ground point, it calculates the corresponding
+    Zero-Doppler time and the associated LOS vector and look angle.
+    """
+    nrow,ncol = rsc.nlat,rsc.nlon
+    lat,lon = rsc.grid()
+    # calculate the LOS vectors in the ECEF coordinate
+    logger.info('Converting DEM grid into ECEF coordinates')
+    llh = np.column_stack((lat.flatten(),lon.flatten(),dem.flatten()))
+    logger.info('Computing LOS vectors')
+    losvec = orbit.orbitrangetime_vec(llh,orb[:,0],orb[:,1:4],orb[:,4:7])
+    losvec = losvec.astype(np.float32)
+    logger.info('Computing LOS vectors, done.')
+
+    # calculate look angle
+    logger.info('Computing look angles')
+    r_lat = np.radians(lat.flatten())
+    r_lon = np.radians(lon.flatten())
+    r_n = -np.column_stack([np.cos(r_lat)*np.cos(r_lon),
+                            np.cos(r_lat)*np.sin(r_lon),
+                            np.sin(r_lat)])
+    costheta = np.sum(losvec*r_n,axis=1).reshape(nrow,ncol)
+    costheta = np.clip(costheta,-1,1)
+    theta = np.rad2deg(np.arccos(costheta)).astype(np.float32)
+    logger.info('Computing look angles, done.')
+    return losvec, theta
+
+def los(dem_file: str,
+        rsc_file: str,
+        /,
+        proc_dir: str = 'proc',
+        rowlook: int = 1,
+        collook: int = 1):
+    """
+    dem_file: Path|str
+        dem file (int16)
+    rsc_file: Path|str
+        rsc file that defines the grid
+    proc_dir: str
+        Directory to save output files
+    rowlook: int
+        Number of looks in row direction
+    collook: int
+        Number of looks in column direction
+    """
+    small_dem_file = os.path.join(proc_dir, 'dem')
+    rsc = geocoordinates.GeoCoordinates(rsc_file)
+    rsclook = rsc.take_look(rowlook,collook)
+    nrow, ncol = rsc.nlat, rsc.nlon
+    nrow_sm = nrow // rowlook
+    ncol_sm = ncol // collook
+    if rowlook > 1 or collook > 1:
+        logger.info('Multilooking dem file')
+        sario.multilooks(dem_file, small_dem_file, np.int16, nrow, ncol,
+                rowlook, collook)
+        logger.info(f'Multilooked DEM is saved to {small_dem_file}')
+    else:
+        small_dem_file = dem_file
+    dem = np.fromfile(small_dem_file, dtype = np.int16)
+    orb_list = glob.glob(os.path.join(proc_dir, '*.orbtiming'))
+    orb_file = mid_orbit(orb_list, dem_file, rsc_file)
+    orb = sario.read_orbit(orb_file)
+    losvec, theta = _los(orb, dem, rsclook)
+    losvec_file = os.path.join(proc_dir, 'losvec')
+    losvec.tofile(losvec_file)
+    logger.info(f'LOS vectors are saved to {losvec_file}')
+    theta_file = os.path.join(proc_dir, 'look_angle')
+    theta.tofile(theta_file)
+    logger.info(f'Look angles are saved to {theta_file}')
