@@ -20,6 +20,7 @@ def main()->int:
     from s1proc.sentinel_stack import stack as stack
     from s1proc.unwrap import batch_snaphu
     from s1proc.coherence import multilook_amp, coherence
+    from s1proc.query import query_asf
     tyro.extras.subcommand_cli_from_dict(
         {
             "interfere": interfere,
@@ -30,7 +31,8 @@ def main()->int:
             "unwrap": batch_snaphu,
             "amp": multilook_amp,
             "coh": coherence,
-            "los": los
+            "los": los,
+            "query": query_asf
         })
     return os.EX_OK
 
