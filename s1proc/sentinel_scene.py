@@ -101,7 +101,7 @@ def dem_bounds(footprint, rsc):
     colmax = int(np.minimum(colmax, rsc.nlon))
     return colmin, rowmin, colmax, rowmax
 
-def footprint_bounds(orbfname:str, dbfname:str):
+def footprint_bounds(orbfname:str, dbfname:str, hmin = 0, hmax = 10000):
     """
     Get the lat/lon bounds of current subswath
     """
@@ -148,8 +148,8 @@ def footprint_bounds(orbfname:str, dbfname:str):
                (starttime, rngstart)]
     
     for t, r in corners:
-        rah1.append([r,t,0])
-        rah2.append([r,t,10000])
+        rah1.append([r,t,hmin])
+        rah2.append([r,t,hmax])
     lats1,lons1 = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah1))
     lats2,lons2 = rah2ll(tt,xx,vv,starttime,stoptime,np.array(rah2))
     return np.array(list(zip(lons1, lats1))), np.array(list(zip(lons2, lats2)))
@@ -163,8 +163,11 @@ def sentinel_scene(
         subswath_list: Sequence[int] = [1,2,3],
         proc_dir: str = 'stack',
         slc_dir: str = 'slc',
+        rm_rawslc: bool = True,
         rm_zipfile: bool = False,
-        rm_folder: bool = False):
+        rm_folder: bool = False,
+        hmin = 0,
+        hmax = 1e4):
     """
     Process one sentinel scene files to coregistered geocoded slc
 
@@ -186,10 +189,16 @@ def sentinel_scene(
         Directory to store temporary files
     slc_dir: str        
         Directory to store geocoded SLC files
+    rm_rawslc: bool
+        Remove the deramped SLC and deramped pahse after image processing
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
         Remove the unzipped data folder after image processing is done
+    hmin: int
+        Minimum elevation of the study area
+    hmax: int
+        Maximum elevation of the study area
     """
     logger.info(f'Processing: {zip_file} to a geocoded SLC')
     logger.debug(f'input orbit file: {orbfile}')
@@ -249,11 +258,14 @@ def sentinel_scene(
         #        file=swathfiles[ifile-1] # remove to go back to usual
         # create the orbtiming file, roi.db.X file with metadata, file table for each subswath
         subswath = subswath_list[ifile]
-        dbfname = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.db')
-        orbfname = os.path.join(proc_dir, f'{acq_date}.orbtiming')
-        dcfname = os.path.join(proc_dir,f'{acq_date}_iw{subswath}.dcinfo')
+        dbfname = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.db')
+        orbfname = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}.orbtiming')
+        dcfname = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.dcinfo')
         fmratefname = os.path.join(proc_dir,
-                f'{acq_date}_iw{subswath}.fmrateinfo')
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.fmrateinfo')
         create_db(data_dir, subswath, xmlfiles[ifile],
                 dbfname, orbfname, dcfname, fmratefname)
         con = sqlite3.connect(dbfname)
@@ -281,7 +293,7 @@ def sentinel_scene(
         c.close()
         con.close()
 
-        footprint1, footprint2 = footprint_bounds(orbfname, dbfname)
+        footprint1, footprint2 = footprint_bounds(orbfname, dbfname, hmin, hmax)
         bounds1 = dem_bounds(footprint1, rsc)
         bounds2 = dem_bounds(footprint2, rsc)
         if bounds1 is None:
@@ -295,21 +307,23 @@ def sentinel_scene(
         if bounds is None:
             continue
 
-        # extract geotiff file, reversing lines and pixels if necessary
-        linereverse='n'
-        pixelreverse='n'
-        if lineTimeOrdering == 'Decreasing':
-            linereverse='y'
+        deramp_phase_file = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.phase')
+        if not os.path.exists(deramp_phase_file):
+            # extract geotiff file, reversing lines and pixels if necessary
+            linereverse='n'
+            pixelreverse='n'
+            if lineTimeOrdering == 'Decreasing':
+                linereverse='y'
 
-        if pixelTimeOrdering == 'Decreasing':
-            pixelreverse='y'
-
-        basename = os.path.basename(fn)
-        output_slc_file = os.path.join(data_dir,basename.replace('tiff','rawslc'))
-        command= readgeotiff+' '+fn.rstrip()+' '+output_slc_file+' '+\
-                linereverse+' '+pixelreverse
-        logger.info(command)
-        ret = subprocess.check_call(command, shell=True)
+            if pixelTimeOrdering == 'Decreasing':
+                pixelreverse='y'
+            basename = os.path.basename(fn)
+            output_slc_file = os.path.join(data_dir,basename.replace('tiff','rawslc'))
+            command= readgeotiff+' '+fn.rstrip()+' '+output_slc_file+' '+\
+                    linereverse+' '+pixelreverse
+            logger.info(command)
+            subprocess.check_call(command, shell=True)
 
     # Now, process each subswath to a geocoded slc
     for ifile, fn in enumerate(swathfiles):
@@ -317,9 +331,10 @@ def sentinel_scene(
         if bounds is None:
             continue
         subswath = subswath_list[ifile]
-        slavedb = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.db')
-        deramp_phase_file = os.path.join(proc_dir, f'{acq_date}_iw{subswath}.phase')
-
+        slavedb = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.db')
+        deramp_phase_file = os.path.join(proc_dir,
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.phase')
         # remove ramp, resample to lat lon, reinsert ramp
         #  save parameters in database file
         con = sqlite3.connect(slavedb.strip())
@@ -341,32 +356,27 @@ def sentinel_scene(
         c.close()
         con.close()
 
-        # deramp the slave file
-        command=deramp_burst+' '+slavedb.strip()+' '+rawslcfile+' '+deramp_phase_file
-        logger.info(command)
-        os.system(command)
+        if not os.path.exists(deramp_phase_file):
+            # deramp the slave file
+            command=deramp_burst+' '+slavedb.strip()+' '+rawslcfile+' '+deramp_phase_file
+            logger.info(command)
+            subprocess.check_call(command, shell=True)
 
         # and geocode/reramp the slave
         main_slc_file = os.path.join(slc_dir,
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_main.geo')
         sec_slc_file = os.path.join(slc_dir,
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
-        compress_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}.geo')
         command = f'{geo2rdr_reramp} {slavedb} {deramp_phase_file} ' + \
                    f'{main_slc_file} {sec_slc_file} {bounds[0]} ' + \
                    f'{bounds[1]} {bounds[2]} {bounds[3]}'
         logger.info(command)
-        os.system(command)
-
-        #compress(main_slc_file, sec_slc_file, compress_slc_file,
-        #         rsc.nlat, rsc.nlon)
-        # remove the original slc files
-        #os.remove(main_slc_file)
-        #os.remove(sec_slc_file)
-        os.remove(origslcfile)
-        os.remove(derampedslcfile)
-        os.remove(deramp_phase_file)
+        subprocess.check_call(command, shell=True)
+        if os.path.exists(origslcfile):
+            os.remove(origslcfile)
+        if rm_rawslc:
+            os.remove(derampedslcfile)
+            os.remove(deramp_phase_file)
         logger.info('Swath processed to common coordinates and coregistered.')
     # Clean up zip files to lessen disk space requirements
     if rm_zipfile:

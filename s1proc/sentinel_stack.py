@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-import sys
-import os
 import glob
-import subprocess
-import shutil
+import numpy as np
+import os
 from datetime import datetime
 from typing import Literal, Sequence
 
@@ -34,9 +32,11 @@ def stack(
         rscfile: str = 'elevation.dem.rsc',
         polarization: Literal['hh','hv','vh','vv'] = 'vv',
         subswath_list: Sequence[int] = [1,2,3],
+        rm_rawslc: bool = True,
         rm_zipfile: bool = False,
         rm_folder: bool = False,
-        reprocess: bool = False):
+        reprocess: bool = False,
+        zip_list: Sequence[str] = None):
     """
     Process a stack of sentinel products to coregistered geocoded SLCS
     
@@ -58,16 +58,27 @@ def stack(
         Polarization to process
     subswath_list: Sequence[int]
         Subswaths to process 
+    rm_rawslc: bool
+        Remove raw SLC files after image processing is done
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
         Remove the unzipped folder after image processing is done
     reprocess: bool
         Reprocess the geo file if it already exists
+    zip_list: Sequence[str]
+        List of zip files to process
     """
 
     # get list of geotiff products
     zips = sorted(glob.glob(os.path.join(data_dir,'*.zip')))
+    if zip_list is not None:
+        filtered_zips = []
+        for fn in zips:
+            basename = os.path.basename(fn)
+            if basename[0:-4] in zip_list:
+                filtered_zips.append(fn)
+        zips = filtered_zips
     # get the precise orbit files
     preciseorbitlist = sorted(glob.glob(os.path.join(eof_dir,'*.EOF')))
     #with open('preciseorbitfiles','w') as f:
@@ -105,6 +116,12 @@ def stack(
                 orbitfilename = preciseorbitlist[j]
                 logger.info(f'Precise orbit file found: {orbitfilename}')
                 break
+        dem = np.fromfile(demfile, dtype=np.int16)
+        hmin = dem.min()
+        hmax = dem.max()
+        logger.info(f'Minimum elevation: {hmin} m, Maximum elevation: {hmax} m')
+        del dem
         sentinel_scene(zip_file, demfile, rscfile, orbitfilename, polarization,
-                subswath_list, proc_dir, slc_dir, rm_zipfile, rm_folder)
+                subswath_list, proc_dir, slc_dir, rm_rawslc, rm_zipfile,
+                rm_folder, hmin, hmax)
     logger.info('Loop over scenes complete.')
