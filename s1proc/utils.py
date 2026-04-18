@@ -170,13 +170,13 @@ def create_slc_pair_list(
         date_ref = datetime.strptime(date_str_ref,'%Y%m%d')
         slcs_ref = slc_dict[date_str_ref]
         basename1 = os.path.basename(slcs_ref[0][0])
-        orbfile1 = os.path.join(proc_dir, basename1[0:8]+'.orbtiming')
+        orbfile1 = os.path.join(proc_dir, basename1[0:20]+'.orbtiming')
         for j in range(i+1,ndates):
             date_str_sec = unique_date_list[j]
             date_sec = datetime.strptime(date_str_sec,'%Y%m%d')
             slcs_sec = slc_dict[date_str_sec]
             basename2 = os.path.basename(slcs_sec[0][0])
-            orbfile2 = os.path.join(proc_dir, basename2[0:8]+'.orbtiming')
+            orbfile2 = os.path.join(proc_dir, basename2[0:20]+'.orbtiming')
             tempbl = (date_sec-date_ref).days 
             if tempbl > max_tbl or tempbl < min_tbl:
                 continue
