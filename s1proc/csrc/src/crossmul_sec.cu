@@ -194,8 +194,8 @@ __global__ void replace(Complex *a, Complex *b, const std::size_t n){
     Complex ai, bi;
     float ai_amp, bi_amp, ratio;
     for (std::size_t i = index; i < n; i += stride){
+        bi = b[i];
         if (bi.x != 0){
-            bi = b[i];
             ai = a[i];
             ai_amp = sqrtf(ai.x*ai.x + ai.y*ai.y);
             bi_amp = sqrtf(bi.x*bi.x + bi.y*bi.y);
@@ -480,10 +480,17 @@ void crossmul_strip(
     apply_mask<<<num_blocks, block_size>>>(d_ifgmain, d_ifgmain_masked,
             d_ifgsec, nrow_sm*ncol_sm);
     CHECK_CUDA(cudaDeviceSynchronize());
+    
+    coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
+    coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
+    if (coh_main > coh_sec){
+        std::cout << "coh main " << coh_main << ", coh sec " << coh_sec <<
+            ", no need to update" << std::endl;
+    }
     //Complex *ifgsec, *ifgmain;
     //ifgmain = (Complex*)malloc(sizeof(Complex)*nrow_sm*ncol_sm);
     //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
-    //CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain_masked,sizeof(Complex)*nrow_sm*ncol_sm,
+    //CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain,sizeof(Complex)*nrow_sm*ncol_sm,
     //           cudaMemcpyDeviceToHost));
     //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
     //           cudaMemcpyDeviceToHost));
@@ -491,10 +498,6 @@ void crossmul_strip(
     //save_binary<Complex>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
     //free(ifgsec);
     //free(ifgmain);
-    
-    coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
-    coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
-    std::cout << "coh main " << coh_main << ", coh sec " << coh_sec << std::endl;
     if (coh_sec > coh_main){
         // replace main interferogram with secondary interferogram
         replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
