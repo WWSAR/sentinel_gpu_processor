@@ -24,8 +24,8 @@ def parse_orbitfilename(orbitfilelist):
     return start_date,end_date
 
 def stack(
-        data_dir: str = '.',
-        eof_dir: str = '.',
+        data_dir: str = 'data',
+        eof_dir: str = 'eof',
         proc_dir: str = 'proc',
         slc_dir: str = 'slc',
         demfile: str = 'elevation.dem',
