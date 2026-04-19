@@ -405,8 +405,6 @@ void crossmul_strip(
     get_first_last_nonzero_row(d_mask2, nrow, ncol,
             first_nonzero_row2, last_nonzero_row2);
     cudaFree(d_mask2);
-    std::cout << "first nonzero row strip1 " << first_nonzero_row1 << ", last nonzero row strip1 " << last_nonzero_row1 << std::endl;
-    std::cout << "first nonzero row strip2 " << first_nonzero_row2 << ", last nonzero row strip2 " << last_nonzero_row2 << std::endl;
 
     // decide which mask will be used for interferogram generation
     if (first_nonzero_row1 == -1 && first_nonzero_row2 == -1){
@@ -483,10 +481,10 @@ void crossmul_strip(
     
     coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
     coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
-    if (coh_main > coh_sec){
-        std::cout << "coh main " << coh_main << ", coh sec " << coh_sec <<
-            ", no need to update" << std::endl;
-    }
+    //if (coh_main > coh_sec){
+    //    std::cout << "coh main " << coh_main << ", coh sec " << coh_sec <<
+    //        ", no need to update" << std::endl;
+    //}
     //Complex *ifgsec, *ifgmain;
     //ifgmain = (Complex*)malloc(sizeof(Complex)*nrow_sm*ncol_sm);
     //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
@@ -533,7 +531,7 @@ int crossmul_sec(
         Strip strip2 = sec2.data[strip_idx2];
         crossmul_strip(&strip1, &strip2, &main1, &main2, &ifg, rowlook, collook,
                 next_flag, updated);
-        std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 << ", next_flag " << next_flag << std::endl;
+        //std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 << ", next_flag " << next_flag << std::endl;
         if (next_flag == 0){
             strip_idx2++;
             continue;
@@ -549,7 +547,7 @@ int crossmul_sec(
         }
     }
     if (updated){
-        std::cout << "updated" <<std::endl;
+        //std::cout << "updated" <<std::endl;
         ifg.save_data();
     }
 

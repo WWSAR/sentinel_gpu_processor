@@ -236,12 +236,15 @@ def stitch(
 
                 # Calculate phase difference only if there are common points
                 if np.any(common_mask):
-                    ifg_diff = np.conj(ifg1) * ifg2
-                    phase_diff = np.angle(np.mean(ifg_diff[common_mask]))
+                    ifg_diff = np.conj(ifg1[common_mask]) * ifg2[common_mask]
+                    phase_diff = np.angle(np.mean(ifg_diff))
+                    ifg_diff = ifg_diff*np.exp(-1j*phase_diff)
+                    phase_diff = phase_diff + np.median(np.angle(ifg_diff))
                     logger.info(f'Chunk {chunk_idx+1}/{num_chunks}, ' + \
                                  'phase difference ' + \
                                  f'between file 0 and file {i}: {phase_diff} rad')
-                    ifg2 = ifg2 * np.exp(-1j * phase_diff)
+                    if np.abs(phase_diff) > 0.2:
+                        ifg2 = ifg2 * np.exp(-1j * phase_diff)
 
                 # Merge interferograms
                 ifg1 = ifg1 * mask1 + ifg2 * mask2 * (~mask1)
@@ -254,7 +257,6 @@ def stitch(
         os.remove(ifg_file)
 
     return
-
 
 def interfere_single_scene(
         main_img_files: Sequence[str],
