@@ -170,10 +170,11 @@ def interfere_subswath(
     return
 
 def stitch(
-        ifg_files: Sequence[str],
-        outfile: str):
+    ifg_files: Sequence[str],
+    outfile: str,
+    chunk_size_gb: float = 1.0):
     """
-    Stitch coregistered interferograms
+    Stitch coregistered interferograms with chunked processing
 
     Parameters
     ----------
@@ -181,6 +182,8 @@ def stitch(
         List of interferograms to stitch
     outfile: str
         Output interferogram
+    chunk_size_gb: float
+        Maximum chunk size in GB per read operation (default: 1.0)
     """
     nifg = len(ifg_files)
     if nifg == 0:
@@ -188,22 +191,70 @@ def stitch(
     elif nifg == 1:
         os.rename(ifg_files[0], outfile)
         return
-    ifg1 = np.fromfile(ifg_files[0],dtype=np.complex64)
-    for i in range(1,nifg):
-        ifg2 = sario.readslc(ifg_files[i],ncol)
-        mask1 = np.abs(ifg1)>1e-3
-        mask2 = np.abs(ifg2)>1e-3
-        common_mask = mask1 & mask2
-        ifg_diff = np.conj(ifg1)*ifg2
-        phase_diff = np.angle(np.mean(ifg_diff[common_mask]))
-        logger.debug(f'phase difference between {intfile1} and {intfile2} :'
-                     f'{phase_diff} rad')
-        ifg2 = ifg2 * np.exp(-1j*phase_diff)
-        ifg1 = ifg1*mask1 + ifg2*mask2*(~mask1)
-    ifg1.tofile(outfile)
+
+    # Get file size and calculate chunk size in elements
+    file_size = os.path.getsize(ifg_files[0])
+    dtype = np.complex64
+    elem_size = np.dtype(dtype).itemsize  # 8 bytes for complex64
+    total_elements = file_size // elem_size
+
+    # Calculate chunk size in elements (1GB = 1e9 bytes)
+    max_chunk_bytes = chunk_size_gb * 1e9
+    chunk_elements = max(1, int(max_chunk_bytes // elem_size))
+
+    # Ensure we don't create too many chunks for small files
+    num_chunks = max(1, np.ceil(total_elements / chunk_elements))
+
+    logger.info(f'Processing {nifg} files with {num_chunks} chunks '
+    f'({chunk_elements} elements per chunk)')
+
+    # Open output file for writing
+    with open(outfile, 'wb') as out_f:
+        # Process each chunk
+        for chunk_idx in range(num_chunks):
+            start_idx = chunk_idx * chunk_elements
+            end_idx = min((chunk_idx + 1) * chunk_elements, total_elements)
+            chunk_size = end_idx - start_idx
+
+            # Read first interferogram chunk
+            with open(ifg_files[0], 'rb') as f:
+                f.seek(start_idx * elem_size)
+                ifg1 = np.frombuffer(f.read(chunk_size * elem_size), dtype=dtype)
+
+            # Process remaining interferograms for this chunk
+            for i in range(1, nifg):
+                # Read chunk from current file
+                with open(ifg_files[i], 'rb') as f:
+                    f.seek(start_idx * elem_size)
+                    ifg2 = np.frombuffer(f.read(chunk_size * elem_size),
+                            dtype=dtype)
+
+                # Calculate masks for this chunk
+                mask1 = np.abs(ifg1) > 1e-3
+                mask2 = np.abs(ifg2) > 1e-3
+                common_mask = mask1 & mask2
+
+                # Calculate phase difference only if there are common points
+                if np.any(common_mask):
+                    ifg_diff = np.conj(ifg1) * ifg2
+                    phase_diff = np.angle(np.mean(ifg_diff[common_mask]))
+                    logger.info(f'Chunk {chunk_idx+1}/{num_chunks}, ' + \
+                                 'phase difference ' + \
+                                 f'between file 0 and file {i}: {phase_diff} rad')
+                    ifg2 = ifg2 * np.exp(-1j * phase_diff)
+
+                # Merge interferograms
+                ifg1 = ifg1 * mask1 + ifg2 * mask2 * (~mask1)
+
+            # Write processed chunk to output file
+            ifg1.tofile(out_f)
+
+    # Clean up original files
     for ifg_file in ifg_files:
         os.remove(ifg_file)
+
     return
+
 
 def interfere_single_scene(
         main_img_files: Sequence[str],
@@ -249,8 +300,9 @@ def interfere_single_scene(
         interfere_subswath(main_img_file, sec_img_file, subifg_file,
                 rowlook, collook)
     if nsubswath == 1:
-        ci1 = CroppedImage.from_file(subifg_files[0], load_data = True)
-        ci1.data.tofile(outfile)
+        ci1 = CroppedImage.from_file(subifg_files[0])
+        ifg = ci1.load_data()
+        ifg.tofile(outfile)
     else:
         ci1 = CroppedImage.from_file(subifg_files[0])
         ifg1 = ci1.load_data()
@@ -276,7 +328,8 @@ def interfere(
         /,
         ifg_dir: str = 'igrams',
         rowlook: int = 1,
-        collook: int = 1):
+        collook: int = 1,
+        verbose: bool = False):
     """
     Form interferograms from a subswath list
 
@@ -292,7 +345,11 @@ def interfere(
         Number of look in row direction
     collook: int
         Number of look in column direction
+    verbose: bool
+        Set the logging level to debug
     """
+    if verbose:
+        set_logging_level(logger, 'DEBUG')
     os.makedirs(ifg_dir, exist_ok = True)
     intlist_file = os.path.join(ifg_dir, 'intlist')
     rsc = geocoordinates.GeoCoordinates(rscfile)
@@ -345,17 +402,20 @@ def interfere(
                 if i > line_idx and \
                    (main_id_list[i] != main_id_list[i-1] or \
                     sec_id_list[i] != sec_id_list[i-1]):
+                    # subswaths for a new interferogram
                     subsets.append((np.copy(curr_main_imgs),
                                     np.copy(curr_sec_imgs)))
-                    curr_main_imgs = []
-                    curr_sec_imgs = []
+                    curr_main_imgs = [main_list[i]]
+                    curr_sec_imgs = [sec_list[i]]
                 else:
+                    # different subswaths of the same interferogram
                     curr_main_imgs.append(main_list[i])
                     curr_sec_imgs.append(sec_list[i])
             else:
                 break
-        subsets.append((np.copy(curr_main_imgs),
-                        np.copy(curr_sec_imgs)))
+        if len(curr_main_imgs) > 0:
+            subsets.append((np.copy(curr_main_imgs),
+                            np.copy(curr_sec_imgs)))
         line_idx += count
         ifg_files = []
         for main_img_files, sec_img_files in subsets:
