@@ -6,130 +6,9 @@ from typing import Tuple, Sequence, Literal
 
 from s1proc import get_bin_path
 from s1proc import geocoordinates
-from s1proc import sario
 from s1proc.sario import CroppedImage, NHEAD
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
-
-def crossmul_strip(
-        strip1: CroppedImage,
-        strip2: CroppedImage,
-        rowlook: int,
-        collook: int
-        )->Tuple[CroppedImage|None, int]:
-    """
-    Form an multilooked interferogram between two strips
-
-    Parameters
-    ----------
-    strip1: CroppedImage
-        First strip
-    strip2: CroppedImage
-        Second strip
-    rowlook: int
-        Number of looks in the row direction
-    collook: int
-        Number of looks in the column direction
-
-    Returns
-    -------
-    strip: CroppedImage | None
-        SLC trip, None if the two image strips do not overlap
-    next_flag: int
-        0: compare next strip1 with current strip2
-        1: compare current strip1 with next strip2
-        2: compare next strip2 with next strip2
-        3: the returned strip is cropped from strip1
-        4: the returned strip is cropped from strip2
-    """
-    if strip1.top >= strip2.bottom:
-        return None, 0
-    if strip1.bottom <= strip2.top:
-        return None, 1
-    # define the common grid to resample the two strips
-    nrow0 = strip1.nrow0
-    ncol0 = strip1.ncol0
-    left = int(np.minimum(strip1.left, strip2.left))
-    left = left // collook * collook
-    right = int(np.maximum(strip1.right, strip2.right))
-    right = right // collook * collook
-    top = int(np.minimum(strip1.top, strip2.top))
-    bottom = int(np.maximum(strip1.bottom, strip2.bottom))
-    res1 = strip1.resample(left, top, right, bottom)
-    res2 = strip2.resample(left, top, right, bottom)
-    amp1 = np.abs(res1)
-    amp2 = np.abs(res2)
-
-    # create a mask representing the upper half of the strip
-    first_nonzero_col, last_nonzero_col = \
-            np.where(np.any(amp1>0,axis=0))[0][[0,-1]]
-    #print(f'first nonzero column, {first_nonzero_col}')
-    #print(f'last nonzero column, {last_nonzero_col}')
-    first_mean_idx = np.mean(np.where(amp1[:,first_nonzero_col]>0)[0])
-    last_mean_idx = np.mean(np.where(amp1[:,last_nonzero_col]>0)[0])
-    #print(f'mean row idx of the first nonzero column, {first_mean_idx}')
-    #print(f'mean row idx of the last nonzero column, {last_mean_idx}')
-    rr = np.outer(np.arange(bottom - top),
-            np.ones(right - left, dtype = int))
-    if first_mean_idx > last_mean_idx:
-        # ascending tracks
-        upper_mask = rr < (np.arange(right-left)-first_nonzero_col)/ \
-                (last_nonzero_col-first_nonzero_col)*(top-bottom) + bottom - top
-    else:
-        # descending tracks
-        upper_mask = rr < (np.arange(right-left)-first_nonzero_col)/ \
-                (last_nonzero_col-first_nonzero_col)*(bottom-top)
-
-    # find areas where the first strip is nonzero and the second strip is zero
-    mask1 = (amp1 > 0) & (amp2 == 0) & upper_mask
-    nonoverlap_rows = np.sum(mask1,axis=0)
-    mean_no_rows1 = np.median(
-            nonoverlap_rows[first_nonzero_col:last_nonzero_col])
-    res1[~mask1] = 0.
-    nonzero_rows = np.where(np.any(mask1, axis=1))[0]
-    if len(nonzero_rows) < np.maximum(2, rowlook):
-        top1, bottom1 = None, None
-    else:
-        rstart1, rend1 = nonzero_rows[0], nonzero_rows[-1]
-        top1 = int(np.ceil((top + rstart1) / rowlook)) * rowlook
-        bottom1 = (top + rend1 + 1) // rowlook * rowlook
-
-    # find areas where the first strip is zero and the second strip is nonzero
-    mask2 = (amp1 == 0) & (amp2 > 0) & upper_mask
-    nonoverlap_rows = np.sum(mask2,axis=0)
-    mean_no_rows2 = np.median(
-            nonoverlap_rows[first_nonzero_col:last_nonzero_col])
-    # return None if nonoverlapped areas are too narrow for multilooking
-    if np.maximum(mean_no_rows1, mean_no_rows2) <= rowlook:
-        return None, 2
-    res2[~mask2] = 0
-    nonzero_rows = np.where(np.any(mask2, axis=1))[0]
-    if len(nonzero_rows) < np.maximum(2, rowlook):
-        top2, bottom2 = None, None
-    else:
-        rstart2, rend2 = nonzero_rows[0], nonzero_rows[-1]
-        top2 = int(np.ceil((top + rstart2) / rowlook)) * rowlook
-        bottom2 = (top + rend2 + 1) // rowlook * rowlook
-    
-    # --- case 1: the two strips overlap perferctly ---
-    if top1 is None and top2 is None:
-        return None, 2
-    elif top2 is None:
-        strip = CroppedImage(nrow0, ncol0, left, top1, right, bottom1,
-                res1[top1 - top : bottom1 - top, :])
-        return strip, 3
-    elif top1 is None:
-        strip = CroppedImage(nrow0, ncol0, left, top2, right, bottom2,
-                res2[top2 - top : bottom2 - top, :])
-        return strip, 4
-    elif top1 < top2:
-        strip = CroppedImage(nrow0, ncol0, left, top1, right, bottom1,
-                res1[top1 - top : bottom1 - top, :])
-        return strip, 3
-    else:
-        strip = CroppedImage(nrow0, ncol0, left, top2, right, bottom2,
-                res2[top2 - top : bottom2 - top, :])
-        return strip, 4
 
 def interfere_subswath(
     main_img_file: str,
@@ -175,105 +54,6 @@ def interfere_subswath(
     os.system(command)
     return
 
-def stitch(
-    ifg_files: Sequence[str],
-    outfile: str,
-    out_float: bool,
-    chunk_size_gb: float = 1.0):
-    """
-    Stitch coregistered interferograms with chunked processing
-
-    Parameters
-    ----------
-    ifg_files: Sequence[str]
-        List of interferograms to stitch
-    outfile: str
-        Output interferogram
-    out_float: bool
-        Output float rather than complex images
-    chunk_size_gb: float
-        Maximum chunk size in GB per read operation (default: 1.0)
-    """
-    nifg = len(ifg_files)
-    if nifg == 0:
-        return
-    elif nifg == 1:
-        if out_float:
-            ifg = np.fromfile(ifg_files[0], dtype=np.complex64)
-            np.angle(ifg).astype(np.float32).tofile(outfile)
-        else:
-            os.rename(ifg_files[0], outfile)
-        return
-
-    # Get file size and calculate chunk size in elements
-    file_size = os.path.getsize(ifg_files[0])
-    dtype = np.complex64
-    elem_size = np.dtype(dtype).itemsize  # 8 bytes for complex64
-    total_elements = file_size // elem_size
-
-    # Calculate chunk size in elements (1GB = 1e9 bytes)
-    max_chunk_bytes = chunk_size_gb * 1e9
-    chunk_elements = max(1, int(max_chunk_bytes // elem_size))
-
-    # Ensure we don't create too many chunks for small files
-    num_chunks = int(max(1, np.ceil(total_elements / chunk_elements)))
-
-    logger.info(f'Processing {nifg} files with {num_chunks} chunks '
-    f'({chunk_elements} elements per chunk)')
-
-    # Open output file for writing
-    with open(outfile, 'wb') as out_f:
-        # Process each chunk
-        for chunk_idx in range(num_chunks):
-            start_idx = chunk_idx * chunk_elements
-            end_idx = min((chunk_idx + 1) * chunk_elements, total_elements)
-            chunk_size = end_idx - start_idx
-
-            # Read first interferogram chunk
-            with open(ifg_files[0], 'rb') as f:
-                f.seek(start_idx * elem_size)
-                ifg1 = np.frombuffer(f.read(chunk_size * elem_size), dtype=dtype)
-
-            # Process remaining interferograms for this chunk
-            for i in range(1, nifg):
-                # Read chunk from current file
-                with open(ifg_files[i], 'rb') as f:
-                    f.seek(start_idx * elem_size)
-                    ifg2 = np.frombuffer(f.read(chunk_size * elem_size),
-                            dtype=dtype)
-
-                # Calculate masks for this chunk
-                mask1 = np.abs(ifg1) > 1e-3
-                mask2 = np.abs(ifg2) > 1e-3
-                common_mask = mask1 & mask2
-
-                # Calculate phase difference only if there are common points
-                if np.any(common_mask):
-                    ifg_diff = np.conj(ifg1[common_mask]) * ifg2[common_mask]
-                    phase_diff = np.angle(np.mean(ifg_diff))
-                    ifg_diff = ifg_diff*np.exp(-1j*phase_diff)
-                    phase_diff = phase_diff + np.median(np.angle(ifg_diff))
-                    logger.info(f'Chunk {chunk_idx+1}/{num_chunks}, ' + \
-                                 'phase difference ' + \
-                                 f'between file 0 and file {i}: {phase_diff} rad')
-                    if np.abs(phase_diff) > 0.2:
-                        ifg2 = ifg2 * np.exp(-1j * phase_diff)
-
-                # Merge interferograms
-                ifg1 = ifg1 * mask1 + ifg2 * mask2 * (~mask1)
-
-            # Write processed chunk to output file
-            if out_float:
-                np.angle(ifg1).astype(np.float32).tofile(out_f)
-            else:
-                ifg1.tofile(out_f)
-
-    # Clean up original files
-    for ifg_file in ifg_files:
-        os.remove(ifg_file)
-
-    return
-
 def stitch_patches(patch, ifg, left, right, out_float):
     temp = patch[:,left:right]
     if out_float:
@@ -311,7 +91,7 @@ def interfere_single_scene(
         collook: int,
         direction: Literal['asc','desc'],
         outfile: str,
-        out_float: bool = False):
+        out_float: bool = False) -> str:
     """
     Form an interferogram for a single scene
 
@@ -417,15 +197,14 @@ def interfere_single_scene(
                     mask = ifg_cropped.real == 0
                 ifg_cropped[mask] = ifg2[mask]
             with open(tempfile,'r+b') as f:
-                f.seek(top*ci1.ncol0*element_size, 0)
-                curr_data = np.fromfile(f,count=(bottom-top)*ci1.ncol0,dtype=dtype)
+                f.seek(int(top)*int(ci1.ncol0)*element_size, 0)
+                curr_data = np.fromfile(f,count=int(bottom-top)*int(ci1.ncol0),dtype=dtype)
                 curr_data = np.reshape(curr_data,((bottom-top),ci1.ncol0))
-                print(curr_data.shape)
                 stitch_patches(curr_data, ifg, left, right, out_float)
-                f.seek(top*ci1.ncol0*element_size, 0)
+                f.seek(int(top)*int(ci1.ncol0)*element_size, 0)
                 f.write(curr_data)
-    #for subifg_file in subifg_files:
-    #    os.remove(subifg_file)
+    for subifg_file in subifg_files:
+        os.remove(subifg_file)
     return tempfile
 
 def parse_fname(fn:str)->Tuple[str, str]:
