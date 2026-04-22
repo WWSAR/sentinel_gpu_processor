@@ -100,15 +100,14 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
     return bperp
 
 def zip_subswath_lists(subswath_lists,subswath_numbers):
-    idx = 0
     nsubswath = len(subswath_numbers)
     d = {}
-    for i, subswath_list in enumerate(subswath_lists):
+    for subswath_list in subswath_lists:
         for fn in subswath_list:
             basename = os.path.basename(fn)
             scene_id = basename[0:20]
             if scene_id in d:
-                d.append(fn)
+                d[scene_id].append(fn)
             else:
                 d[scene_id] = [fn]
     slc_list = []
@@ -118,7 +117,7 @@ def zip_subswath_lists(subswath_lists,subswath_numbers):
         for fn in fns:
             basename = os.path.basename(fn)
             iw_number = int(basename[23])
-            l[subswath_numbers.index(iw_nubmer)] = fn
+            l[subswath_numbers.index(iw_number)] = fn
         slc_list.append(l)
     return slc_list
 
@@ -216,9 +215,13 @@ def create_slc_pair_list(
     # create a list of all acquisition dates
     date_list = []
     for subswath_files in slc_list:
-        basename = os.path.basename(subswath_files[0])
-        date_str = basename[0:8]
-        date_list.append(date_str)
+        for subswath_file in subswath_files:
+            if subswath_file is None:
+                continue
+            basename = os.path.basename(subswath_file)
+            date_str = basename[0:8]
+            date_list.append(date_str)
+            break
     
     # create a dictionary mapping date to slcfiles
     slc_dict = {}

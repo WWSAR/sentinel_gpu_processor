@@ -6,6 +6,7 @@ log.txt
 .nfs*
 .vscode
 bin/
+build/
 s1proc/csrc/build
 s1proc/csrc/vcpkg_installed
 s1proc/csrc/CMakeFiles
