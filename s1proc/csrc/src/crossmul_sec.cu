@@ -236,7 +236,6 @@ __global__ void replace<Complex>(Complex *a, Complex *b, const std::size_t n){
     }
 }
 
-
 __global__
 void non_overlap_mask(
         Complex *a,
@@ -255,18 +254,31 @@ void non_overlap_mask(
         ax = a[i].x;
         bx = b[i].x;
         if (ax != 0 && bx == 0){
-            mask1[i] = i/ncol;
+            mask1[i] = int(i/ncol);
             mask2[i] = 0;
             b[i] = zero;
         }else if(ax == 0 && bx != 0){
             mask1[i] = 0;
-            mask2[i] = i/ncol;
+            mask2[i] = int(i/ncol);
             a[i] = zero;
         }else{
             mask1[i] = 0;
             mask2[i] = 0;
             a[i] = zero;
             b[i] = zero;
+        }
+    }
+}
+
+__global__
+void point_mask(float *a, float *b, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    for (std::size_t i = index; i < n; i += stride){
+        if (a[i] == 0){
+            b[i] = 0.;
+        }else{
+            b[i] = 1.;
         }
     }
 }
@@ -397,13 +409,13 @@ void crossmul_strip(
 
     int left, top, right, bottom, nrow, ncol, n;
     int nrow_ifg, nrow_sm, ncol_sm;
-    int first_nonzero_row, first_nonzero_row1, first_nonzero_row2;
-    int last_nonzero_row, last_nonzero_row1, last_nonzero_row2;
+    //int first_nonzero_row, first_nonzero_row1, first_nonzero_row2;
+    //int last_nonzero_row, last_nonzero_row1, last_nonzero_row2;
     int block_size = 256, num_blocks;
     Complex *d_slc1, *d_slc2, *d_main, *d_ifgsec;
     T *d_ifgmain, *d_ifgmain_masked;
     float *d_mask1, *d_mask2;
-    float row_sum1, row_sum2, col_sum1, col_sum2;
+    float row_sum1, row_sum2, count1, count2, row_mean1, row_mean2;
     //float coh_main, coh_sec;
 
     if (strip1->top > strip2->bottom){
@@ -435,59 +447,69 @@ void crossmul_strip(
     CHECK_CUDA(cudaMalloc((void**)&d_slc2,sizeof(Complex)*n));
     CHECK_CUDA(cudaMalloc((void**)&d_mask1,sizeof(float)*n));
     CHECK_CUDA(cudaMalloc((void**)&d_mask2,sizeof(float)*n));
-    CHECK_CUDA(cudaMemcpy(d_slc1, strip1->data, sizeof(Complex)*nrow*ncol,
+    CHECK_CUDA(cudaMemcpy(d_slc1, strip1->data, sizeof(Complex)*n,
                 cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_slc2, strip2->data, sizeof(Complex)*nrow*ncol,
+    CHECK_CUDA(cudaMemcpy(d_slc2, strip2->data, sizeof(Complex)*n,
                 cudaMemcpyHostToDevice));
     non_overlap_mask<<<num_blocks,block_size>>>(
             d_slc1,d_slc2,d_mask1,d_mask2,ncol,n);
     CHECK_CUDA(cudaDeviceSynchronize());
-    
-    get_first_last_nonzero_row(d_mask1, nrow, ncol,
-            first_nonzero_row1, last_nonzero_row1);
+
+    row_sum1 = reduce_sum(d_mask1, n, 256);
+    point_mask<<<num_blocks,block_size>>>(d_mask1, d_mask1, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    count1 = reduce_sum(d_mask1, n, 256);
     cudaFree(d_mask1);
-    get_first_last_nonzero_row(d_mask2, nrow, ncol,
-            first_nonzero_row2, last_nonzero_row2);
+    if (count1 == 0){
+        row_mean1 = 0;
+    }else{
+        row_mean1 = row_sum1/count1;
+    }
+
+    row_sum2 = reduce_sum(d_mask2, n, 256);
+    point_mask<<<num_blocks,block_size>>>(d_mask2, d_mask2, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    count2 = reduce_sum(d_mask2, n, 256);
     cudaFree(d_mask2);
+    if (count2 == 0){
+        row_mean2 = 0;
+    }else{
+        row_mean2 = row_sum2/count2;
+    }
+    
+    //get_first_last_nonzero_row(d_mask1, nrow, ncol,
+    //        first_nonzero_row1, last_nonzero_row1);
+    //cudaFree(d_mask1);
+    //get_first_last_nonzero_row(d_mask2, nrow, ncol,
+    //        first_nonzero_row2, last_nonzero_row2);
+    //cudaFree(d_mask2);
 
     // decide which mask will be used for interferogram generation
-    if (first_nonzero_row1 == -1 && first_nonzero_row2 == -1){
+    if (row_mean1 == 0 && row_mean2 == 0){
         // two strips match perfectly
         next_flag = 2;
         cudaFree(d_slc1);
         cudaFree(d_slc2);
         return;
     }
-    if (first_nonzero_row2 == -1 || first_nonzero_row1 < first_nonzero_row2 ||
-        first_nonzero_row1 == first_nonzero_row2 &
-        last_nonzero_row1 < last_nonzero_row2){
+    if (row_mean2 == 0 || row_mean1 < row_mean2){
         if (asc){
             // non-overlapped area is from strip1
             next_flag = 3;
-            first_nonzero_row = first_nonzero_row1;
-            last_nonzero_row = last_nonzero_row1;
             cudaFree(d_slc2);
         }else{
             next_flag = 4;
-            first_nonzero_row = first_nonzero_row2;
-            last_nonzero_row = last_nonzero_row2;
             cudaFree(d_slc1);
         }
     }else if(
-        first_nonzero_row1 == -1 || first_nonzero_row1 > first_nonzero_row2 ||
-        first_nonzero_row1 == first_nonzero_row2 &
-        last_nonzero_row1 > last_nonzero_row2){
+        row_mean1 == 0 || row_mean1 > row_mean2){
         if (asc){
             // non-overlapped area is from strip2
             next_flag = 4;
-            first_nonzero_row = first_nonzero_row2;
-            last_nonzero_row = last_nonzero_row2;
             cudaFree(d_slc1);
         }else{
             // non-overlapped area is from strip1
             next_flag = 3;
-            first_nonzero_row = first_nonzero_row1;
-            last_nonzero_row = last_nonzero_row1;
             cudaFree(d_slc2);
         }
     }else{
@@ -497,21 +519,19 @@ void crossmul_strip(
         cudaFree(d_slc2);
         return;
     }
-    std::cout << "top line: " << top/rowlook - ifg->top << std::endl;
-    std::cout << "first_nonzero_row1: " << first_nonzero_row1 << std::endl;
-    std::cout << "first_nonzero_row2: " << first_nonzero_row2 << std::endl;
-    std::cout << "last_nonzero_row1: " << last_nonzero_row1 << std::endl;
-    std::cout << "last_nonzero_row2: " << last_nonzero_row2 << std::endl;
+    //std::cout << "top line: " << top/rowlook - ifg->top << std::endl;
+    //std::cout << "row_mean1: " << row_mean1 << std::endl;
+    //std::cout << "row_mean2: " << row_mean2 << std::endl;
 
     // allocate for cross-multiplication
-    first_nonzero_row = (first_nonzero_row + rowlook - 1) / rowlook * rowlook;
-    last_nonzero_row = last_nonzero_row / rowlook * rowlook;
-    if (last_nonzero_row - first_nonzero_row <= rowlook){
-        next_flag = 2;
-        cudaFree(d_slc1);
-        cudaFree(d_slc2);
-        return;
-    }
+    //first_nonzero_row = (first_nonzero_row + rowlook - 1) / rowlook * rowlook;
+    //last_nonzero_row = last_nonzero_row / rowlook * rowlook;
+    //if (last_nonzero_row - first_nonzero_row <= rowlook){
+    //    next_flag = 2;
+    //    cudaFree(d_slc1);
+    //    cudaFree(d_slc2);
+    //    return;
+    //}
     nrow_ifg = nrow;
     nrow_sm = nrow_ifg / rowlook;
     ncol_sm = ncol / collook;
