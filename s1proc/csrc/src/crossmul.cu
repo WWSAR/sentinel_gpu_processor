@@ -40,12 +40,14 @@ std::string extract_date(const std::string &s){
 
 int crossmul(const std::string &slcfile1,
              const std::string &slcfile2,
+             const std::string &intfile,
              const int rowlook, const int collook,
-             std::string intfile=""){
+             const int out_float){
     // delcaration
     std::int32_t header1[NHEADER], header2[NHEADER], ifg_header[NHEADER];
     Complex *slc1, *slc2, *ifglook;
     Complex *d_slc1, *d_slc2, *d_ifg, *d_ifg_collook, *d_ifglook;
+    float *phase, *d_phase;
     int batch_lines = 3000, blockSize=256, batch_sm;
     int nbatch, numBlocks, ncol_sm;
     // image parameters
@@ -62,10 +64,6 @@ int crossmul(const std::string &slcfile1,
     batch_lines = batch_sm*rowlook;
     date1 = extract_date(slcfile1);
     date2 = extract_date(slcfile2);
-    if (intfile==""){
-        intfile = date1+"_"+date2+".int";
-    }
-    std::cout << "output filename: " << intfile << std::endl;
     // read the header of the first image
     read_binary<std::int32_t>(slcfile1, NHEADER, header1);
     // read the header of the second image
@@ -103,12 +101,23 @@ int crossmul(const std::string &slcfile1,
     ncol_sm = ncol/collook;
     slc1 = (Complex *)malloc(sizeof(Complex)*ncol*batch_lines);
     slc2 = (Complex *)malloc(sizeof(Complex)*ncol*batch_lines);
-    ifglook = (Complex *)malloc(sizeof(Complex)*batch_sm*ncol_sm);
-    cudaMalloc((void**)&d_slc1,sizeof(Complex)*ncol*batch_lines);
-    cudaMalloc((void**)&d_slc2,sizeof(Complex)*ncol*batch_lines);
-    cudaMalloc((void**)&d_ifg,sizeof(Complex)*ncol*batch_lines);
-    cudaMalloc((void**)&d_ifg_collook,sizeof(Complex)*batch_lines*ncol_sm);
-    cudaMalloc((void**)&d_ifglook,sizeof(Complex)*batch_sm*ncol_sm);
+    if (out_float){
+        phase = (float *)malloc(sizeof(float)*batch_sm*ncol_sm);
+        CHECK_CUDA(cudaMalloc((void**)&d_phase,sizeof(float)*batch_sm*ncol_sm));
+    }else{
+        ifglook = (Complex *)malloc(sizeof(Complex)*batch_sm*ncol_sm);
+    } 
+    CHECK_CUDA(cudaMalloc((void**)&d_slc1,sizeof(Complex)*ncol*batch_lines));
+    CHECK_CUDA(cudaMalloc((void**)&d_slc2,sizeof(Complex)*ncol*batch_lines));
+    CHECK_CUDA(cudaMalloc((void**)&d_ifg,sizeof(Complex)*ncol*batch_lines));
+    if (collook > 1){
+        CHECK_CUDA(cudaMalloc((void**)&d_ifg_collook,
+            sizeof(Complex)*batch_lines*ncol_sm));
+    }
+    if (rowlook > 1){
+        CHECK_CUDA(cudaMalloc((void**)&d_ifglook,
+            sizeof(Complex)*batch_sm*ncol_sm));
+    }
     
     for (int ibatch = 0; ibatch < nbatch; ++ibatch){
         std::cout << "batch " << (ibatch+1) << "/" << nbatch <<std::endl;
@@ -116,9 +125,9 @@ int crossmul(const std::string &slcfile1,
         std::size_t line_end = line_start + batch_lines;
         line_end = line_end < nrow ? line_end : nrow;
         std::size_t nlines = line_end - line_start;
-        read_and_resample(slcfile1, slc1, left, top, right, bottom,
+        read_and_resample<Complex>(slcfile1, slc1, left, top, right, bottom,
                 line_start, line_end);
-        read_and_resample(slcfile2, slc2, left, top, right, bottom,
+        read_and_resample<Complex>(slcfile2, slc2, left, top, right, bottom,
                 line_start, line_end);
         CHECK_CUDA(cudaMemcpy(d_slc1,slc1,sizeof(Complex)*nlines*ncol,
                    cudaMemcpyHostToDevice));
@@ -129,50 +138,83 @@ int crossmul(const std::string &slcfile1,
         CHECK_CUDA(cudaDeviceSynchronize());
         numBlocks = (nlines*ncol_sm+blockSize-1)/blockSize;
         //std::cout << "column look" << std::endl;
-        cpx_col_look<<<numBlocks,blockSize>>>(d_ifg,d_ifg_collook,
+        if (collook > 1){
+            cpx_col_look<<<numBlocks,blockSize>>>(d_ifg,d_ifg_collook,
                                               collook,ncol,nlines*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
-        //std::cout << "row look" << std::endl;
-        numBlocks = (nlines/rowlook*ncol_sm+blockSize-1)/blockSize;
-        cpx_row_look<<<numBlocks,blockSize>>>(d_ifg_collook,d_ifglook,
-                                              rowlook,ncol_sm,nlines/rowlook*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
-        CHECK_CUDA(cudaMemcpy(ifglook,d_ifglook,sizeof(Complex)*nlines/rowlook*ncol_sm,
-                   cudaMemcpyDeviceToHost));
-        if(ibatch==0){
-            save_binary<Complex>(ifglook,nlines/rowlook*ncol_sm,ifg_header,
-                    NHEADER,intfile);
         }else{
-            save_binary<Complex>(ifglook,true,nlines/rowlook*ncol_sm,
+            d_ifg_collook = d_ifg;
+        }
+        CHECK_CUDA(cudaDeviceSynchronize());
+        numBlocks = (nlines/rowlook*ncol_sm+blockSize-1)/blockSize;
+        if (rowlook > 1){
+            cpx_row_look<<<numBlocks,blockSize>>>(d_ifg_collook,d_ifglook,
+                                        rowlook,ncol_sm,nlines/rowlook*ncol_sm);
+        }else{
+            d_ifglook = d_ifg_collook;
+        }
+        CHECK_CUDA(cudaDeviceSynchronize());
+        if (out_float){
+            point_angle<<<numBlocks,blockSize>>>(d_ifglook,d_phase,
+                                        nlines/rowlook*ncol_sm);
+            CHECK_CUDA(cudaMemcpy(
+                phase,d_phase,sizeof(float)*nlines/rowlook*ncol_sm,
+                cudaMemcpyDeviceToHost));
+        }else{
+            CHECK_CUDA(cudaMemcpy(
+                ifglook,d_ifglook,sizeof(Complex)*nlines/rowlook*ncol_sm,
+                cudaMemcpyDeviceToHost));
+        }
+        if(ibatch==0){
+            if (out_float){
+                save_binary<float>(phase,nlines/rowlook*ncol_sm,ifg_header,
+                    NHEADER,intfile);
+            }else{
+                save_binary<Complex>(ifglook,nlines/rowlook*ncol_sm,ifg_header,
+                    NHEADER,intfile);
+            }
+        }else{
+            if (out_float){
+                save_binary<float>(phase,true,nlines/rowlook*ncol_sm,
                     intfile);
+            }else{
+                save_binary<Complex>(ifglook,true,nlines/rowlook*ncol_sm,
+                    intfile);
+            }
         }
     }
 
     free(slc1);
     free(slc2);
-    free(ifglook);
+    if (out_float){
+        free(phase);
+        cudaFree(d_phase);
+    }else{
+        free(ifglook);
+    }
     cudaFree(d_slc1);
     cudaFree(d_slc2);
     cudaFree(d_ifg);
-    cudaFree(d_ifg_collook);
-    cudaFree(d_ifglook);
+    if (collook > 1){
+        cudaFree(d_ifg_collook);
+    }
+    if (rowlook > 1){
+        cudaFree(d_ifglook);
+    }
     return 0;
 }
 
 int main(int argc, char *argv[]){
-    if (argc<5){
-        std::cout << "Usage: crossmul slcfile1 slcfile2 rowlook collook " <<
-            "[intfile]" << std::endl;
+    if (argc<7){
+        std::cout << "Usage: crossmul slcfile1 slcfile2 intfile rowlook " <<
+            "collook out_float" << std::endl;
         return 0;
     }
     const std::string slcfile1 = std::string(argv[1]);
     const std::string slcfile2 = std::string(argv[2]);
-    const int rowlook = std::stoi(argv[3]);
-    const int collook = std::stoi(argv[4]);
-    std::string intfile = "";
-    if (argc > 5){
-        intfile = std::string(argv[5]);
-    }
-    crossmul(slcfile1,slcfile2,rowlook,collook,intfile);
+    const std::string intfile = std::string(argv[3]);
+    const int rowlook = std::stoi(argv[4]);
+    const int collook = std::stoi(argv[5]);
+    const int out_float = std::stoi(argv[6]);
+    crossmul(slcfile1,slcfile2,intfile,rowlook,collook,out_float);
     return 0;
 }

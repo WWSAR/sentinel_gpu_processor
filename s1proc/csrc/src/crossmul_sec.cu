@@ -172,7 +172,22 @@ int get_first_last_nonzero_row(int* d_data, int nrow, int ncol,
     return 0;
 }
 
-__global__ void apply_mask(Complex *a, Complex *b, Complex *mask,
+template <typename T>
+__global__ void apply_mask(T *a, T *b, Complex *mask,
+        const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    for (std::size_t i = index; i < n; i += stride){
+        if (mask[i].x == 0){
+            b[i] = 0;
+        }else{
+            b[i] = a[i];
+        }
+    }
+}
+
+template<>
+__global__ void apply_mask<Complex>(Complex *a, Complex *b, Complex *mask,
         const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
@@ -188,7 +203,21 @@ __global__ void apply_mask(Complex *a, Complex *b, Complex *mask,
     }
 }
 
-__global__ void replace(Complex *a, Complex *b, const std::size_t n){
+template <typename T>
+__global__ void replace(T *a, Complex *b, const std::size_t n){
+    std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+    std::size_t stride = blockDim.x * gridDim.x;
+    Complex bi;
+    for (std::size_t i = index; i < n; i += stride){
+        bi = b[i];
+        if (bi.x != 0){
+            a[i] = atan2f(bi.y,bi.x);
+        }
+    }
+}
+
+template<>
+__global__ void replace<Complex>(Complex *a, Complex *b, const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
     Complex ai, bi;
@@ -207,12 +236,14 @@ __global__ void replace(Complex *a, Complex *b, const std::size_t n){
     }
 }
 
+
 __global__
 void non_overlap_mask(
         Complex *a,
         Complex *b,
-        int *mask1,
-        int* mask2,
+        float *mask1,
+        float *mask2,
+        const int ncol,
         const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
@@ -224,12 +255,12 @@ void non_overlap_mask(
         ax = a[i].x;
         bx = b[i].x;
         if (ax != 0 && bx == 0){
-            mask1[i] = 1;
+            mask1[i] = i/ncol;
             mask2[i] = 0;
             b[i] = zero;
         }else if(ax == 0 && bx != 0){
             mask1[i] = 0;
-            mask2[i] = 1;
+            mask2[i] = i/ncol;
             a[i] = zero;
         }else{
             mask1[i] = 0;
@@ -260,16 +291,25 @@ void multilook(
                 sizeof(Complex)*nrow*ncol_sm));
     conj_mul<<<num_blocks,block_size>>>(d_ref,d_sec,d_ifg,nrow*ncol);
     CHECK_CUDA(cudaDeviceSynchronize());
-    num_blocks = (nrow*ncol_sm+block_size-1)/block_size;
-    cpx_col_look<<<num_blocks,block_size>>>(d_ifg,d_ifg_collook,
-                                          collook,ncol,nrow*ncol_sm);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    cudaFree(d_ifg);
-    num_blocks = (nrow_sm*ncol_sm+block_size-1)/block_size;
-    cpx_row_look<<<num_blocks,block_size>>>(d_ifg_collook,d_ifglook,
-                                          rowlook,ncol_sm,nrow_sm*ncol_sm);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    cudaFree(d_ifg_collook);
+    if (collook > 1){
+        num_blocks = (nrow*ncol_sm+block_size-1)/block_size;
+        cpx_col_look<<<num_blocks,block_size>>>(d_ifg,d_ifg_collook,
+                                            collook,ncol,nrow*ncol_sm);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        cudaFree(d_ifg);
+    }else{
+        d_ifg_collook = d_ifg;
+    }
+
+    if (rowlook > 1){
+        num_blocks = (nrow_sm*ncol_sm+block_size-1)/block_size;
+        cpx_row_look<<<num_blocks,block_size>>>(d_ifg_collook,d_ifglook,
+                                            rowlook,ncol_sm,nrow_sm*ncol_sm);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        cudaFree(d_ifg_collook);
+    }else{
+        d_ifglook = d_ifg_collook;
+    }
 }
 
 __global__
@@ -342,14 +382,16 @@ float cal_coherence(Complex *d_ifg, const int nrow, const int ncol){
     return coh;
 }
 
+template<typename T>
 void crossmul_strip(
-        Strip *strip1,
-        Strip *strip2,
-        Strip *main1,
-        Strip *main2,
-        Strip *ifg,
+        Strip<Complex> *strip1,
+        Strip<Complex> *strip2,
+        Strip<Complex> *main1,
+        Strip<Complex> *main2,
+        Strip<T> *ifg,
         const int rowlook,
         const int collook,
+        bool asc,
         int &next_flag,
         bool &updated){
 
@@ -359,9 +401,10 @@ void crossmul_strip(
     int last_nonzero_row, last_nonzero_row1, last_nonzero_row2;
     int block_size = 256, num_blocks;
     Complex *d_slc1, *d_slc2, *d_main, *d_ifgsec;
-    Complex *d_ifgmain, *d_ifgmain_masked;
-    int *d_mask1, *d_mask2;
-    float coh_main, coh_sec;
+    T *d_ifgmain, *d_ifgmain_masked;
+    float *d_mask1, *d_mask2;
+    float row_sum1, row_sum2, col_sum1, col_sum2;
+    //float coh_main, coh_sec;
 
     if (strip1->top > strip2->bottom){
         next_flag = 0;
@@ -390,15 +433,16 @@ void crossmul_strip(
     // calculate nonoverlapped masks
     CHECK_CUDA(cudaMalloc((void**)&d_slc1,sizeof(Complex)*n));
     CHECK_CUDA(cudaMalloc((void**)&d_slc2,sizeof(Complex)*n));
-    CHECK_CUDA(cudaMalloc((void**)&d_mask1,sizeof(int)*n));
-    CHECK_CUDA(cudaMalloc((void**)&d_mask2,sizeof(int)*n));
+    CHECK_CUDA(cudaMalloc((void**)&d_mask1,sizeof(float)*n));
+    CHECK_CUDA(cudaMalloc((void**)&d_mask2,sizeof(float)*n));
     CHECK_CUDA(cudaMemcpy(d_slc1, strip1->data, sizeof(Complex)*nrow*ncol,
                 cudaMemcpyHostToDevice));
     CHECK_CUDA(cudaMemcpy(d_slc2, strip2->data, sizeof(Complex)*nrow*ncol,
                 cudaMemcpyHostToDevice));
     non_overlap_mask<<<num_blocks,block_size>>>(
-            d_slc1,d_slc2,d_mask1,d_mask2,n);
+            d_slc1,d_slc2,d_mask1,d_mask2,ncol,n);
     CHECK_CUDA(cudaDeviceSynchronize());
+    
     get_first_last_nonzero_row(d_mask1, nrow, ncol,
             first_nonzero_row1, last_nonzero_row1);
     cudaFree(d_mask1);
@@ -414,19 +458,38 @@ void crossmul_strip(
         cudaFree(d_slc2);
         return;
     }
-    if (first_nonzero_row2 == -1 || first_nonzero_row1 < first_nonzero_row2){
-        // non-overlapped area is from strip1
-        next_flag = 3;
-        first_nonzero_row = first_nonzero_row1;
-        last_nonzero_row = last_nonzero_row1;
-        cudaFree(d_slc2);
+    if (first_nonzero_row2 == -1 || first_nonzero_row1 < first_nonzero_row2 ||
+        first_nonzero_row1 == first_nonzero_row2 &
+        last_nonzero_row1 < last_nonzero_row2){
+        if (asc){
+            // non-overlapped area is from strip1
+            next_flag = 3;
+            first_nonzero_row = first_nonzero_row1;
+            last_nonzero_row = last_nonzero_row1;
+            cudaFree(d_slc2);
+        }else{
+            next_flag = 4;
+            first_nonzero_row = first_nonzero_row2;
+            last_nonzero_row = last_nonzero_row2;
+            cudaFree(d_slc1);
+        }
     }else if(
-        first_nonzero_row1 == -1 || first_nonzero_row1 > first_nonzero_row2){
-        // non-overlapped area is from strip2
-        next_flag = 4;
-        first_nonzero_row = first_nonzero_row2;
-        last_nonzero_row = last_nonzero_row2;
-        cudaFree(d_slc1);
+        first_nonzero_row1 == -1 || first_nonzero_row1 > first_nonzero_row2 ||
+        first_nonzero_row1 == first_nonzero_row2 &
+        last_nonzero_row1 > last_nonzero_row2){
+        if (asc){
+            // non-overlapped area is from strip2
+            next_flag = 4;
+            first_nonzero_row = first_nonzero_row2;
+            last_nonzero_row = last_nonzero_row2;
+            cudaFree(d_slc1);
+        }else{
+            // non-overlapped area is from strip1
+            next_flag = 3;
+            first_nonzero_row = first_nonzero_row1;
+            last_nonzero_row = last_nonzero_row1;
+            cudaFree(d_slc2);
+        }
     }else{
         // should not reach here
         next_flag = 2;
@@ -434,6 +497,11 @@ void crossmul_strip(
         cudaFree(d_slc2);
         return;
     }
+    std::cout << "top line: " << top/rowlook - ifg->top << std::endl;
+    std::cout << "first_nonzero_row1: " << first_nonzero_row1 << std::endl;
+    std::cout << "first_nonzero_row2: " << first_nonzero_row2 << std::endl;
+    std::cout << "last_nonzero_row1: " << last_nonzero_row1 << std::endl;
+    std::cout << "last_nonzero_row2: " << last_nonzero_row2 << std::endl;
 
     // allocate for cross-multiplication
     first_nonzero_row = (first_nonzero_row + rowlook - 1) / rowlook * rowlook;
@@ -464,74 +532,81 @@ void crossmul_strip(
         cudaFree(d_slc2);
     }
     cudaFree(d_main);
-    
 
     // load main interferogram strip
-    CHECK_CUDA(cudaMalloc((void**)&d_ifgmain,sizeof(Complex)*nrow_sm*ncol_sm));
-    CHECK_CUDA(cudaMalloc((void**)&d_ifgmain_masked,
-                sizeof(Complex)*nrow_sm*ncol_sm));
+    CHECK_CUDA(cudaMalloc((void**)&d_ifgmain,sizeof(T)*nrow_sm*ncol_sm));
+    CHECK_CUDA(cudaMalloc((void**)&d_ifgmain_masked,sizeof(T)*nrow_sm*ncol_sm));
     CHECK_CUDA(cudaMemcpy(d_ifgmain,ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
-                sizeof(Complex)*ncol_sm*nrow_sm,cudaMemcpyHostToDevice));
+                sizeof(T)*ncol_sm*nrow_sm,cudaMemcpyHostToDevice));
 
     // apply zero mask
     num_blocks = (nrow_sm*ncol_sm + block_size - 1) / block_size;
-    apply_mask<<<num_blocks, block_size>>>(d_ifgmain, d_ifgmain_masked,
-            d_ifgsec, nrow_sm*ncol_sm);
+    apply_mask<T><<<num_blocks, block_size>>>(
+        d_ifgmain, d_ifgmain_masked, d_ifgsec, nrow_sm*ncol_sm);
     CHECK_CUDA(cudaDeviceSynchronize());
     
-    coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
-    coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
+    //coh_main = cal_coherence(d_ifgmain_masked, nrow_sm, ncol_sm);
+    //coh_sec = cal_coherence(d_ifgsec, nrow_sm, ncol_sm);
     //if (coh_main > coh_sec){
     //    std::cout << "coh main " << coh_main << ", coh sec " << coh_sec <<
     //        ", no need to update" << std::endl;
     //}
-    //Complex *ifgsec, *ifgmain;
-    //ifgmain = (Complex*)malloc(sizeof(Complex)*nrow_sm*ncol_sm);
-    //ifgsec = (Complex*)malloc(sizeof(Complex)*ncol_sm*nrow_sm);
-    //CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain,sizeof(Complex)*nrow_sm*ncol_sm,
-    //           cudaMemcpyDeviceToHost));
-    //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
-    //           cudaMemcpyDeviceToHost));
-    //save_binary<Complex>(ifgsec, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_sec.int");
-    //save_binary<Complex>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
-    //free(ifgsec);
-    //free(ifgmain);
-    if (coh_sec > coh_main){
-        // replace main interferogram with secondary interferogram
-        replace<<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
-        CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
-                d_ifgmain,sizeof(Complex)*ncol_sm*nrow_sm,
-                cudaMemcpyDeviceToHost));
-        updated = true;
-    }
+    T *ifgmain;
+    float *d_phase;
+    float *phase;
+    ifgmain = (T*)malloc(sizeof(T)*nrow_sm*ncol_sm);
+    phase = (float*)malloc(sizeof(float)*ncol_sm*nrow_sm);
+    CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain_masked,sizeof(T)*nrow_sm*ncol_sm,
+               cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMalloc((void**)&d_phase,sizeof(float)*nrow_sm*ncol_sm));
+    point_angle<<<num_blocks, block_size>>>(d_ifgsec, d_phase, nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemcpy(phase,d_phase,sizeof(float)*ncol_sm*nrow_sm,
+               cudaMemcpyDeviceToHost));
+    save_binary<float>(phase, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_sec.int");
+    save_binary<T>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
+    free(phase);
+    free(ifgmain);
+    cudaFree(d_phase);
+    //if (coh_sec > coh_main){
+    // replace main interferogram with secondary interferogram
+    replace<T><<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    CHECK_CUDA(cudaMemcpy(ifg->data+((top/rowlook-ifg->top)*ifg->ncol),
+            d_ifgmain,sizeof(T)*ncol_sm*nrow_sm,
+            cudaMemcpyDeviceToHost));
+    updated = true;
+    //}
     cudaFree(d_ifgsec);
     cudaFree(d_ifgmain);
     return;
 }
 
+template <typename T>
 int crossmul_sec(
              const std::string &main_slcfile1,
              const std::string &sec_slcfile1,
              const std::string &main_slcfile2,
              const std::string &sec_slcfile2,
              const std::string &intfile,
-             const int rowlook, const int collook){
+             const int rowlook, const int collook,
+             const bool asc){
     // delcaration
     bool updated = false;
     int strip_idx1 = 0, strip_idx2 = 0, next_flag;
-    Subswath sec1(sec_slcfile1);
-    Subswath sec2(sec_slcfile2);
-    Strip main1(main_slcfile1, false);
-    Strip main2(main_slcfile2, false);
-    Strip ifg(intfile, true);
+    Subswath<Complex> sec1(sec_slcfile1);
+    Subswath<Complex> sec2(sec_slcfile2);
+    Strip<Complex> main1(main_slcfile1, false);
+    Strip<Complex> main2(main_slcfile2, false);
+    Strip<T> ifg(intfile, true);
     // end of declaration
     while (strip_idx1 < sec1.nstrip && strip_idx2 < sec2.nstrip){
-        Strip strip1 = sec1.data[strip_idx1];
-        Strip strip2 = sec2.data[strip_idx2];
-        crossmul_strip(&strip1, &strip2, &main1, &main2, &ifg, rowlook, collook,
-                next_flag, updated);
-        //std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 << ", next_flag " << next_flag << std::endl;
+        Strip<Complex> strip1 = std::move(sec1.data[strip_idx1]);
+        Strip<Complex> strip2 = std::move(sec2.data[strip_idx2]);
+        crossmul_strip<T>(&strip1, &strip2, &main1, &main2, &ifg, rowlook,
+            collook, asc, next_flag, updated);
+        std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 <<
+                  ", next_flag " << next_flag << std::endl;
         if (next_flag == 0){
             strip_idx2++;
             continue;
@@ -555,9 +630,10 @@ int crossmul_sec(
 }
 
 int main(int argc, char *argv[]){
-    if (argc<8){
+    if (argc<10){
         std::cout << "Usage: crossmul_sec main_slcfile1 sec_slcfile1 " <<
-            "main_slcfile2 sec_slcfile2 intfile rowlook collook " << std::endl;
+            "main_slcfile2 sec_slcfile2 intfile rowlook collook asc " <<
+            "out_float" << std::endl;
         return 0;
     }
     const std::string main_slcfile1 = std::string(argv[1]);
@@ -567,7 +643,20 @@ int main(int argc, char *argv[]){
     const std::string intfile = std::string(argv[5]);
     const int rowlook = std::stoi(argv[6]);
     const int collook = std::stoi(argv[7]);
-    crossmul_sec(main_slcfile1,sec_slcfile1,main_slcfile2,sec_slcfile2,intfile,
-            rowlook,collook);
+    const std::string direction = std::string(argv[8]);
+    const int out_float = std::stoi(argv[9]);
+    bool asc;
+    if (direction == "asc"){
+        asc = true;
+    }else{
+        asc = false;
+    }
+    if (out_float){
+        crossmul_sec<float>(main_slcfile1,sec_slcfile1,main_slcfile2,
+            sec_slcfile2,intfile,rowlook,collook,asc);
+    }else{
+        crossmul_sec<Complex>(main_slcfile1,sec_slcfile1,main_slcfile2,
+            sec_slcfile2,intfile,rowlook,collook,asc);
+    }
     return 0;
 }
