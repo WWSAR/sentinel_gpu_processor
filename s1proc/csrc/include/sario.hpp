@@ -4,6 +4,7 @@
 #include <complex>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -190,7 +191,7 @@ void read_and_resample(
 {
     std::ifstream fin(filename, std::ios::binary);
     if (!fin)
-        throw std::runtime_error("Cannot open file");
+        throw std::runtime_error("Cannot open file in read_and_resample");
 
     const size_t header_bytes = 64 * sizeof(int32_t);
     int src_w = right_src - left_src;
@@ -260,7 +261,7 @@ void read_and_resample(
 {
     std::ifstream fin(filename, std::ios::binary);
     if (!fin)
-        throw std::runtime_error("Cannot open file");
+        throw std::runtime_error("Cannot open file in read_and_resample");
 
     int32_t head[64];
     fin.read(reinterpret_cast<char*>(head), sizeof(head));
@@ -387,7 +388,7 @@ Strip<T>::Strip(const std::string &fname_, bool load_data_)
 {
     std::ifstream fin(fname_, std::ios::binary);
     if (!fin)
-        throw std::runtime_error("Cannot open file");
+        throw std::runtime_error("Cannot open file in Strip constructor");
     
     int32_t header[64];
     fin.read(reinterpret_cast<char*>(header), sizeof(header));
