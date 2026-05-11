@@ -5,6 +5,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <sstream>
 
 #include "sario.hpp"
 
@@ -18,30 +19,31 @@ rsc readrsc(const std::string& rscfile){
         printf("Unable to open file %s\n",rscfile.c_str());
         exit(-1);
     }
-    for(int i=0; i<6; ++i){
-        std::getline(fin, line);
-        auto pos = line.find(" ");
-        if (pos == std::string::npos){
-            pos = line.find("\t");
-        }
-        switch (i){
-            case 0 :
-                nlon = std::stoi(line.substr(pos+1));
-                break;
-            case 1 :
-                nlat = std::stoi(line.substr(pos+1));
-                break;
-            case 2 :
-                lonmin = std::stod(line.substr(pos+1));
-                break;
-            case 3 :
-                latmax = std::stod(line.substr(pos+1));
-                break;
-            case 4 :
-                dlon = std::stod(line.substr(pos+1));
-                break;
-            case 5 :
-                dlat = std::stod(line.substr(pos+1));
+    while (std::getline(fin, line)){
+        // split line into words
+        std::istringstream iss(line);
+        std::string word;
+        iss >> word;
+        if (word == "WIDTH"){
+            iss >> word;
+            nlon = std::stoi(word);
+        }else if (word == "FILE_LEGNTH"){
+            iss >> word;
+            nlat = std::stoi(word);
+        }else if (word == "X_FIRST"){
+            iss >> word;
+            lonmin = std::stod(word);
+        }else if (word == "Y_FIRST"){
+            iss >> word;
+            latmax = std::stod(word);
+        }else if (word == "X_STEP"){
+            iss >> word;
+            dlon = std::stod(word);
+        }else if (word == "Y_STEP"){
+            iss >> word;
+            dlat = std::stod(word);
+        }else{
+            continue;
         }
     }
     lonmax = lonmin + (nlon - 1) * dlon;
