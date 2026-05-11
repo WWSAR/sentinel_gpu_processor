@@ -284,43 +284,60 @@ void point_mask(float *a, float *b, const std::size_t n){
 }
 
 void multilook(
-        Complex *d_ref,
-        Complex *d_sec,
-        Complex *d_ifglook,
-        const int nrow,
-        const int ncol,
-        const int rowlook,
-        const int collook){
-    const int block_size = 256;
-    int num_blocks, nrow_sm, ncol_sm;
-    Complex *d_ifg, *d_ifg_collook;
+    Complex *d_ref,
+    Complex *d_sec,
+    Complex **d_ifglook,
+    const int nrow,
+    const int ncol,
+    const int rowlook,
+    const int collook) {
 
-    num_blocks = (nrow*ncol+block_size-1)/block_size;
-    nrow_sm = nrow/rowlook;
-    ncol_sm = ncol/collook;
-    CHECK_CUDA(cudaMalloc((void**)&d_ifg,sizeof(Complex)*nrow*ncol));
-    CHECK_CUDA(cudaMalloc((void**)&d_ifg_collook,
-                sizeof(Complex)*nrow*ncol_sm));
-    conj_mul<<<num_blocks,block_size>>>(d_ref,d_sec,d_ifg,nrow*ncol);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    if (collook > 1){
-        num_blocks = (nrow*ncol_sm+block_size-1)/block_size;
-        cpx_col_look<<<num_blocks,block_size>>>(d_ifg,d_ifg_collook,
-                                            collook,ncol,nrow*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
+    const int block_size = 256;
+    int num_blocks;
+    int nrow_sm = nrow / rowlook;
+    int ncol_sm = ncol / collook;
+
+    // full-resolution inteferogram
+    Complex *d_ifg;
+    CHECK_CUDA(cudaMalloc((void**)&d_ifg, sizeof(Complex) * nrow * ncol));
+    num_blocks = (nrow * ncol + block_size - 1) / block_size;
+    conj_mul<<<num_blocks, block_size>>>(d_ref, d_sec, d_ifg, nrow * ncol);
+
+    // no multilook
+    if (rowlook == 1 && collook == 1) {
+        *d_ifglook = d_ifg;
+        return;
+    }
+
+    // column look
+    Complex *d_ifg_collook = nullptr;
+    if (collook > 1) {
+        CHECK_CUDA(cudaMalloc((void**)&d_ifg_collook,
+                              sizeof(Complex) * nrow * ncol_sm));
+        num_blocks = (nrow * ncol_sm + block_size - 1) / block_size;
+        cpx_col_look<<<num_blocks, block_size>>>(
+                d_ifg, d_ifg_collook, collook, ncol, nrow * ncol_sm);
+        cudaDeviceSynchronize();
         cudaFree(d_ifg);
-    }else{
+    } else {
         d_ifg_collook = d_ifg;
     }
 
-    if (rowlook > 1){
-        num_blocks = (nrow_sm*ncol_sm+block_size-1)/block_size;
-        cpx_row_look<<<num_blocks,block_size>>>(d_ifg_collook,d_ifglook,
-                                            rowlook,ncol_sm,nrow_sm*ncol_sm);
-        CHECK_CUDA(cudaDeviceSynchronize());
+    // row look
+    if (rowlook > 1) {
+        Complex *d_ifg_final;
+        CHECK_CUDA(cudaMalloc((void**)&d_ifg_final,
+                    sizeof(Complex) * nrow_sm * ncol_sm));
+        num_blocks = (nrow_sm * ncol_sm + block_size - 1) / block_size;
+        cpx_row_look<<<num_blocks, block_size>>>(
+                d_ifg_collook, d_ifg_final, rowlook, ncol_sm, nrow_sm * ncol_sm);
+        cudaDeviceSynchronize();
         cudaFree(d_ifg_collook);
-    }else{
-        d_ifglook = d_ifg_collook;
+        *d_ifglook = d_ifg_final;
+        return;
+    } else {
+        *d_ifglook = d_ifg_collook; 
+        return;
     }
 }
 
@@ -454,6 +471,17 @@ void crossmul_strip(
     non_overlap_mask<<<num_blocks,block_size>>>(
             d_slc1,d_slc2,d_mask1,d_mask2,ncol,n);
     CHECK_CUDA(cudaDeviceSynchronize());
+    //float *mask1, *mask2;
+    //mask1 = (float*)malloc(sizeof(float)*n);
+    //mask2 = (float*)malloc(sizeof(float)*n);
+    //CHECK_CUDA(cudaMemcpy(mask1,d_mask1,sizeof(float)*n,
+    //           cudaMemcpyDeviceToHost));
+    //CHECK_CUDA(cudaMemcpy(mask2,d_mask2,sizeof(float)*n,
+    //           cudaMemcpyDeviceToHost));
+    //save_binary<float>(mask1, 0, n,std::to_string(top/rowlook - ifg->top)+".mask1");
+    //save_binary<float>(mask2, 0, n,std::to_string(top/rowlook - ifg->top)+".mask2");
+    //free(mask1);
+    //free(mask2);
 
     row_sum1 = reduce_sum(d_mask1, n, 256);
     point_mask<<<num_blocks,block_size>>>(d_mask1, d_mask1, n);
@@ -536,22 +564,28 @@ void crossmul_strip(
     nrow_sm = nrow_ifg / rowlook;
     ncol_sm = ncol / collook;
     CHECK_CUDA(cudaMalloc((void**)&d_main,sizeof(Complex)*ncol*nrow_ifg));
-    CHECK_CUDA(cudaMalloc((void**)&d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm));
     
     if (next_flag == 3){
         main2->load_data(left, top, right, bottom);
         CHECK_CUDA(cudaMemcpy(d_main,main2->data,sizeof(Complex)*ncol*nrow,
                 cudaMemcpyHostToDevice));
-        multilook(d_slc1,d_main,d_ifgsec,nrow,ncol,rowlook,collook);
+        multilook(d_slc1,d_main,&d_ifgsec, nrow,ncol,rowlook,collook);
         cudaFree(d_slc1);
     }else{
         main1->load_data(left, top, right, bottom);
         CHECK_CUDA(cudaMemcpy(d_main,main1->data,sizeof(Complex)*ncol*nrow,
                 cudaMemcpyHostToDevice));
-        multilook(d_main,d_slc2,d_ifgsec,nrow,ncol,rowlook,collook);
+        multilook(d_main,d_slc2,&d_ifgsec,nrow,ncol,rowlook,collook);
         cudaFree(d_slc2);
     }
     cudaFree(d_main);
+
+    //Complex *ifgsec;
+    //ifgsec = (Complex*)malloc(sizeof(Complex)*nrow_sm*ncol_sm);
+    //CHECK_CUDA(cudaMemcpy(ifgsec,d_ifgsec,sizeof(Complex)*ncol_sm*nrow_sm,
+    //           cudaMemcpyDeviceToHost));
+    //save_binary<Complex>(ifgsec, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_sec.int");
+    //free(ifgsec);
 
     // load main interferogram strip
     CHECK_CUDA(cudaMalloc((void**)&d_ifgmain,sizeof(T)*nrow_sm*ncol_sm));
@@ -571,23 +605,12 @@ void crossmul_strip(
     //    std::cout << "coh main " << coh_main << ", coh sec " << coh_sec <<
     //        ", no need to update" << std::endl;
     //}
-    T *ifgmain;
-    float *d_phase;
-    float *phase;
-    ifgmain = (T*)malloc(sizeof(T)*nrow_sm*ncol_sm);
-    phase = (float*)malloc(sizeof(float)*ncol_sm*nrow_sm);
-    CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain_masked,sizeof(T)*nrow_sm*ncol_sm,
-               cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMalloc((void**)&d_phase,sizeof(float)*nrow_sm*ncol_sm));
-    point_angle<<<num_blocks, block_size>>>(d_ifgsec, d_phase, nrow_sm*ncol_sm);
-    CHECK_CUDA(cudaDeviceSynchronize());
-    CHECK_CUDA(cudaMemcpy(phase,d_phase,sizeof(float)*ncol_sm*nrow_sm,
-               cudaMemcpyDeviceToHost));
-    save_binary<float>(phase, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_sec.int");
-    save_binary<T>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
-    free(phase);
-    free(ifgmain);
-    cudaFree(d_phase);
+    //T *ifgmain;
+    //ifgmain = (T*)malloc(sizeof(T)*nrow_sm*ncol_sm);
+    //CHECK_CUDA(cudaMemcpy(ifgmain,d_ifgmain_masked,sizeof(T)*nrow_sm*ncol_sm,
+    //           cudaMemcpyDeviceToHost));
+    //save_binary<T>(ifgmain, 0, ncol_sm*nrow_sm,std::to_string(top/rowlook - ifg->top)+"_main.int");
+    //free(ifgmain);
     //if (coh_sec > coh_main){
     // replace main interferogram with secondary interferogram
     replace<T><<<num_blocks, block_size>>>(d_ifgmain, d_ifgsec, nrow_sm*ncol_sm);
@@ -621,8 +644,8 @@ int crossmul_sec(
     Strip<T> ifg(intfile, true);
     // end of declaration
     while (strip_idx1 < sec1.nstrip && strip_idx2 < sec2.nstrip){
-        Strip<Complex> strip1 = std::move(sec1.data[strip_idx1]);
-        Strip<Complex> strip2 = std::move(sec2.data[strip_idx2]);
+        Strip<Complex> strip1 = sec1.data[strip_idx1];
+        Strip<Complex> strip2 = sec2.data[strip_idx2];
         crossmul_strip<T>(&strip1, &strip2, &main1, &main2, &ifg, rowlook,
             collook, asc, next_flag, updated);
         std::cout << "strip1 " << strip_idx1 << ", strip2 " << strip_idx2 <<
