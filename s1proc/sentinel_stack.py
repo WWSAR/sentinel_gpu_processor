@@ -36,7 +36,7 @@ def stack(
         rm_zipfile: bool = False,
         rm_folder: bool = False,
         reprocess: bool = False,
-        zip_list: Sequence[str] = None):
+        zip_list: Sequence[str]|None = None):
     """
     Process a stack of sentinel products to coregistered geocoded SLCS
     
