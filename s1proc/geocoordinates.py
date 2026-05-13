@@ -11,15 +11,15 @@ class GeoCoordinates:
         if not rscfile is None:
             rsc = {}
             with open(os.path.join(os.getcwd(),rscfile),'r') as f:
-                lines = f.readlines()
-                a = 'iiffff'
-                for i in np.arange(np.minimum(len(a),len(lines))):
-                    [param,val] = lines[i].split()
-                    if a[i] == 'i':
-                        rsc[param] = int(val)
-                    elif a[i] == 'f':
-                        rsc[param] = float(val)
-                    else:
+                for line in f:
+                    parts = line.split()
+                    param,val = parts[0], parts[1]
+                    try:
+                        if '.' in val or 'e' in val.lower():
+                            rsc[param] = float(val)
+                        else:
+                            rsc[param] = int(val)
+                    except ValueError:
                         rsc[param] = val
             self.nlon = rsc['WIDTH']
             self.nlat = rsc['FILE_LENGTH']
