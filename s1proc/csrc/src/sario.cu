@@ -27,7 +27,7 @@ rsc readrsc(const std::string& rscfile){
         if (word == "WIDTH"){
             iss >> word;
             nlon = std::stoi(word);
-        }else if (word == "FILE_LEGNTH"){
+        }else if (word == "FILE_LENGTH"){
             iss >> word;
             nlat = std::stoi(word);
         }else if (word == "X_FIRST"){
