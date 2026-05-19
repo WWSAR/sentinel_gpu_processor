@@ -17,6 +17,7 @@ def interfere_subswath(
     rowlook: int,
     collook: int,
     direction: Literal['asc','desc'],
+    fast: bool,
     out_float: bool):
     """
     Form an interferogram from two subswath geo-coded SLC images
@@ -35,6 +36,8 @@ def interfere_subswath(
         Number of looks in the column direction
     direction: Literal['asc','desc']
         Flight direction
+    fase: bool
+        Do not run crossmul_sec to remove burst line artifacts
     out_float: bool
         Only output phase
     """
@@ -45,13 +48,14 @@ def interfere_subswath(
               f' {out_float_flag}'
     logger.info(command)
     os.system(command)
-    main_supp_img_file = main_img_file.replace('main','sec')
-    sec_supp_img_file = sec_img_file.replace('main','sec')
-    command = f'{crossmul_sec} {main_img_file} {main_supp_img_file} ' + \
-              f'{sec_img_file} {sec_supp_img_file} {outfile} ' + \
-              f'{rowlook} {collook} {direction} {out_float_flag}'
-    logger.info(command)
-    os.system(command)
+    if not fast:
+        main_supp_img_file = main_img_file.replace('main','sec')
+        sec_supp_img_file = sec_img_file.replace('main','sec')
+        command = f'{crossmul_sec} {main_img_file} {main_supp_img_file} ' + \
+                  f'{sec_img_file} {sec_supp_img_file} {outfile} ' + \
+                  f'{rowlook} {collook} {direction} {out_float_flag}'
+        logger.info(command)
+        os.system(command)
     return
 
 def stitch_patches(patch, ifg, left, right, out_float):
@@ -91,6 +95,7 @@ def interfere_single_scene(
         collook: int,
         direction: Literal['asc','desc'],
         outfile: str,
+        fast: bool = False,
         out_float: bool = False) -> str:
     """
     Form an interferogram for a single scene
@@ -111,6 +116,8 @@ def interfere_single_scene(
         flight direction
     outfile: str
         Output interferogram
+    fast: bool
+        Do not run crossmul_sec to remove burst line artifacts
     out_float: bool
         Only write phase to disk
     """
@@ -130,10 +137,8 @@ def interfere_single_scene(
         subifg_file = os.path.join(ifg_dir,
                 f'{main_date}_{sec_date}_{main_id}_{sec_id}_{i}.int')
         subifg_files.append(subifg_file)
-        if os.path.exists(subifg_file):
-            continue
         interfere_subswath(main_img_file, sec_img_file, subifg_file,
-                rowlook, collook, direction, out_float)
+                rowlook, collook, direction, fast, out_float)
     tempfile = outfile+'.temp'
     if not os.path.exists(tempfile):
         if nsubswath == 1:
@@ -222,6 +227,7 @@ def interfere(
         rowlook: int = 1,
         collook: int = 1,
         out_float: bool = False,
+        fast: bool = False,
         verbose: bool = False):
     """
     Form interferograms from a subswath list
@@ -242,6 +248,8 @@ def interfere(
         Number of look in column direction
     out_float: bool
         Output float rather than cpx images
+    fast: bool
+        Do not run crossmul_sec to remove burst line artifacts
     verbose: bool
         Set the logging level to debug
     """
@@ -313,6 +321,9 @@ def interfere(
             subsets.append((np.copy(curr_main_imgs),
                             np.copy(curr_sec_imgs)))
         line_idx += count
+        tempfile = intfile+'.temp'
+        if os.path.exists(tempfile):
+            os.remove(tempfile)
         for main_img_files, sec_img_files in subsets:
             tempfile = interfere_single_scene(
                         main_img_files,
@@ -322,6 +333,7 @@ def interfere(
                         collook,
                         direction,
                         intfile,
+                        fast,
                         out_float)
         os.rename(tempfile,intfile)
         #stitch(ifg_files, intfile, out_float)
