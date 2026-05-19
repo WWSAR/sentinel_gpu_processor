@@ -21,6 +21,7 @@ def main()->int:
     from s1proc.unwrap import batch_snaphu
     from s1proc.coherence import multilook_amp, coherence
     from s1proc.query import query_asf
+    from s1proc.utils import check_integrity
     tyro.extras.subcommand_cli_from_dict(
         {
             "interfere": interfere,
@@ -32,7 +33,8 @@ def main()->int:
             "amp": multilook_amp,
             "coh": coherence,
             "los": los,
-            "query": query_asf
+            "query": query_asf,
+            "integrity": check_integrity
         })
     return os.EX_OK
 

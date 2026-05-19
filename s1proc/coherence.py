@@ -33,6 +33,8 @@ def multilook(slc_list: Sequence[str],
     for slc_file in slc_list:
         basename = os.path.basename(slc_file)
         outfile = os.path.join(temp_dir, basename+'.amp')
+        if os.path.exists(outfile):
+            continue
         amp_list.append(outfile)
         command = f'{exe} {slc_file} {outfile} {rowlook} {collook}'
         os.system(command)
@@ -116,8 +118,7 @@ def coherence(
         Number of look in column direction
     """
     os.makedirs(amp_dir, exist_ok = True)
-    if len(glob.glob(os.path.join(amp_dir, '*.amp'))) == 0:
-        multilook_amp(slc_dir, rscfile, amp_dir, rowlook, collook)
+    multilook_amp(slc_dir, rscfile, amp_dir, rowlook, collook)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook,collook)
     ifg_list = sorted(glob.glob(os.path.join(ifg_dir,'*.int')))

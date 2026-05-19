@@ -2,14 +2,15 @@
 # create a list of sbas pairs
 
 import glob
-import re
 import numpy as np
 import os
+import re
 import shutil
 import sys
 from functools import cmp_to_key
 from pathlib import Path
 from datetime import datetime
+from tqdm import tqdm
 from typing import List, Tuple
 
 from s1proc import geocoordinates
@@ -412,3 +413,89 @@ def los(dem_file: str,
     theta_file = os.path.join(proc_dir, 'look_angle')
     theta.tofile(theta_file)
     logger.info(f'Look angles are saved to {theta_file}')
+
+def move_files(
+        src_dir: str,
+        dst_dir: str,
+        pattern: str):
+    for src_file in glob.glob(os.path.join(src_dir, pattern)):
+        basename = os.path.basename(src_file)
+        dst_file = os.path.join(dst_dir, basename)
+        logger.info(f'move {src_file} to {dst_file}')
+        shutil.move(src_file, dst_file)
+
+def check_integrity(
+        amp_dir: str,
+        nrow: int,
+        ncol: int,
+        /,
+        max_deviation: float = 0.05,
+        outfile: str = 'incomplete_date.txt',
+        movedata: bool = False,
+        slc_dir: str = 'slc',
+        ifg_dir: str = 'igrams',
+        unw_dir: str = 'unw',
+        out_dir: str = 'incomplete')->List[str]:
+    """
+    Check data integrity based on the number of nonzero pixels in amplitude
+    images.
+
+    Parameters
+    ----------
+    amp_dir: str
+        Amplitude image directory
+    nrow: int
+        Number of rows in each image
+    ncol: int
+        Number of columns in each image
+    max_diviation: float
+        For a given amplitude image, if its number of nonzero pixels is smaller
+        than (1-max_diviation) * the meidan of all images, then it is
+        considered as an incomplete image
+    outfile: str
+        A txt file containing all dates with data loss
+    movedata: bool
+        If True, move all incomplete files to out_dir
+    slc_dir: str
+        Directory of Geocoded SLC images
+    ifg_dir: str
+        Directory of wrapped interferograms
+    unw_dir: str
+        Directory of unwrapped interferograms
+    out_dir: str
+        Output directory
+
+    Returns
+    -------
+    bad_dates: List[str]
+        A list of dates with data loss     
+    """
+    amp_list = np.array(glob.glob(os.path.join(amp_dir, '*.amp')))
+    nimg = len(amp_list)
+    non_zero_pixels = np.zeros(nimg, dtype=int)
+    for i,amp_file in tqdm(enumerate(amp_list), total = nimg,
+                           desc='non-zero pixels'):
+        a = np.fromfile(amp_file,dtype=np.float32)
+        non_zero_pixels[i] = np.sum(a!=0)
+    median_non_zero_pixel = np.median(non_zero_pixels)
+    threshold = median_non_zero_pixel*max_deviation
+    incomplete_idx = (median_non_zero_pixel - non_zero_pixels) > threshold
+    bad_pixels = (median_non_zero_pixel - non_zero_pixels[incomplete_idx])
+    bad_pixels = bad_pixels / median_non_zero_pixel * 100
+    bad_dates = []
+    with open(outfile, 'w') as f: 
+        for i, fn in enumerate(amp_list[incomplete_idx]):
+            basename = os.path.basename(fn)
+            date = basename[0:8]
+            bad_dates.append(date)
+            logger.info(f'date: {date}, data loss: {bad_pixels[i]:3.2f}%')
+            f.write(date+'\n')
+    if not movedata:
+        return bad_dates
+    os.makedirs(out_dir, exist_ok = True)
+    for date in bad_dates:
+        move_files(amp_dir, out_dir, f'*{date}*.amp')
+        move_files(slc_dir, out_dir, f'*{date}*.geo')
+        move_files(ifg_dir, out_dir, f'*{date}*.int')
+        move_files(unw_dir, out_dir, f'*{date}*.unw')
+    return bad_dates
