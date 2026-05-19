@@ -71,6 +71,8 @@ def batch_snaphu(
     for f in files:
         infile = f
         outfile = os.path.join(output_folder, (f.stem + ".unw"))
+        if os.path.exists(outfile):
+            continue
 
         cmd = [
             "snaphu",
