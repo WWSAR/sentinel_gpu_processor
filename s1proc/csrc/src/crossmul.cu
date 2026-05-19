@@ -58,6 +58,10 @@ int crossmul(const std::string &slcfile1,
     // raw interferogram
     int left, top, right, bottom, nrow, ncol;
     std::string date1, date2;
+    // zero
+    Complex zero;
+    zero.x = 0;
+    zero.y = 0;
     // end of declaration
 
     batch_sm = batch_lines/rowlook;
@@ -125,6 +129,8 @@ int crossmul(const std::string &slcfile1,
         std::size_t line_end = line_start + batch_lines;
         line_end = line_end < nrow ? line_end : nrow;
         std::size_t nlines = line_end - line_start;
+        std::fill_n(slc1, batch_lines * ncol, zero);
+        std::fill_n(slc2, batch_lines * ncol, zero);
         read_and_resample<Complex>(slcfile1, slc1, left, top, right, bottom,
                 line_start, line_end);
         read_and_resample<Complex>(slcfile2, slc2, left, top, right, bottom,
