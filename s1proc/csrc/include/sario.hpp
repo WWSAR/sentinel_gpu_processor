@@ -2,6 +2,7 @@
 #define SARIO
 
 #include <complex>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
