@@ -378,6 +378,10 @@ def los(dem_file: str,
         rowlook: int = 1,
         collook: int = 1):
     """
+    Calculate normalized Line-Of-Sight (LOS) vectors
+
+    Parameters
+    ----------
     dem_file: Path|str
         dem file (int16)
     rsc_file: Path|str

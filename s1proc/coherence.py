@@ -100,7 +100,7 @@ def coherence(
         rowlook: int = 1,
         collook: int = 1):
     """
-    Form interferograms from a subswath list
+    Compute InSAR phase coherence
 
     Parameters
     ----------
