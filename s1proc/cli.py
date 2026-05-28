@@ -14,7 +14,7 @@ def main()->int:
 
     import tyro
     from s1proc.utils import create_slc_pair_list
-    from s1proc.utils import mid_orbit, los
+    from s1proc.utils import los
     from s1proc.stitch import main as stitch_ifg
     from s1proc.interfere import interfere
     from s1proc.sentinel_stack import stack as stack
@@ -27,7 +27,6 @@ def main()->int:
             "interfere": interfere,
             "slcpairs": create_slc_pair_list,
             "stitch": stitch_ifg,
-            "midorb": mid_orbit,
             "stack": stack,
             "unwrap": batch_snaphu,
             "amp": multilook_amp,
