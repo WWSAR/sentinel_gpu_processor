@@ -80,11 +80,14 @@ def stitch_patches(patch, ifg, left, right, out_float):
             ifg[ifg > np.pi] -= 2*np.pi
             ifg[ifg < -np.pi] += 2*np.pi
         else:
-            replace_mask = (temp.real == 0)
+            replace_mask = temp.real == 0
             ifg = ifg * np.exp(-1j*mean_phase_diff)
-        temp[replace_mask] = ifg[replace_mask]
     else:
-        temp[:] = ifg[:]
+        if out_float:
+            replace_mask = (temp == 0) & (ifg != 0)
+        else:
+            replace_mask = temp.real == 0
+        temp[replace_mask] = ifg[replace_mask]
     return
 
 def interfere_single_scene(
