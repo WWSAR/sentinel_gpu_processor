@@ -1,0 +1,103 @@
+name: build-s1proc
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: [3.11]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -----------------------------
+      # Setup Python
+      # -----------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build setuptools wheel
+
+      # -----------------------------
+      # Install system dependencies
+      # -----------------------------
+      - name: Install CMake + Ninja
+        uses: lukka/get-cmake@latest
+
+      - name: Install Ninja (Windows/Linux)
+        run: |
+          pip install ninja
+
+      # -----------------------------
+      # CUDA setup
+      # -----------------------------
+      - name: Setup CUDA (Ubuntu)
+        if: runner.os == 'Linux'
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.4.1'
+
+      - name: Setup CUDA (Windows)
+        if: runner.os == 'Windows'
+        uses: Jimver/cuda-toolkit@v0.2.16
+        with:
+          cuda: '12.4.1'
+
+      # -----------------------------
+      # Build C++/CUDA binaries
+      # -----------------------------
+      - name: Configure CMake
+        run: |
+          cmake -S csrc -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build binaries
+        run: cmake --build build
+
+      # -----------------------------
+      # Copy binaries into python package
+      # -----------------------------
+      - name: Copy binaries into package
+        shell: bash
+        run: |
+          mkdir -p s1proc/bin
+
+          # Linux binaries
+          if [ -d build ]; then
+            find build -type f -executable -exec cp {} s1proc/bin/ \;
+          fi
+
+      # Windows-specific copy
+      - name: Copy binaries (Windows fix)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force s1proc/bin
+          Get-ChildItem -Recurse build -Filter *.exe | Copy-Item -Destination s1proc/bin
+
+      # -----------------------------
+      # Build Python wheel
+      # -----------------------------
+      - name: Build wheel
+        run: python -m build
+
+      # -----------------------------
+      # Upload artifacts
+      # -----------------------------
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: s1proc-${{ matrix.os }}-wheel
+          path: dist/*

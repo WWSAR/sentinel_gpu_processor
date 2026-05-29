@@ -1,6 +1,6 @@
 [build-system]
-requires = ["scikit-build-core>=0.9"]
-build-backend = "scikit_build_core.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meata"
 
 [project]
 name = "s1proc"
@@ -20,13 +20,10 @@ dependencies = [
     "tqdm>=4"
 ]
 
-[tool.scikit-build]
-cmake.source-dir = "csrc"
-cmake.build-type = "Release"
-
 # without this, the package installs, but installed binaries may not be copied
 # into wheel layout
-wheel.packages = ["s1proc"]
+[tool.setuptools.pacakage-data]
+s1proc = ["bin/*"]
 
 [project.scripts]
 s1proc = "s1proc.cli:main"
