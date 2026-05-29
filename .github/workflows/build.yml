@@ -84,7 +84,7 @@ jobs:
 
       - name: Free Disk Space (Windows/macOS)
         if: runner.os != 'Linux'
-        uses: hugoalh/disk-space-optimizer-ghaction@v1
+        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.0
 
       - name: Setup Python
         uses: actions/setup-python@v5
