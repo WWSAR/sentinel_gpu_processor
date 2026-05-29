@@ -36,19 +36,23 @@ jobs:
             pip
 
       - name: Configure CMake
+        shell: micromamba-shell {0}
         run: |
           cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
 
       - name: Build CUDA executables
+        shell: micromamba-shell {0}
         run: cmake --build build
 
       - name: Collect binaries
+        shell: micromamba-shell {0}
         run: |
           mkdir -p s1proc/bin
           cp build/* s1proc/bin/ || true
           find build -type f -executable -exec cp {} s1proc/bin/ \;
 
       - name: Build Python wheel
+        shell: micromamba-shell {0}
         run: |
           pip install build
           python -m build
