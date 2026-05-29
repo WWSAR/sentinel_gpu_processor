@@ -16,12 +16,11 @@ dependencies = [
     "pandas>=2.0",
     "numba>=0.58",
     "matplotlib>=3.8",
+    "requests>=2.31",
     "tyro>=0.9",
     "tqdm>=4"
 ]
 
-# without this, the package installs, but installed binaries may not be copied
-# into wheel layout
 [tool.setuptools.packages.find]
 include = ["s1proc*"]
 
