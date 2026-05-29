@@ -94,9 +94,9 @@ jobs:
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.22
         with:
-          cuda: '11.8.0'                    # Use full version (12.6.0, 12.6.1, 12.8.0, etc.)
+          cuda: '11.8.0'
           method: 'network'
-          sub-packages: '["nvcc"]'   # 👈 Only install what you need (saves disk space)
+          sub-packages: '["nvcc"]'
           use-github-cache: true
 
       - name: Verify nvcc
@@ -119,12 +119,12 @@ jobs:
             pip
 
       - name: Configure CMake
-        shell: micromamba-shell {0}
+        shell: bash -l {0}
         run: |
           cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
 
       - name: Build CUDA executables
-        shell: micromamba-shell {0}
+        shell: bash -l {0}
         run: cmake --build build
 
       - name: Collect binaries
@@ -133,6 +133,7 @@ jobs:
           Get-ChildItem -Recurse build -Filter *.exe | Copy-Item -Destination s1proc\bin
 
       - name: Build wheel
+        shell: bash -l {0}
         run: python -m build
 
       - name: Upload artifact
