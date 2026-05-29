@@ -86,6 +86,12 @@ jobs:
         if: runner.os != 'Linux'
         uses: hugoalh/disk-space-optimizer-ghaction@v0.8.0
 
+      - name: Setup MSVC (cl.exe) environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64          # 64-bit architecture
+          toolset: 14.40 
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
