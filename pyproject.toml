@@ -22,6 +22,9 @@ dependencies = [
 
 # without this, the package installs, but installed binaries may not be copied
 # into wheel layout
+[tool.setuptools.packages.find]
+include = ["s1proc*"]
+
 [tool.setuptools.package-data]
 s1proc = ["bin/*"]
 

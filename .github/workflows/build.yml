@@ -91,13 +91,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install CUDA
+        uses: Jimver/cuda-toolkit@v0.2.22
+        with:
+          cuda: '12.6'                     # or any version compatible with your code
+          method: 'network'                # faster install on Windows
+
+      - name: Verify nvcc
+        run: nvcc --version
+
       - name: Install tools
         run: |
           pip install cmake ninja build
 
-      # IMPORTANT:
-      # Windows runners already support MSVC + CUDA runtime libs
-      # We avoid CUDA installer entirely
+      - name: Install tools
+        run: |
+          pip install cmake ninja build
 
       - name: Configure CMake
         run: |
