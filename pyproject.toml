@@ -22,7 +22,7 @@ dependencies = [
 
 # without this, the package installs, but installed binaries may not be copied
 # into wheel layout
-[tool.setuptools.pacakage-data]
+[tool.setuptools.package-data]
 s1proc = ["bin/*"]
 
 [project.scripts]

@@ -76,7 +76,7 @@ jobs:
 
       - name: Free Disk Space (Linux)
         if: runner.os == 'Linux'
-        uses: jlumbrosof/free-disk-space@main
+        uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
           large-packages: true
