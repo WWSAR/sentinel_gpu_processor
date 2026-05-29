@@ -39,8 +39,8 @@ target_include_directories(phase_similarity PRIVATE "include")
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
-target_link_libraries(deramp_burst PRIVATE TIFF::TIFF sqlite3)
-target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF sqlite3)
+target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite::SQLite3)
+target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite::SQLite3)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity

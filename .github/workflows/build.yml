@@ -74,6 +74,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Free Disk Space (Linux)
+        if: runner.os == 'Linux'
+        uses: jlumbrosof/free-disk-space@main
+        with:
+          tool-cache: true
+          large-packages: true
+          swap-storage: false
+
+      - name: Free Disk Space (Windows/macOS)
+        if: runner.os != 'Linux'
+        uses: hugoalh/disk-space-optimizer-ghaction@v1
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
