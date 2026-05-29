@@ -1,103 +1,96 @@
-name: build-s1proc
+name: s1proc-cuda-build
 
 on:
   push:
   pull_request:
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
 
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: [3.11]
+  # =========================
+  # LINUX BUILD (PRIMARY)
+  # =========================
+  linux-build:
+    runs-on: ubuntu-latest
+
+    container:
+      image: nvidia/cuda:12.4.1-devel-ubuntu22.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # Setup Python
-      # -----------------------------
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install Python build tools
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install build setuptools wheel
+          apt-get update
+          apt-get install -y cmake ninja-build python3 python3-pip
 
-      # -----------------------------
-      # Install system dependencies
-      # -----------------------------
-      - name: Install CMake + Ninja
-        uses: lukka/get-cmake@latest
-
-      - name: Install Ninja (Windows/Linux)
-        run: |
-          pip install ninja
-
-      # -----------------------------
-      # CUDA setup
-      # -----------------------------
-      - name: Setup CUDA (Ubuntu)
-        if: runner.os == 'Linux'
-        uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: '12.4.1'
-
-      - name: Setup CUDA (Windows)
-        if: runner.os == 'Windows'
-        uses: Jimver/cuda-toolkit@v0.2.16
-        with:
-          cuda: '12.4.1'
-
-      # -----------------------------
-      # Build C++/CUDA binaries
-      # -----------------------------
       - name: Configure CMake
         run: |
           cmake -S csrc -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build binaries
+      - name: Build CUDA executables
         run: cmake --build build
 
-      # -----------------------------
-      # Copy binaries into python package
-      # -----------------------------
-      - name: Copy binaries into package
-        shell: bash
+      - name: Collect binaries
         run: |
           mkdir -p s1proc/bin
+          cp build/* s1proc/bin/ || true
+          find build -type f -executable -exec cp {} s1proc/bin/ \;
 
-          # Linux binaries
-          if [ -d build ]; then
-            find build -type f -executable -exec cp {} s1proc/bin/ \;
-          fi
-
-      # Windows-specific copy
-      - name: Copy binaries (Windows fix)
-        if: runner.os == 'Windows'
-        shell: powershell
+      - name: Build Python wheel
         run: |
-          New-Item -ItemType Directory -Force s1proc/bin
-          Get-ChildItem -Recurse build -Filter *.exe | Copy-Item -Destination s1proc/bin
+          pip install build
+          python -m build
 
-      # -----------------------------
-      # Build Python wheel
-      # -----------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-wheel
+          path: dist/*
+
+
+  # =========================
+  # WINDOWS BUILD
+  # =========================
+  windows-build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: |
+          pip install cmake ninja build
+
+      # IMPORTANT:
+      # Windows runners already support MSVC + CUDA runtime libs
+      # We avoid CUDA installer entirely
+
+      - name: Configure CMake
+        run: |
+          cmake -S csrc -B build -G Ninja ^
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build CUDA executables
+        run: cmake --build build
+
+      - name: Collect binaries
+        run: |
+          mkdir s1proc\bin
+          Get-ChildItem -Recurse build -Filter *.exe | Copy-Item -Destination s1proc\bin
+
       - name: Build wheel
         run: python -m build
 
-      # -----------------------------
-      # Upload artifacts
-      # -----------------------------
-      - name: Upload wheel
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: s1proc-${{ matrix.os }}-wheel
+          name: windows-wheel
           path: dist/*
