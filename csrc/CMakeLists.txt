@@ -6,31 +6,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 # Automatically set architectures based on specific flags
 set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 
-# Set output folder
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
-
-# Cross-platform dependency management
-if(WIN32)
-    # Windows: Use vcpkg
-    if(DEFINED ENV{VCPKG_ROOT})
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-    else()
-        message(FATAL_ERROR "VCPKG_ROOT environment variable not set. Please set it to your vcpkg installation directory.")
-    endif()
-elseif(UNIX)
-    # Linux: Try conda first, then system
-    if(DEFINED ENV{CONDA_PREFIX})
-        include_directories("$ENV{CONDA_PREFIX}/include")
-        link_directories("$ENV{CONDA_PREFIX}/lib")
-    endif()
-endif()
+#if(DEFINED ENV{CONDA_PREFIX})
+#    include_directories("$ENV{CONDA_PREFIX}/include")
+#    link_directories("$ENV{CONDA_PREFIX}/lib")
+#endif()
 
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
-
-if(WIN32)
-    find_package(unofficial-sqlite3 CONFIG REQUIRED)
-endif()
+find_package(SQLite3 REQUIRED)
 
 # Add source files
 add_executable(readgeotiff src/readgeotiff.cpp)
@@ -56,16 +39,30 @@ target_include_directories(phase_similarity PRIVATE "include")
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
-
-if(WIN32)
-    target_link_libraries(deramp_burst PRIVATE TIFF::TIFF unofficial::sqlite3::sqlite3)
-    target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF unofficial::sqlite3::sqlite3)
-else()
-    target_link_libraries(deramp_burst PRIVATE TIFF::TIFF sqlite3)
-    target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF sqlite3)
-endif()
+target_link_libraries(deramp_burst PRIVATE TIFF::TIFF sqlite3)
+target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF sqlite3)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity
-        RUNTIME DESTINATION s1proc/bin
+        RUNTIME DESTINATION bin
 )
+
+set(PYTHON_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin")
+
+function(copy_to_python_bin target_name)
+    add_custom_command(TARGET ${target_name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+            ${PYTHON_BIN_DIR}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:${target_name}>
+            ${PYTHON_BIN_DIR}/
+    )
+endfunction()
+
+copy_to_python_bin(readgeotiff)
+copy_to_python_bin(deramp_burst)
+copy_to_python_bin(geo2rdr_reramp)
+copy_to_python_bin(crossmul)
+copy_to_python_bin(crossmul_sec)
+copy_to_python_bin(multilook_amp)
+copy_to_python_bin(phase_similarity)

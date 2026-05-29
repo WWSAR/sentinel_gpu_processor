@@ -1,0 +1,59 @@
+{% set name = "s1proc" %}
+{% set version = "0.1.0" %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+
+  script: |
+    {{ PYTHON }} -m pip install . -vv
+
+  # This is CRITICAL for CMake + CUDA builds
+  skip: True  # [osx]
+
+requirements:
+  build:
+    - {{ compiler("cxx") }}
+    - {{ compiler("cuda") }}  # important for CUDA
+    - cmake
+    - ninja
+    - pip
+    - scikit-build-core
+
+  host:
+    - python
+    - pip
+    - numpy
+    - libtiff
+    - sqlite
+
+  run:
+    - python
+    - numpy
+    - pandas
+    - numba
+    - matplotlib
+    - tyro
+    - tqdm
+
+test:
+  imports:
+    - s1proc
+
+  commands:
+    - python -c "import s1proc; print('import ok')"
+
+about:
+  home: "https://github.com/WWSAR/sentinel_gpu_processor"
+  license: MIT
+  summary: "GPU-accelerated Sentinel-1 SAR processing tools"
+
+extra:
+  recipe-maintainers:
+    - Ke Wang
