@@ -19,14 +19,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
-        run: |
-          apt-get update
-          apt-get install -y cmake ninja-build python3 python3-pip
+      # -------------------------
+      # Install micromamba
+      # -------------------------
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: build
+          create-args: >-
+            python=3.11
+            cmake
+            ninja
+            libtiff
+            sqlite
+            pip
 
       - name: Configure CMake
         run: |
-          cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
 
       - name: Build CUDA executables
         run: cmake --build build
