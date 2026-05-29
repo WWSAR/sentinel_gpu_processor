@@ -94,25 +94,37 @@ jobs:
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.22
         with:
-          cuda: '12.6'                     # or any version compatible with your code
-          method: 'network'                # faster install on Windows
+          cuda: '11.8.0'                    # Use full version (12.6.0, 12.6.1, 12.8.0, etc.)
+          method: 'network'
+          sub-packages: '["nvcc"]'   # 👈 Only install what you need (saves disk space)
+          use-github-cache: true
 
       - name: Verify nvcc
         run: nvcc --version
 
-      - name: Install tools
-        run: |
-          pip install cmake ninja build
-
-      - name: Install tools
-        run: |
-          pip install cmake ninja build
+      # -------------------------
+      # Install micromamba
+      # -------------------------
+      - name: Setup micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: build
+          init-shell: bash
+          create-args: >-
+            python=3.11
+            cmake
+            ninja
+            libtiff
+            sqlite
+            pip
 
       - name: Configure CMake
+        shell: micromamba-shell {0}
         run: |
-          cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S csrc -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=$CONDA_PREFIX
 
       - name: Build CUDA executables
+        shell: micromamba-shell {0}
         run: cmake --build build
 
       - name: Collect binaries
