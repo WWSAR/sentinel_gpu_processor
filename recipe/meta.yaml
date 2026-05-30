@@ -10,37 +10,27 @@ source:
 
 build:
   number: 0
-
-  script: |
-    {{ PYTHON }} -m pip install . -vv
-
-  # This is CRITICAL for CMake + CUDA builds
-  skip: True  # [osx]
+  #noarch: python
+  entry_points:
+    - s1proc = s1proc.cli:main
+  script: {{ PYTHON }} -m pip install . --no-deps -vv
 
 requirements:
   build:
-    - {{ compiler("cxx") }}
-    - {{ compiler("cuda") }}  # important for CUDA
-    - cmake
-    - ninja
+    - python >=3.8
+    - setuptools
     - pip
-    - scikit-build-core
-
-  host:
-    - python
-    - pip
-    - numpy
+  run:
+    - python >=3.8
+    - numpy >=1.23
+    - pandas >=2.0
+    - numba >=0.58
+    - requests >=2.31
+    - matplotlib >=3.8
+    - tyro >=0.9
+    - tqdm >=4
     - libtiff
     - sqlite
-
-  run:
-    - python
-    - numpy
-    - pandas
-    - numba
-    - matplotlib
-    - tyro
-    - tqdm
 
 test:
   imports:

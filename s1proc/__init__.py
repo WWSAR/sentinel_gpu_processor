@@ -4,7 +4,7 @@ from pathlib import Path
 
 __version__ = "0.1.0"
 
-BASE_DIR = Path(__file__)
+BASE_DIR = Path(__file__).resolve().parent
 
 BIN_DIR = os.path.join(BASE_DIR, "bin")
 

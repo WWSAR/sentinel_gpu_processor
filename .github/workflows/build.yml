@@ -51,6 +51,13 @@ jobs:
           cp build/* s1proc/bin/ || true
           find build -type f -executable -exec cp {} s1proc/bin/ \;
 
+      # 专门上传编译好的二进制文件给下方的 conda 任务使用
+      - name: Upload Linux Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: s1proc/bin/*
+
       - name: Build Python wheel
         shell: micromamba-shell {0}
         run: |
@@ -137,6 +144,13 @@ jobs:
         run: |
           mkdir s1proc\bin
           Get-ChildItem -Recurse build -Filter *.exe | Copy-Item -Destination s1proc\bin
+      
+      # 专门上传 Windows 二进制
+      - name: Upload Windows Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: s1proc/bin/*
 
       - name: Build wheel
         shell: bash -l {0}
@@ -149,3 +163,83 @@ jobs:
         with:
           name: windows-wheel
           path: dist/*
+  
+  #############################
+  # LINUX CONDA PACKAGE
+  #############################
+  package-linux-conda:
+    needs: linux-build
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: s1proc/bin
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: build
+          create-args: >
+            python=3.11
+            conda-build
+
+      - name: Build conda package
+        shell: bash -l {0}
+        run: |
+          conda build recipe
+
+      - name: Build conda package
+        shell: bash -l {0}
+        run: |
+          # 确保 conda-build 能够将 s1proc/bin 下的二进制包含进去
+          conda build recipe
+
+      - name: Upload conda package
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-conda
+          path: ~/micromamba/envs/build/conda-bld/linux-64/*.conda
+
+  #############################
+  # WINDOWS CONDA PACKAGE
+  #############################
+  package-windows-conda:
+    needs: windows-build
+
+    runs-on: windows-latest
+
+    steps:
+
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: s1proc/bin
+
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: build
+          create-args: >
+            python=3.11
+            conda-build
+
+      - name: Build conda package
+        shell: bash -l {0}
+        run: |
+          conda build recipe
+
+      - name: Upload conda package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-conda
+          # 使用 $CONDA_PREFIX 动态定位，规避不同 Runner 盘符和路径硬编码问题
+          path: |
+            ${{ env.MAMBA_ROOT_PREFIX }}/envs/build/conda-bld/win-64/*.conda
