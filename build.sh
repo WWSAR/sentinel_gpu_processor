@@ -10,8 +10,7 @@ echo "Using NVCC: $(nvcc --version | head -n 1)"
 cmake -S csrc -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX/s1proc" \
-    -DCMAKE_CUDA_COMPILER="$BUILD_PREFIX/bin/nvcc" \
-    -DCMAKE_PREFIX_PATH="$PREFIX;$BUILD_PREFIX"
+    -DCMAKE_PREFIX_PATH="$PREFIX"
     
 cmake --build build --target install -- -j$(nproc)
 

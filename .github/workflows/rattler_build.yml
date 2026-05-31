@@ -10,6 +10,10 @@ jobs:
   matrix_build:
     name: Build on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+
+    container:
+      image: ${{ matrix.os == 'ubuntu-latest' && 'nvidia/cuda:12.4.1-devel-ubuntu22.04' || '' }}
+
     strategy:
       fail-fast: false
       matrix:
