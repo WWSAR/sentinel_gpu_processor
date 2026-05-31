@@ -6,7 +6,6 @@ import numpy as np
 import os
 import re
 import shutil
-import sys
 from functools import cmp_to_key
 from pathlib import Path
 from datetime import datetime

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 import numpy as np
 import os
-import shutil
 from typing import Tuple, Sequence, Literal
 
 from s1proc import get_bin_path

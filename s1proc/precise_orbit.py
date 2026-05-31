@@ -2,7 +2,6 @@
 
 #  create a new orbtiming file using a precise orbit file
 
-import sys
 import os
 import re
 from datetime import datetime,timedelta
