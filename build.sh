@@ -8,7 +8,8 @@ echo "Using NVCC: $(nvcc --version | head -n 1)"
 # 这里的 $PREFIX 是 Conda 沙盒自动为你提供的环境变量（等同于 Windows 里的 %SRC_DIR%\s1proc）
 cmake -S csrc -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_INSTALL_PREFIX="$PREFIX/s1proc"
+    -DCMAKE_INSTALL_PREFIX="$PREFIX/s1proc" \
+    -DCMAKE_PREFIX_PATH=$PREFIX
     
 cmake --build build --target install -- -j$(nproc)
 
