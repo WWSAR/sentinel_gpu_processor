@@ -25,7 +25,7 @@ dependencies = [
 include = ["s1proc*"]
 
 [tool.setuptools.package-data]
-s1proc = ["bin/*"]
+s1proc = ["bin/*", "*.so", "*.pyd", "*.dll"]
 
 [project.scripts]
 s1proc = "s1proc.cli:main"

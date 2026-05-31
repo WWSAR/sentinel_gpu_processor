@@ -14,3 +14,4 @@ fortran_code
 __pycache__
 *.egg-info
 *.so
+output/

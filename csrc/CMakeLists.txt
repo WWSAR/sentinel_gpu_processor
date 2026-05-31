@@ -47,22 +47,22 @@ install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec mu
         RUNTIME DESTINATION bin
 )
 
-set(PYTHON_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin")
-
-function(copy_to_python_bin target_name)
-    add_custom_command(TARGET ${target_name} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory
-            ${PYTHON_BIN_DIR}
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:${target_name}>
-            ${PYTHON_BIN_DIR}/
-    )
-endfunction()
-
-copy_to_python_bin(readgeotiff)
-copy_to_python_bin(deramp_burst)
-copy_to_python_bin(geo2rdr_reramp)
-copy_to_python_bin(crossmul)
-copy_to_python_bin(crossmul_sec)
-copy_to_python_bin(multilook_amp)
-copy_to_python_bin(phase_similarity)
+#set(PYTHON_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin")
+#
+#function(copy_to_python_bin target_name)
+#    add_custom_command(TARGET ${target_name} POST_BUILD
+#        COMMAND ${CMAKE_COMMAND} -E make_directory
+#            ${PYTHON_BIN_DIR}
+#        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+#            $<TARGET_FILE:${target_name}>
+#            ${PYTHON_BIN_DIR}/
+#    )
+#endfunction()
+#
+#copy_to_python_bin(readgeotiff)
+#copy_to_python_bin(deramp_burst)
+#copy_to_python_bin(geo2rdr_reramp)
+#copy_to_python_bin(crossmul)
+#copy_to_python_bin(crossmul_sec)
+#copy_to_python_bin(multilook_amp)
+#copy_to_python_bin(phase_similarity)

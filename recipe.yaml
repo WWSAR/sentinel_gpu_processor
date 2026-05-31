@@ -1,0 +1,47 @@
+context:
+  name: "s1proc"
+  version: "0.1.2"
+
+package:
+  name: ${{ name }}
+  version: ${{ version }}
+
+source:
+  path: .
+
+build:
+  number: 0
+  script: bld.bat
+  python:
+    entry_points:
+      - s1proc = s1proc.cli:main
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ compiler('cxx') }}
+    - ${{ compiler('nvcc') }}
+    - cmake
+    - ninja
+  host:
+    - python >=3.11
+    - pip
+    - setuptools
+    - libtiff
+    - sqlite
+  run:
+    - python >=3.11
+    - libtiff
+    - sqlite
+    - numpy >=1.23
+    - pandas >=2.0
+    - numba >=0.58
+    - requests >=2.31
+    - matplotlib >=3.8
+    - tyro >=0.9
+    - tqdm >=4
+
+tests:
+  - script:
+      # 这里的测试命令在执行时，由于下面指定了编译器，rattler-build 会自动拉起编译器环境
+      - python -c "import s1proc; print('import ok')"
