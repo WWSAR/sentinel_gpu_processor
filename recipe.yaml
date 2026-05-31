@@ -12,8 +12,11 @@ source:
 build:
   number: 0
   script:
-    - bld.bat   # [win]
-    - build.sh  # [unix]
+    - if: win
+      content: bld.bat
+
+    - if: unix
+      content: bash build.sh
   python:
     entry_points:
       - s1proc = s1proc.cli:main
