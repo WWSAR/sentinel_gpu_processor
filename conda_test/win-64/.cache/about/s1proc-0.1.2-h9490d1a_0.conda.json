@@ -1,6 +1,0 @@
-{
-  "channels": [
-    "https://conda.anaconda.org/nvidia/",
-    "https://conda.anaconda.org/conda-forge/"
-  ]
-}
