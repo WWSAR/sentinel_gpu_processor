@@ -34,6 +34,7 @@ jobs:
         with:
           # Force the action to use your correct root-level recipe file, overriding any default lookups
           recipe-path: "./recipe.yaml"
+          setup-only: true
 
       # 4. Execute cross-platform compilation. 
       # Note: --no-test is used because GitHub hosted runners lack physical NVIDIA GPUs; 
