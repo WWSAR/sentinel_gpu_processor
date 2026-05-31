@@ -30,13 +30,13 @@ requirements:
     - cmake
     - ninja
   host:
-    - python >=3.11
+    - python
     - pip
     - setuptools
     - libtiff
     - sqlite
   run:
-    - python >=3.11
+    - python
     - libtiff
     - sqlite
     - numpy >=1.23
