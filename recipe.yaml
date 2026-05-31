@@ -22,7 +22,7 @@ requirements:
   build:
     - ${{ compiler('c') }}
     - ${{ compiler('cxx') }}
-    - ${{ compiler('nvcc') }}
+    - ${{ compiler('nvcc') }} # [win]
     - cmake
     - ninja
   host:
