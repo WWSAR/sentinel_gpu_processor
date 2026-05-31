@@ -41,6 +41,12 @@ jobs:
           sub-packages: '["nvcc", "cudart"]'
           use-github-cache: true
 
+      - name: Install system dependencies (Linux container only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          apt-get update
+          apt-get install -y curl
+
       # 3. Install and configure the ultra-fast rattler-build toolchain
       - name: Setup rattler-build
         uses: prefix-dev/rattler-build-action@v0.2.38
