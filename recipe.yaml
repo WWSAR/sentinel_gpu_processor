@@ -31,6 +31,8 @@ requirements:
     - setuptools
     - libtiff
     - sqlite
+    - cuda-version 12.4        # 显式锁定全局版本号
+    - cuda-cudart-dev          # 编译期只用轻量级的 dev 库
   run:
     - python >=3.11
     - libtiff
@@ -42,6 +44,7 @@ requirements:
     - matplotlib >=3.8
     - tyro >=0.9
     - tqdm >=4
+    - cuda-cudart
 
 tests:
   - script:

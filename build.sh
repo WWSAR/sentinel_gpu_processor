@@ -1,7 +1,6 @@
 #!/bin/bash
 
 echo "=== [Linux] Starting GPU-Accelerated Build ==="
-echo "=== 输出一些中文字符，方便debug ==="
 echo "Using GCC: $(gcc --version | head -n 1)"
 echo "Using NVCC: $(nvcc --version | head -n 1)"
 
