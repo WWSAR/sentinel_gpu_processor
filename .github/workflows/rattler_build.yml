@@ -29,6 +29,13 @@ jobs:
         with:
           arch: x64
 
+      - name: Add NVIDIA Repository (Linux only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+
       - name: Install CUDA
         uses: Jimver/cuda-toolkit@v0.2.22
         with:
