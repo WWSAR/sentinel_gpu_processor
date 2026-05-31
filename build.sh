@@ -1,6 +1,7 @@
 #!/bin/bash
 
 echo "=== [Linux] Starting GPU-Accelerated Build ==="
+echo "=== 输出一些中文字符，方便debug ==="
 echo "Using GCC: $(gcc --version | head -n 1)"
 echo "Using NVCC: $(nvcc --version | head -n 1)"
 
@@ -9,7 +10,8 @@ echo "Using NVCC: $(nvcc --version | head -n 1)"
 cmake -S csrc -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$PREFIX/s1proc" \
-    -DCMAKE_PREFIX_PATH=$PREFIX
+    -DCMAKE_CUDA_COMPILER="$BUILD_PREFIX/bin/nvcc" \
+    -DCMAKE_PREFIX_PATH="$PREFIX;$BUILD_PREFIX"
     
 cmake --build build --target install -- -j$(nproc)
 
