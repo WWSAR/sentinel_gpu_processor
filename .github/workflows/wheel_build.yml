@@ -74,18 +74,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Free Disk Space (Linux)
-        if: runner.os == 'Linux'
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          large-packages: true
-          swap-storage: false
-
-      - name: Free Disk Space (Windows/macOS)
-        if: runner.os != 'Linux'
-        uses: hugoalh/disk-space-optimizer-ghaction@v0.8.0
-
       - name: Setup MSVC (cl.exe) environment
         uses: ilammy/msvc-dev-cmd@v1
         with:
