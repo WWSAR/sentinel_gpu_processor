@@ -4,13 +4,14 @@
 import glob
 import numpy as np
 import os
+import pandas as pd
 import re
 import shutil
+from datetime import datetime
 from functools import cmp_to_key
 from pathlib import Path
-from datetime import datetime
 from tqdm import tqdm
-from typing import List, Tuple
+from typing import List, Tuple, Sequence
 
 from s1proc import geocoordinates
 from s1proc import geometry
@@ -370,12 +371,55 @@ def _los(
     logger.info('Computing look angles, done.')
     return losvec, theta
 
+def multilook_dem(
+        dem_in_file: str,
+        rsc_in_file: str,
+        dem_out_file: str,
+        rsc_out_file: str,
+        rowlook: int,
+        collook: int):
+    """
+    Generate multilooked DEM for los calculation and visualization
+
+    Parameters
+    ----------
+    dem_in_file: str
+        DEM file for SLC generation (int16)
+    rsc_in_file: str
+        rsc file associated with dem_in_file
+    dem_out_file: str
+        Output DEM file for the output dem (int16)
+    rsc_out_file: str
+        rsc file associated with the output dem
+    rowlook: int
+        Number of looks in row direction
+    collook: int
+        Number of looks in column direction
+    """
+    dem_out_path = Path(dem_out_file).resolve().parent
+    os.makedirs(dem_out_path, exist_ok = True)
+    rsc_out_path = Path(rsc_out_file).resolve().parent
+    os.makedirs(rsc_out_path, exist_ok = True)
+
+    rsc = geocoordinates.GeoCoordinates(rsc_in_file)
+    nrow, ncol = rsc.nlat, rsc.nlon
+    if rowlook > 1 or collook > 1:
+        rsclook = rsc.take_look(rowlook,collook)
+        rsclook.save_as_rsc(rsc_out_file)
+        logger.info('Multilooking dem file')
+        sario.multilooks(dem_in_file, dem_out_file, np.int16, nrow, ncol,
+                rowlook, collook)
+        logger.info(f'Multilooked DEM is saved to {dem_out_file}')
+    else:
+        shutil.copy(dem_in_file, dem_out_file) 
+        shutil.copy(rsc_in_file, rsc_out_file) 
+
 def los(dem_file: str,
         rsc_file: str,
         /,
         proc_dir: str = 'proc',
-        rowlook: int = 1,
-        collook: int = 1):
+        losvec_file: str|None = None,
+        theta_file: str|None = None):
     """
     Calculate normalized Line-Of-Sight (LOS) vectors
 
@@ -387,33 +431,24 @@ def los(dem_file: str,
         rsc file that defines the grid
     proc_dir: str
         Directory to save output files
-    rowlook: int
-        Number of looks in row direction
-    collook: int
-        Number of looks in column direction
+    losvec_file: str|None
+        Output file of the LOS vectors
+    theta_file: str|None
+        Outupt file of look angles
     """
-    small_dem_file = os.path.join(proc_dir, 'dem')
     rsc = geocoordinates.GeoCoordinates(rsc_file)
-    rsclook = rsc.take_look(rowlook,collook)
     nrow, ncol = rsc.nlat, rsc.nlon
-    nrow_sm = nrow // rowlook
-    ncol_sm = ncol // collook
-    if rowlook > 1 or collook > 1:
-        logger.info('Multilooking dem file')
-        sario.multilooks(dem_file, small_dem_file, np.int16, nrow, ncol,
-                rowlook, collook)
-        logger.info(f'Multilooked DEM is saved to {small_dem_file}')
-    else:
-        small_dem_file = dem_file
-    dem = np.fromfile(small_dem_file, dtype = np.int16)
+    dem = np.fromfile(dem_file, dtype = np.int16)
     orb_list = glob.glob(os.path.join(proc_dir, '*.orbtiming'))
     orb_file = mid_orbit(orb_list, dem_file, rsc_file)
     orb = sario.read_orbit(orb_file)
-    losvec, theta = _los(orb, dem, rsclook)
-    losvec_file = os.path.join(proc_dir, 'losvec')
+    losvec, theta = _los(orb, dem, rsc)
+    if losvec_file is None:
+        losvec_file = os.path.join(proc_dir, 'losvec')
     losvec.tofile(losvec_file)
     logger.info(f'LOS vectors are saved to {losvec_file}')
-    theta_file = os.path.join(proc_dir, 'look_angle')
+    if theta_file is None:
+        theta_file = os.path.join(proc_dir, 'look_angle')
     theta.tofile(theta_file)
     logger.info(f'Look angles are saved to {theta_file}')
 
@@ -502,3 +537,33 @@ def check_integrity(
         move_files(ifg_dir, out_dir, f'*{date}*.int')
         move_files(unw_dir, out_dir, f'*{date}*.unw')
     return bad_dates
+ 
+class IfgList:
+    def __init__(self,imglist:Sequence[str])->pd.DataFrame:
+        """
+        Generate a pandas DataFrame from a list of interferogram files
+        """
+        ref_date = []
+        sec_date = []
+        tempbl = []
+        for imgfile in imglist:
+            basename = os.path.basename(imgfile)
+            basename = os.path.splitext(basename)[0]
+            words = basename.split('_')
+            ref_date.append(words[0])
+            sec_date.append(words[1])
+            _ref_date = datetime.strptime(ref_date[-1],'%Y%m%d')
+            _sec_date = datetime.strptime(sec_date[-1],'%Y%m%d')
+            tempbl.append((_sec_date-_ref_date).days)
+        df = pd.DataFrame({'date1':ref_date,
+                           'date2':sec_date,
+                           'tempbl':tempbl,
+                           'image':imglist})
+        self.df = df
+    
+    def get_date_list(self):
+        date_list1 = self.df['date1'].tolist()
+        date_list2 = self.df['date2'].tolist()
+        date_list = np.concatenate((date_list1,date_list2))
+        date_list = np.sort(np.unique(date_list))
+        return date_list

@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
+from tqdm import tqdm
 from typing import List
 NHEAD = 64
 BLOCK = 512
@@ -483,8 +484,7 @@ def multilooks(imgfile: str, outfile: str, dtype:type,
     npatch = int(np.ceil(nr/nrpatch))
     with open(outfile, 'wb') as fout:
         with open(imgfile, 'rb') as f:
-            for i in range(npatch):
-                print(f'patch {i+1}/{npatch}')
+            for i in tqdm(range(npatch), desc='multilook dem'):
                 line_start = nrpatch*i
                 line_end = line_start + nrpatch
                 line_end = np.minimum(line_end,nr)
