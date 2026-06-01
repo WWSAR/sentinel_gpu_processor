@@ -18,7 +18,8 @@ dependencies = [
     "matplotlib>=3.8",
     "requests>=2.31",
     "tyro>=0.9",
-    "tqdm>=4"
+    "tqdm>=4",
+    "pyaps3>=0.3.7"
 ]
 
 [tool.setuptools.packages.find]

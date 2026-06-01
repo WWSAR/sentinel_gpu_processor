@@ -48,6 +48,7 @@ requirements:
     - matplotlib >=3.8
     - tyro >=0.9
     - tqdm >=4
+    - pyaps3 >=0.3.7
     - cuda-cudart
 
 tests:
