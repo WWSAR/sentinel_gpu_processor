@@ -1,0 +1,21 @@
+io:
+    data_path: data
+    eof_path: eof
+    proc_path: proc
+    slc_path: slc
+    ifg_path: igrams
+    unw_path: unw
+    dem_file: elevation.dem
+    rsc_file: elevation.dem.rsc
+    geometry_path: geometry
+    tropo_delay_path: tropo_delay
+    tropo_corr_path: tropo_corrected
+    multilook_dem_file: dem/multilook.dem
+    multilook_rsc_file: dem/multilook.rsc
+
+processing:
+    rowlook: 10
+    collook: 20
+    wavelength: 0.055465763
+    hour: null
+    flip_sign: False
