@@ -53,9 +53,13 @@ def orbithermite(tt, xx, vv, t):
         b2[i] = l2 + (t - tt[i]) * li[i] * 2 * hdot
 
     # Hermite interpolation polynomial H(t)
-    x_interp = np.dot(a, xx) + np.dot(b, vv)
+    #x_interp = np.dot(a, xx) + np.dot(b, vv)
+    x_interp = a[0]*xx[0] + a[1]*xx[1] + a[2]*xx[2] + \
+               b[0]*vv[0] + b[1]*vv[1] + b[2]*vv[2]
     # Hermite interpolation of the derivative
-    v_interp = np.dot(a2, xx) + np.dot(b2, vv)
+    #v_interp = np.dot(a2, xx) + np.dot(b2, vv)
+    v_interp = a2[0]*xx[0] + a2[1]*xx[1] + a2[2]*xx[2] + \
+               b2[0]*vv[0] + b2[1]*vv[1] + b2[2]*vv[2]
 
     return x_interp, v_interp
 
@@ -131,8 +135,8 @@ def orbitrangetime(timeorbit, xx, vv, xyz, tline0, satx0, satv0):
     for k in range(51):
         tprev = tline
         dr = xyz - satx
-        fn = np.dot(dr, satv)
-        fnprime = -np.dot(satv, satv)
+        fn = dr[0]*satv[0] + dr[1]*satv[1] + dr[2]*satv[2]
+        fnprime = -satv[0]*satv[0] - satv[1]*satv[1] - satv[2]*satv[2]
         tline = tline - fn / fnprime
         satx, satv = interp_orbit(timeorbit, xx, vv, tline)
         if np.abs(tline - tprev) < 5.0e-9:
