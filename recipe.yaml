@@ -39,8 +39,10 @@ requirements:
     - cuda-cudart-dev
   run:
     - python
-    - libtiff
+    - cuda-cudart
     - sqlite
+    - libcufft
+    - libtiff
     - numpy >=1.23
     - pandas >=2.0
     - numba >=0.58
@@ -49,7 +51,6 @@ requirements:
     - tyro >=0.9
     - tqdm >=4
     - pyaps3 >=0.3.7
-    - cuda-cudart
 
 tests:
   - script:

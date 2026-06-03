@@ -49,7 +49,6 @@ target_include_directories(crossmul_sec PRIVATE "include")
 target_include_directories(multilook_amp PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include")
-#target_include_directories(goldstein PRIVATE ${CUFFT_INCLUDE_DIR})
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)

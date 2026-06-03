@@ -36,13 +36,23 @@ jobs:
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
 
-      - name: Install CUDA
+      - name: Install CUDA (Linux)
+        if: matrix.os == 'ubuntu-latest'
         uses: Jimver/cuda-toolkit@v0.2.22
         with:
           cuda: '12.4.0'
           method: 'network'
           sub-packages: '["nvcc", "cudart"]'
           non-cuda-sub-packages: '["libcufft","libcufft-dev"]'
+          use-github-cache: true
+
+      - name: Install CUDA (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: Jimver/cuda-toolkit@v0.2.22
+        with:
+          cuda: '12.4.0'
+          method: 'network'
+          sub-packages: '["nvcc", "cudart", "cufft", "cufft-dev"]'
           use-github-cache: true
 
       # 3. Install and configure the ultra-fast rattler-build toolchain
