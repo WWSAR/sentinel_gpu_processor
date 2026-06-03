@@ -1,10 +1,111 @@
 import os
 import subprocess
+import multiprocessing
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any, Callable
 
 from s1proc._log import setup_logger
 from s1proc.geocoordinates import GeoCoordinates
 logger = setup_logger(name = __name__, level = "INFO")
+
+class WorkstationTaskScheduler:
+    """
+    A generic resource-managed scheduler that prevents CPU over-allocation 
+    by dynamically balancing system limits against single-task configurations.
+    """
+    def __init__(self, total_cpus: int = None):
+        self.total_cpus = total_cpus or multiprocessing.cpu_count()
+        logger.info(f"Workstation Monitor: Managed capacity initialized with {self.total_cpus} CPU cores.")
+
+    def execute_parallel_tasks(self, worker_function: Callable, task_items: List[Dict[str, Any]], cores_per_task: int):
+        """
+        Executes a batch of tasks concurrently without overcommitting system resources.
+
+        Parameters
+        ----------
+        worker_function : Callable
+            The top-level pure function handling a single item (e.g., unwrap_single_file).
+        task_items : List[Dict[str, Any]]
+            A list of dictionary items containing arguments required by the worker_function.
+        cores_per_task : int
+            The absolute number of CPU cores a single worker execution consumes.
+        """
+        if not task_items:
+            logger.info("Task queue is empty. No operations performed.")
+            return
+
+        max_workers = max(1, self.total_cpus // cores_per_task)
+
+        logger.info("=== Workstation Resource Allocation Strategy ===")
+        logger.info(f"Total available processor pool: {self.total_cpus} cores")
+        logger.info(f"Target profile footprint allocation: {cores_per_task} cores per worker")
+        logger.info(f"Calculated maximum safe concurrency ceiling: {max_workers}")
+        logger.info("================================================")
+
+        # Execute safe processing blocks asynchronously outside the GIL
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {}
+            
+            for item_kwargs in task_items:
+                future = executor.submit(worker_function, **item_kwargs)
+                future_to_item[future] = item_kwargs.get("infile", "Unknown Target")
+
+            # Collect processing tickets as they finish
+            for future in as_completed(future_to_item):
+                target_identity = future_to_item[future]
+                try:
+                    result_identifier = future.result()
+                    logger.info(f"Success: Processing task for [ {result_identifier} ] finished successfully.")
+                except Exception as exc:
+                    logger.error(f"Failure: Processing task for [ {target_identity} ] crashed: {exc}")
+                    
+def unwrap_single_file(
+        infile: Path, 
+        outfile: str, 
+        width: int, 
+        cm: str, 
+        rowtile: int, 
+        coltile: int, 
+        rowoverlap: int, 
+        coloverlap: int, 
+        tile_nproc: int):
+    """
+    Helper function to process a single .int file using SNAPHU.
+    This pure function stands outside any class to ensure flawless process serialization.
+    """
+    cmd = [
+        "snaphu",
+        str(infile),
+        str(width),
+        cm,
+        "-o", str(outfile),
+    ]
+
+    if rowtile > 1 or coltile > 1:
+        cmd += [
+            "--tile",
+            str(rowtile),
+            str(coltile),
+            str(rowoverlap),
+            str(coloverlap),
+        ]
+
+    if tile_nproc > 1:
+        cmd += ["--nproc", str(tile_nproc)]
+
+    logger.info(f"Executing: {infile.name} -> {Path(outfile).name}\nCommand: " + " ".join(cmd))
+    
+    try:
+        #subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return infile.name
+    except subprocess.CalledProcessError as e:
+        error_message = (
+            f"SNAPHU processing failure on [ {infile.name} ]. Exit code: {e.returncode}\n"
+            f"--- Captured SNAPHU Error Logs ---\n{e.stderr}----------------------------------"
+        )
+        raise RuntimeError(error_message)
 
 def batch_snaphu(
     input_folder: str,
@@ -16,7 +117,8 @@ def batch_snaphu(
     coloverlap: int = 200,
     nproc: int = 1,
     file_extension: str = ".int",
-    cost_mode: str = "SMOOTH"
+    cost_mode: str = "SMOOTH",
+    total_cpus: int = None
 ):
     """
     Batch unwrap using SNAPHU
@@ -43,6 +145,8 @@ def batch_snaphu(
         File extension filter (default: .int)
     cost_mode : str
         SNAPHU cost mode: 'DEFO', 'SMOOTH', 'TOPO'
+    total_cpus : int
+        Manually restrict total usable workstation CPU cores to prevent memory saturation (default: auto)
     """
 
     rsc = GeoCoordinates(rsc_file)
@@ -68,38 +172,40 @@ def batch_snaphu(
         logger.error(f"Invalid cost mode: {cost_mode}. Use 'DEFO', 'SMOOTH', or 'TOPO'.")
         return
 
+    # Build queue profiles
+    tiles_count = rowtile * coltile
+    if nproc == 1:
+        final_nproc = nproc
+    else:
+        final_nproc = min(nproc, tiles_count)
+
+    task_items = []
     for f in files:
-        infile = f
         outfile = os.path.join(output_folder, (f.stem + ".unw"))
         if os.path.exists(outfile):
+            logger.info(f"Output target {outfile} already exists. Skipping.")
             continue
+            
+        task_items.append({
+            "infile": f,
+            "outfile": outfile,
+            "width": width,
+            "cm": cm,
+            "rowtile": rowtile,
+            "coltile": coltile,
+            "rowoverlap": rowoverlap,
+            "coloverlap": coloverlap,
+            "tile_nproc": final_nproc
+        })
 
-        cmd = [
-            "snaphu",
-            str(infile),
-            str(width),
-            cm,
-            "-o", str(outfile),
-        ]
+    if not task_items:
+        logger.info("All files in queue have already been successfully processed.")
+        return
 
-        # Tile parameters
-        if rowtile > 1 or coltile > 1:
-            cmd += [
-                "--tile",
-                str(rowtile),
-                str(coltile),
-                str(rowoverlap),
-                str(coloverlap),
-            ]
-
-        # Parallel processes
-        if nproc > 1:
-            cmd += ["--nproc", str(nproc)]
-
-        logger.info(f"\nProcessing: {infile.name}")
-        logger.info("Command:" +  " ".join(cmd))
-
-        try:
-            subprocess.run(cmd, check=True)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Error processing {infile.name}: {e}")
+    # Call the generic Class Scheduler tool
+    scheduler = WorkstationTaskScheduler(total_cpus=total_cpus)
+    scheduler.execute_parallel_tasks(
+        worker_function=unwrap_single_file,
+        task_items=task_items,
+        cores_per_task=final_nproc
+    )
