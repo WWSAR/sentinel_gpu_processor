@@ -86,7 +86,7 @@ def stitch_patches(patch, ifg, left, right, out_float):
             replace_mask = (temp == 0) & (ifg != 0)
         else:
             replace_mask = temp.real == 0
-        temp[replace_mask] = ifg[replace_mask]
+    temp[replace_mask] = ifg[replace_mask]
     return
 
 def interfere_single_scene(
@@ -139,6 +139,8 @@ def interfere_single_scene(
         subifg_file = os.path.join(ifg_dir,
                 f'{main_date}_{sec_date}_{main_id}_{sec_id}_{i}.int')
         subifg_files.append(subifg_file)
+        #if os.path.exists(subifg_file):
+        #    continue
         interfere_subswath(main_img_file, sec_img_file, subifg_file,
                 rowlook, collook, direction, fast, out_float)
     tempfile = outfile+'.temp'
