@@ -15,6 +15,9 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(CUDAToolkit REQUIRED)
+message(STATUS "CUDA_LIBRARY_ROOT=${CUDAToolkit_LIBRARY_ROOT}")
+find_library(CUFFT_LIBRARY cufft)
+message(STATUS "CUFFT_LIBRARY=${CUFFT_LIBRARY}")
 
 # Add source files
 add_executable(readgeotiff src/readgeotiff.cpp)
@@ -44,7 +47,12 @@ target_include_directories(goldstein PRIVATE "include")
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
 target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite3::SQLite3)
 target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite3::SQLite3)
-target_link_libraries(goldstein PRIVATE CUDA::cufft)
+if(TARGET CUDA::cufft)
+    target_link_libraries(goldstein PRIVATE CUDA::cufft)
+else()
+    find_library(CUFFT_LIBRARY cufft HINTS ${CUDAToolkit_LIBRARY_DIR})
+    target_link_libraries(goldstein PRIVATE ${CUFFT_LIBRARY})
+endif()
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity goldstein
