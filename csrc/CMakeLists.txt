@@ -14,14 +14,15 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
-find_package(CUDAToolkit REQUIRED)
+#find_package(CUDAToolkit REQUIRED)
+find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
 
-message(STATUS "PREFIX=$ENV{PREFIX}")
-message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
-find_path(
-    CUFFT_INCLUDE_DIR
-    cufft.h
-)
+#message(STATUS "PREFIX=$ENV{PREFIX}")
+#message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
+#find_path(
+#    CUFFT_INCLUDE_DIR
+#    cufft.h
+#)
 
 message(STATUS "CUFFT_INCLUDE_DIR=${CUFFT_INCLUDE_DIR}")
 # Add source files
@@ -48,7 +49,7 @@ target_include_directories(crossmul_sec PRIVATE "include")
 target_include_directories(multilook_amp PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include")
-target_include_directories(goldstein PRIVATE ${CUFFT_INCLUDE_DIR})
+#target_include_directories(goldstein PRIVATE ${CUFFT_INCLUDE_DIR})
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)

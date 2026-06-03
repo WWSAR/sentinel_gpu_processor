@@ -34,13 +34,11 @@ requirements:
     - pip
     - setuptools
     - libtiff
-    - libcufft-dev
     - sqlite
     - cuda-version ==12.4
     - cuda-cudart-dev
   run:
     - python
-    - libcufft
     - libtiff
     - sqlite
     - numpy >=1.23
