@@ -44,6 +44,7 @@ target_include_directories(goldstein PRIVATE "include")
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
 target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite3::SQLite3)
 target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite3::SQLite3)
+target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity goldstein
