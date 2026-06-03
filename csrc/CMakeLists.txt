@@ -16,7 +16,15 @@ find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(CUDAToolkit REQUIRED)
 
+message(STATUS "PREFIX=$ENV{PREFIX}")
+message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
+find_path(
+    CUFFT_INCLUDE_DIR
+    cufft.h
+)
+message(STATUS "CUFFT_INCLUDE_DIR=${CUFFT_INCLUDE_DIR}")
 # Add source files
+
 add_executable(readgeotiff src/readgeotiff.cpp)
 add_executable(deramp_burst src/deramp_burst.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu)
