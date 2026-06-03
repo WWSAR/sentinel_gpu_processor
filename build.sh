@@ -3,6 +3,7 @@
 echo "=== [Linux] Starting GPU-Accelerated Build ==="
 echo "Using GCC: $(gcc --version | head -n 1)"
 echo "Using NVCC: $(nvcc --version | head -n 1)"
+find /usr/local -name "libcufft.so*" 2>/dev/null
 
 # 2. CMake 编译：Linux 下通常使用默认的 Unix Makefiles 或 Ninja
 # 这里的 $PREFIX 是 Conda 沙盒自动为你提供的环境变量（等同于 Windows 里的 %SRC_DIR%\s1proc）
