@@ -14,6 +14,7 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
+find_package(CUDAToolkit REQUIRED)
 
 # Add source files
 add_executable(readgeotiff src/readgeotiff.cpp)
@@ -25,6 +26,7 @@ add_executable(crossmul src/crossmul.cu src/sario.cu)
 add_executable(crossmul_sec src/crossmul_sec.cu src/sario.cu)
 add_executable(multilook_amp src/multilook_amp.cu src/sario.cu)
 add_executable(phase_similarity src/phase_similarity.cu)
+add_executable(goldstein src/goldstein.cu)
 
 set_target_properties(geo2rdr_reramp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
@@ -36,33 +38,16 @@ target_include_directories(crossmul PRIVATE "include")
 target_include_directories(crossmul_sec PRIVATE "include")
 target_include_directories(multilook_amp PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
+target_include_directories(goldstein PRIVATE "include")
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
 target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite3::SQLite3)
 target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite3::SQLite3)
+target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity
+install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity goldstein
         RUNTIME DESTINATION bin
 )
 
-#set(PYTHON_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin")
-#
-#function(copy_to_python_bin target_name)
-#    add_custom_command(TARGET ${target_name} POST_BUILD
-#        COMMAND ${CMAKE_COMMAND} -E make_directory
-#            ${PYTHON_BIN_DIR}
-#        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-#            $<TARGET_FILE:${target_name}>
-#            ${PYTHON_BIN_DIR}/
-#    )
-#endfunction()
-#
-#copy_to_python_bin(readgeotiff)
-#copy_to_python_bin(deramp_burst)
-#copy_to_python_bin(geo2rdr_reramp)
-#copy_to_python_bin(crossmul)
-#copy_to_python_bin(crossmul_sec)
-#copy_to_python_bin(multilook_amp)
-#copy_to_python_bin(phase_similarity)

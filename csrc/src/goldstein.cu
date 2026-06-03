@@ -1,9 +1,11 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
 #include <device_launch_parameters.h>
+#include <fstream>
 #include <iostream>
 #include <math.h>
 #include <string>
+#include <vector>
 #include "sario.hpp"
 
 #define CHECK_CUDA(x) do { cudaError_t err = (x); \
@@ -40,6 +42,38 @@ __constant__ float d_GaussianKernel[49] = {
     0.000088f, 0.001915f, 0.011776f, 0.020584f, 0.011776f, 0.001915f, 0.000088f,
     0.000004f, 0.000088f, 0.000543f, 0.000948f, 0.000543f, 0.000088f, 0.000004f
 };
+
+/**
+ * parse the input string
+ * if it end with '.int', return a vector containing this string
+ * otherwise, read the file named with the input string, read its lines into
+ * a vector
+ */
+std::vector<std::string> process_input(
+        const std::string& input,
+        bool &is_ifg) {
+    is_ifg = false;
+    const std::string suffix = ".int";
+    if (input.size() >= suffix.size() &&
+        input.compare(input.size() - suffix.size(),
+                      suffix.size(), suffix) == 0) {
+        is_ifg = true;
+        return std::vector<std::string>{input};
+    }
+
+    std::ifstream file(input);
+    if (!file.is_open()) {
+        return std::vector<std::string>();
+    }
+
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(file, line)) {
+        lines.push_back(line);
+    }
+
+    return lines;
+}
 
 /**
  * Core kernel: compute magnitude + perform 2D convolution smoothing directly
@@ -190,7 +224,7 @@ __global__ void batched_overlap_add_kernel(
     float* d_out_weight,
     int n_win, int n_inc,
     int n_win_i, int n_win_j,
-    int img_h, int img_w)
+    int nrow, int ncol)
 {
     int patch_x = blockIdx.x;
     int patch_y = blockIdx.y;
@@ -208,8 +242,8 @@ __global__ void batched_overlap_add_kernel(
     int i1 = patch_y * n_inc;
     int j1 = patch_x * n_inc;
     
-    if (i1 + n_win > img_h) i1 = img_h - n_win;
-    if (j1 + n_win > img_w) j1 = img_w - n_win;
+    if (i1 + n_win > nrow) i1 = nrow - n_win;
+    if (j1 + n_win > ncol) j1 = ncol - n_win;
 
     int target_y = i1 + ty;
     int target_x = j1 + tx;
@@ -222,7 +256,7 @@ __global__ void batched_overlap_add_kernel(
     cufftComplex val = d_filtered_patches[src_offset];
 
     // Add the weight to the corresponding position in the output image
-    int dest_offset = target_y * img_w + target_x;
+    int dest_offset = target_y * ncol + target_x;
     
     float norm = 1.0f / (n_win * n_win);
     
@@ -255,7 +289,7 @@ __global__ void normalize_output_kernel(
 __global__ void extract_patches_kernel(
     const cufftComplex* __restrict__ d_in,
     cufftComplex* __restrict__ d_patches, 
-    int n_win, int n_inc, int n_win_j, int img_h, int img_w) {
+    int n_win, int n_inc, int n_win_j, int nrow, int ncol) {
     int patch_x = blockIdx.x;
     int patch_y = blockIdx.y;
     int tx = threadIdx.x;
@@ -265,11 +299,11 @@ __global__ void extract_patches_kernel(
 
     int i1 = patch_y * n_inc;
     int j1 = patch_x * n_inc;
-    if (i1 + n_win > img_h) i1 = img_h - n_win;
-    if (j1 + n_win > img_w) j1 = img_w - n_win;
+    if (i1 + n_win > nrow) i1 = nrow - n_win;
+    if (j1 + n_win > ncol) j1 = ncol - n_win;
 
     int patch_idx = patch_y * n_win_j + patch_x;
-    int src_idx = (i1 + ty) * img_w + (j1 + tx);
+    int src_idx = (i1 + ty) * ncol + (j1 + tx);
     int dst_idx = patch_idx * n_win * n_win + ty * n_win + tx;
 
     d_patches[dst_idx] = d_in[src_idx];
@@ -280,60 +314,32 @@ __global__ void extract_patches_kernel(
  */
 void goldstein_filter_cuda_host(
     cufftComplex* d_in, cufftComplex* d_out, cufftComplex* out,
-    const int img_h, const int img_w, const int n_win,
+    cufftComplex* d_patch_buffer, float* d_spec_magnitude,
+    float *d_weight_buffer, cufftHandle &plan,
+    const int nrow, const int ncol, const int n_win,
     const float alpha) {
     int n_inc = n_win / 4;
-    int n_win_i = (int)ceil((float)img_h / n_inc) - 3;
-    int n_win_j = (int)ceil((float)img_w / n_inc) - 3;
+    int n_win_i = (int)ceil((float)nrow / n_inc) - 3;
+    int n_win_j = (int)ceil((float)ncol / n_inc) - 3;
     if (n_win_i <= 0) n_win_i = 1;
     if (n_win_j <= 0) n_win_j = 1;
-
     int total_patches = n_win_i * n_win_j;
     std::size_t patch_elements = 
         std::size_t(total_patches) * n_win * n_win;
-    std::size_t patch_bytes = patch_elements * sizeof(cufftComplex);
-    size_t img_bytes = img_h * img_w * sizeof(cufftComplex);
-
-    // Allocate device memory
-    cufftComplex *d_patch_buffer;
-    float *d_spec_magnitude, *d_weight_buffer;
-    CHECK_CUDA(cudaMalloc((void**)&d_patch_buffer, patch_bytes));
-    CHECK_CUDA(cudaMalloc((void**)&d_spec_magnitude,
-                total_patches * n_win * n_win * sizeof(float)));
-    CHECK_CUDA(cudaMalloc((void**)&d_weight_buffer,
-                img_h * img_w * sizeof(float)));
-    CHECK_CUDA(cudaMemset(d_weight_buffer, 0, img_h * img_w * sizeof(float)));
+    std::size_t img_bytes = nrow * ncol * sizeof(cufftComplex);
 
     // 1. extract overlapping patches into batch buffer for filtering
     dim3 block_extract(16, 16);
     dim3 grid_extract(n_win_j, n_win_i);
     extract_patches_kernel<<<grid_extract, block_extract>>>(
-        d_in, d_patch_buffer, n_win, n_inc, n_win_j, img_h, img_w);
+        d_in, d_patch_buffer, n_win, n_inc, n_win_j, nrow, ncol);
     CUDA_CHECK_LAST_ERROR();
 
-    // 2. Configure cuFFT plan for Batched 2D FFT
-    cufftHandle plan;
-    int rank = 2;                         // 2D FFT
-    int n[2] = {n_win, n_win};            // Dimensions of each patch
-    int idist = n_win * n_win;            // Interval between batches in the input buffer
-    int odist = n_win * n_win;            // Interval between batches in the output buffer
-    int inembed[2] = {n_win, n_win};      // Physical dimensions of the input data
-    int onembed[2] = {n_win, n_win};      // Physical dimensions of the output data
-    int istride = 1;                      // Stride within each matrix
-    int ostride = 1;
-
-    CHECK_CUFFT(cufftPlanMany(&plan, rank, n, 
-                  inembed, istride, idist, 
-                  onembed, ostride, odist, 
-                  CUFFT_C2C, total_patches));
-
-    // 3. Apply Batched FFT to all patches
+    // 2. Apply Batched FFT to all patches
     CHECK_CUFFT(cufftExecC2C(
                 plan, d_patch_buffer, d_patch_buffer, CUFFT_FORWARD));
 
-    // 4. Apply the smoothing and filtering kernel in the frequency domain
-    // dim3 block_filter(16, 16);
-    // dim3 grid_filter((n_win + 15) / 16, (n_win + 15) / 16, total_patches);
+    // 3. Apply the smoothing kernel in the frequency domain
     int block_filter = 256;
     int grid_filter =
         (patch_elements + std::size_t(block_filter) - 1 ) /
@@ -343,7 +349,7 @@ void goldstein_filter_cuda_host(
     CUDA_CHECK_LAST_ERROR();
     CHECK_CUDA(cudaDeviceSynchronize());
 
-    // compute patch mean
+    // 4. Compute the patchwise mean of spectrum magnitude
     int patch_size = n_win * n_win;
     int threads_per_block = patch_size;
     if (threads_per_block > 1024) {
@@ -359,26 +365,27 @@ void goldstein_filter_cuda_host(
     }
     CUDA_CHECK_LAST_ERROR();
     CHECK_CUDA(cudaDeviceSynchronize());
-
+    
+    // 5. Multiply the spectrum by the filtering factor
     spectrum_enhancement<<<grid_filter, block_filter>>>(
         d_patch_buffer, d_spec_magnitude, alpha, patch_elements);
     CUDA_CHECK_LAST_ERROR();
     CHECK_CUDA(cudaDeviceSynchronize());
 
-    // 5. Apply Inverse FFT to get the filtered patches back in spatial domain
+    // 6. Apply Inverse FFT to get the filtered patches back in spatial domain
     CHECK_CUFFT(cufftExecC2C(
                 plan, d_patch_buffer, d_patch_buffer, CUFFT_INVERSE));
 
-    // 6. Batched overlap-add to reconstruct the output image from the
+    // 7. Batched overlap-add to reconstruct the output image from the
     // filtered patches
     batched_overlap_add_kernel<<<grid_extract, block_extract>>>(
         d_patch_buffer, d_out, d_weight_buffer, n_win, n_inc, n_win_i,
-        n_win_j, img_h, img_w);
+        n_win_j, nrow, ncol);
     CUDA_CHECK_LAST_ERROR();
     CHECK_CUDA(cudaDeviceSynchronize());
     
-    // 7. Normalize the output by dividing by the accumulated weights
-    int total_pixels = img_h * img_w;
+    // 8. Normalize the output by dividing by the accumulated weights
+    int total_pixels = nrow * ncol;
     int block_norm = 256;
     int grid_norm = (total_pixels + 255) / 256;
     normalize_output_kernel<<<grid_norm, block_norm>>>(
@@ -386,54 +393,125 @@ void goldstein_filter_cuda_host(
     CUDA_CHECK_LAST_ERROR();
     CHECK_CUDA(cudaDeviceSynchronize());
     CHECK_CUDA(cudaMemcpy(out, d_out, img_bytes, cudaMemcpyDeviceToHost));
-
-    CHECK_CUFFT(cufftDestroy(plan));
-    CHECK_CUDA(cudaFree(d_patch_buffer));
-    CHECK_CUDA(cudaFree(d_weight_buffer));
-    CHECK_CUDA(cudaFree(d_spec_magnitude));
 }
 
 void goldstein_filter(
-        const std::string &in_ifg_file,
-        const std::string &out_ifg_file,
+        const std::string &in_str,
+        const std::string &out_str,
         const int nrow,
         const int ncol,
         const int n_win,
         const float alpha){
     // declaration
-    float2 *in_ifg, *out_ifg, *d_in_ifg, *d_out_ifg;
+    bool is_ifg;
+    std::string in_ifg_file, out_ifg_file;
     int img_size = nrow * ncol;
-    std::size_t img_bytes = sizeof(float2) * img_size;
+    int n_inc = n_win / 4;
+    int n_win_i = (int)ceil((float)nrow / n_inc) - 3;
+    int n_win_j = (int)ceil((float)ncol / n_inc) - 3;
+    if (n_win_i <= 0) n_win_i = 1;
+    if (n_win_j <= 0) n_win_j = 1;
+    int total_patches = n_win_i * n_win_j;
+    std::size_t patch_elements = 
+        std::size_t(total_patches) * n_win * n_win;
+    std::size_t patch_bytes = patch_elements * sizeof(cufftComplex);
+    std::size_t img_bytes = nrow * ncol * sizeof(cufftComplex);
+    
+    // arrays
+    cufftComplex *in_ifg, *out_ifg, *d_in_ifg, *d_out_ifg;
+    cufftComplex *d_patch_buffer;
+    float *d_spec_magnitude, *d_weight_buffer;
     // end of declaration
+
+    std::vector<std::string> input_files = process_input(in_str, is_ifg);
+    if (input_files.size() == 0){
+        std::cout << "Input list is empty, nothing to filter." << std::endl;
+        return;
+    }
+
+    // Alocate host memory
     in_ifg = new float2[img_size];
     out_ifg = new float2[img_size];
-    read_binary<float2>(in_ifg_file, std::size_t(img_size), in_ifg);
     
+    // Allocate device memory
     CHECK_CUDA(cudaMalloc((void**)&d_in_ifg, img_bytes));
     CHECK_CUDA(cudaMalloc((void**)&d_out_ifg, img_bytes));
-    CHECK_CUDA(cudaMemcpy(d_in_ifg, in_ifg, img_bytes, cudaMemcpyHostToDevice));
-    goldstein_filter_cuda_host(
-            (cufftComplex*) d_in_ifg, (cufftComplex*) d_out_ifg,
-            (cufftComplex*) out_ifg, nrow, ncol, n_win, alpha);
-    save_binary<float2>(out_ifg, std::size_t(img_size), out_ifg_file);
+    CHECK_CUDA(cudaMalloc((void**)&d_patch_buffer, patch_bytes));
+    CHECK_CUDA(cudaMalloc((void**)&d_spec_magnitude,
+                patch_elements * sizeof(float)));
+    CHECK_CUDA(cudaMalloc((void**)&d_weight_buffer,
+                nrow * ncol * sizeof(float)));
+
+    // Configure cuFFT plan for Batched 2D FFT
+    cufftHandle plan;
+    int rank = 2;                         // 2D FFT
+    int n[2] = {n_win, n_win};            // Dimensions of each patch
+    int idist = n_win * n_win;            // Interval between batches in the input buffer
+    int odist = n_win * n_win;            // Interval between batches in the output buffer
+    int inembed[2] = {n_win, n_win};      // Physical dimensions of the input data
+    int onembed[2] = {n_win, n_win};      // Physical dimensions of the output data
+    int istride = 1;                      // Stride within each matrix
+    int ostride = 1;
+
+    CHECK_CUFFT(cufftPlanMany(&plan, rank, n, 
+                  inembed, istride, idist, 
+                  onembed, ostride, odist, 
+                  CUFFT_C2C, total_patches));
+
+    // read image
+    for (int i = 0; i < input_files.size(); i++){
+        in_ifg_file = input_files[i];
+        if (is_ifg){
+            if (out_str.empty()){
+                out_ifg_file = std::string("filtered.int");
+            }
+        }else{
+            if (out_str.empty()){
+                out_ifg_file = in_ifg_file + std::string(".filt");
+            }else{
+                out_ifg_file = in_ifg_file + out_str;
+            }
+        }
+        std::cout << "Run Goldstein filter, input: " << in_ifg_file
+                  << ", output: " << out_ifg_file << std::endl;
+        CHECK_CUDA(cudaMemset(d_weight_buffer, 0, img_size * sizeof(float)));
+        read_binary<float2>(in_ifg_file, std::size_t(img_size), in_ifg);
+        CHECK_CUDA(cudaMemcpy(d_in_ifg, in_ifg, img_bytes,
+                    cudaMemcpyHostToDevice));
+
+        goldstein_filter_cuda_host(
+                d_in_ifg, d_out_ifg, out_ifg, d_patch_buffer, d_spec_magnitude,
+                d_weight_buffer, plan, nrow, ncol, n_win, alpha);
+
+        save_binary<float2>(out_ifg, std::size_t(img_size), out_ifg_file);
+    }
     delete[] in_ifg;
     delete[] out_ifg;
     CHECK_CUDA(cudaFree(d_in_ifg));
     CHECK_CUDA(cudaFree(d_out_ifg));
+    CHECK_CUDA(cudaFree(d_patch_buffer));
+    CHECK_CUDA(cudaFree(d_weight_buffer));
+    CHECK_CUDA(cudaFree(d_spec_magnitude));
+    CHECK_CUFFT(cufftDestroy(plan));
 }
 
 int main(int argc, char *argv[]){
-    if (argc<7){
-        std::cout << "Usage: goldstein infile outfile nrow ncol n_win alpha"
+    if (argc<6){
+        std::cout << "Usage: goldstein in_str nrow ncol n_win alpha [out_str]"
                   << std::endl;
         return 0;
     }
-    const std::string infile = std::string(argv[1]);
-    const std::string outfile = std::string(argv[2]);
-    const int nrow = std::stoi(argv[3]);
-    const int ncol = std::stoi(argv[4]);
-    const int n_win = std::stoi(argv[5]);
-    const float alpha = std::stod(argv[6]);
-    goldstein_filter(infile,outfile,nrow,ncol,n_win,alpha);
+    const std::string in_str = std::string(argv[1]);
+    const int nrow = std::stoi(argv[2]);
+    const int ncol = std::stoi(argv[3]);
+    const int n_win = std::stoi(argv[4]);
+    const float alpha = std::stod(argv[5]);
+    std::string out_str;
+    if (argc > 6){
+        out_str = std::string(argv[6]);
+    }else{
+        out_str = "";
+    }
+    goldstein_filter(in_str,out_str,nrow,ncol,n_win,alpha);
     return 0;
 }
