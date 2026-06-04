@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 4.0)
+cmake_minimum_required(VERSION 3.21)
 project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -14,8 +14,8 @@ set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
-#find_package(CUDAToolkit REQUIRED)
-find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
+find_package(CUDAToolkit REQUIRED)
+#find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
 
 #message(STATUS "PREFIX=$ENV{PREFIX}")
 #message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
@@ -24,7 +24,8 @@ find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
 #    cufft.h
 #)
 
-message(STATUS "CUFFT_INCLUDE_DIR=${CUFFT_INCLUDE_DIR}")
+message(STATUS "CUDAToolkit_INCLUDE_DIRS=${CUDAToolkit_INCLUDE_DIRS}")
+message(STATUS "CUDAToolkit_BIN_DIR=${CUDAToolkit_BIN_DIR}")
 # Add source files
 
 add_executable(readgeotiff src/readgeotiff.cpp)
@@ -58,6 +59,26 @@ target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity goldstein
+        RUNTIME_DEPENDENCY_SET deps
         RUNTIME DESTINATION bin
 )
 
+if(WIN32)
+    install(RUNTIME_DEPENDENCY_SET deps
+        DESTINATION bin
+        DIRECTORIES 
+            "$ENV{CONDA_PREFIX}/bin"
+            "$ENV{CONDA_PREFIX}/Library/bin"
+            "${CUDAToolkit_BIN_DIR}"
+        PRE_EXCLUDE_REGEXES 
+            ".*kernel32.*"
+            ".*wpaxholder.*"
+            ".*[Aa]zure.*"
+            ".*[Hh]vsi.*"
+            ".*[Pp]dm.*"
+            "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
+            "^[Aa][Pp][Ii]-[Mm][Ss]-.*"
+            "^[Ee][Mm][Ss][Mm][Pp][Cc][Mm].*"  
+            "^[Ee][Cc][Mm][Aa][Pp][Ii].*"
+    )
+endif()
