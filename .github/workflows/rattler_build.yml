@@ -52,7 +52,7 @@ jobs:
         with:
           cuda: '12.4.0'
           method: 'network'
-          sub-packages: '["nvcc", "cudart", "cufft", "cufft-dev"]'
+          sub-packages: '["nvcc", "cudart", "cufft"]'
           use-github-cache: true
 
       # 3. Install and configure the ultra-fast rattler-build toolchain
