@@ -364,12 +364,9 @@ def sentinel_scene(
 
         # and geocode/reramp the slave
         main_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_main.geo')
-        sec_slc_file = os.path.join(slc_dir,
-                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}_sec.geo')
+                f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}')
         command = f'{geo2rdr_reramp} {slavedb} {deramp_phase_file} ' + \
-                   f'{main_slc_file} {sec_slc_file} {bounds[0]} ' + \
-                   f'{bounds[1]} {bounds[2]} {bounds[3]}'
+                   f'{main_slc_file}'
         logger.info(command)
         subprocess.check_call(command, shell=True)
         if os.path.exists(origslcfile):

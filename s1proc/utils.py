@@ -17,6 +17,7 @@ from s1proc import geocoordinates
 from s1proc import geometry
 from s1proc import orbit
 from s1proc import sario
+from s1proc.sario import CroppedImage
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
@@ -100,64 +101,6 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
         bperp = -np.linalg.norm(dr1)*theta
     return bperp
 
-def zip_subswath_lists(subswath_lists,subswath_numbers):
-    nsubswath = len(subswath_numbers)
-    d = {}
-    for subswath_list in subswath_lists:
-        for fn in subswath_list:
-            basename = os.path.basename(fn)
-            scene_id = basename[0:20]
-            if scene_id in d:
-                d[scene_id].append(fn)
-            else:
-                d[scene_id] = [fn]
-    slc_list = []
-    for scene_id in sorted(d.keys()):
-        fns = d[scene_id]
-        l = [None]*nsubswath
-        for fn in fns:
-            basename = os.path.basename(fn)
-            iw_number = int(basename[23])
-            l[subswath_numbers.index(iw_number)] = fn
-        slc_list.append(l)
-    return slc_list
-
-def compare_arrays(a, b):
-    i = 0
-    while i < min(len(a), len(b)):
-        if a[i] < 0 or b[i] < 0:
-            i += 1
-            continue
-        if a[i] != b[i]:
-            return -1 if a[i] < b[i] else 1
-        else:
-            i += 1
-    if a[i-1] < 0:
-        return -1
-    else:
-        return 1
-
-def argsort(arrays):
-    indices = list(range(len(arrays)))
-    indices.sort(key=cmp_to_key(lambda i, j: compare_arrays(arrays[i], arrays[j])))
-    return indices
-
-def bbox_sort(slcs):
-    n = len(slcs)
-    nsubswath = len(slcs[0])
-    visited = np.zeros(n, dtype=bool)
-    top_idx = np.zeros((n,nsubswath), dtype=np.int32)
-    for i in range(n):
-        for j in range(nsubswath):
-            fn = slcs[i][j]
-            if fn is None:
-                top_idx[i,j] = -1
-                continue
-            top = np.fromfile(fn, dtype=np.int32, count = 4)[-1]
-            top_idx[i,j] = top
-    sorted_idx = argsort(top_idx)
-    return [slcs[i] for i in sorted_idx]
-
 def create_slc_pair_list(
         min_tbl: int = 0,
         max_tbl: int = 30000,
@@ -166,7 +109,7 @@ def create_slc_pair_list(
         slc_dir: str = 'slc',
         proc_dir: str = 'proc',
         ifg_dir: str = 'igrams',
-        img_pair_file: str = 'subswath_list',
+        img_pair_file: str = 'intlist',
         demfile: str = 'elevation.dem',
         rscfile: str = 'elevation.dem.rsc'):
     """
@@ -197,63 +140,28 @@ def create_slc_pair_list(
     """
     os.makedirs(ifg_dir, exist_ok = True)
     # find all slc images in the parent directory
-    subswath_lists = []
-    subswath_numbers = []
-    for subswath in range(1,4):
-        subswath_list = glob.glob(
-                os.path.join(slc_dir,f'*iw{subswath}_main.geo'))
-        if len(subswath_list) > 0:
-            subswath_numbers.append(subswath)
-            subswath_list = np.sort(subswath_list)
-            subswath_lists.append(subswath_list)
-
-    nsubswath = len(subswath_lists) 
-    if nsubswath == 0:
-        logger.warning('No SLC images were found.')
-        return
-    elif nsubswath == 1:
-        slc_list = [[s] for s in subswath_lists[0]]
-    else:
-        slc_list = zip_subswath_lists(subswath_lists, subswath_numbers)
-    
-    # create a list of all acquisition dates
+    burst_list = glob.glob(
+            os.path.join(slc_dir,f'*burst_0*.gslc'))
     date_list = []
-    for subswath_files in slc_list:
-        for subswath_file in subswath_files:
-            if subswath_file is None:
-                continue
-            basename = os.path.basename(subswath_file)
-            date_str = basename[0:8]
-            date_list.append(date_str)
-            break
-    
-    # create a dictionary mapping date to slcfiles
-    slc_dict = {}
-    for i,date_str in enumerate(date_list):
-        if date_str in slc_dict:
-            slc_dict[date_str].append(slc_list[i])
-        else:
-            slc_dict[date_str] = [slc_list[i]]
-
-    unique_date_list = np.sort(np.unique(date_list))
-    for date_str in unique_date_list:
-        slcs = slc_dict[date_str]
-        slcs = bbox_sort(slcs)
-        slc_dict[date_str] = slcs
-
+    for burst_file in burst_list:
+        basename = os.path.basename(burst_file)
+        date_str = basename[0:8]
+        date_list.append(date_str)
+    date_list = sorted(np.unique(date_list))
+     
     f = open(os.path.join(ifg_dir,img_pair_file),'w')
-    ndates = len(unique_date_list)
+    ndates = len(date_list)
     for i in range(ndates-1):
-        date_str_ref = unique_date_list[i]
+        date_str_ref = date_list[i]
         date_ref = datetime.strptime(date_str_ref,'%Y%m%d')
-        slcs_ref = slc_dict[date_str_ref]
-        basename1 = os.path.basename(slcs_ref[0][0])
+        slc_ref = [s for s in burst_list if date_str_ref in s][0]
+        basename1 = os.path.basename(slc_ref)
         orbfile1 = os.path.join(proc_dir, basename1[0:20]+'.orbtiming')
         for j in range(i+1,ndates):
-            date_str_sec = unique_date_list[j]
+            date_str_sec = date_list[j]
             date_sec = datetime.strptime(date_str_sec,'%Y%m%d')
-            slcs_sec = slc_dict[date_str_sec]
-            basename2 = os.path.basename(slcs_sec[0][0])
+            slc_sec = [s for s in burst_list if date_str_sec in s][0]
+            basename2 = os.path.basename(slc_sec)
             orbfile2 = os.path.join(proc_dir, basename2[0:20]+'.orbtiming')
             tempbl = (date_sec-date_ref).days 
             if tempbl > max_tbl or tempbl < min_tbl:
@@ -261,30 +169,7 @@ def create_slc_pair_list(
             bperp = estimatebaseline(orbfile1,orbfile2,demfile,rscfile)
             if np.abs(bperp) > max_sbl or np.abs(bperp) < min_sbl:
                 continue
-            if len(slcs_ref) == 1:
-                for k in range(len(slcs_sec)):
-                    for j in range(nsubswath):
-                        if slcs_ref[0][j] is None or slcs_sec[k][j] is None:
-                            continue
-                        f.write(f'{slcs_ref[0][j]} {slcs_sec[k][j]} ' + \
-                                f'{tempbl} {bperp}\n')
-            elif len(slcs_sec) == 1:
-                for k in range(len(slcs_ref)):
-                    for j in range(nsubswath):
-                        if slcs_ref[k][j] is None or slcs_sec[0][j] is None:
-                            continue
-                        f.write(f'{slcs_ref[k][j]} {slcs_sec[0][j]} ' + \
-                                f'{tempbl} {bperp}\n')
-            elif len(slcs_ref) == len(slcs_sec):
-                for k in range(len(slcs_ref)):
-                    for j in range(nsubswath):
-                        if slcs_ref[k][j] is None or slcs_sec[k][j] is None:
-                            continue
-                        f.write(f'{slcs_ref[k][j]} {slcs_sec[k][j]} ' + \
-                                f'{tempbl} {bperp}\n')
-            else:
-                logger.warning('Numbers of SLC images do not match for '
-                        f'{date_str_ref} and {date_str_sec}, skipping')
+            f.write(f'{date_str_ref} {date_str_sec} {tempbl} {bperp}\n')
     f.close()
 
 def run_create_slc_pair_list(

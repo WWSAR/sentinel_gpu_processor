@@ -133,7 +133,11 @@ class CroppedImage:
         if bottom is None:
             bottom = self.nrow0
         if isinstance(self.data, np.ndarray):
-            return self.resample(left, top, right, bottom)
+            if left == self.left and top == self.top and \
+               right == self.right and bottom == self.bottom:
+                return self.data
+            else:
+                return self.resample(left, top, right, bottom)
         elif isinstance(self.data, str):
             # load part of the image from file
             with open(self.data, 'rb') as f:
@@ -146,10 +150,14 @@ class CroppedImage:
                         count = (overlap_bottom - overlap_top)*self.ncol,
                         dtype = self.dtype)
                 d = np.reshape(d, (overlap_bottom - overlap_top, self.ncol))
-            # create a new CroppedImage for image resampling
-            temp = CroppedImage(self.nrow0, self.ncol0, self.left,
-                    overlap_top, self.right, overlap_bottom, d)
-            return temp.resample(left, top, right, bottom)
+            if left == self.left and top == self.top and \
+               right == self.right and bottom == self.bottom:
+                return d
+            else: 
+                # create a new CroppedImage for image resampling
+                temp = CroppedImage(self.nrow0, self.ncol0, self.left,
+                        overlap_top, self.right, overlap_bottom, d)
+                return temp.resample(left, top, right, bottom)
         return None
 
     def __str__(self):
@@ -164,73 +172,48 @@ class CroppedImage:
         return s
 
 class Subswath:
-    def __init__(self, main:CroppedImage, sec:List[CroppedImage]):
-        self.main = main
-        self.sec = sec
-        self.nrow0 = main.nrow0
-        self.ncol0 = main.ncol
-        self.left = main.left
-        self.top = main.top
-        self.right = main.right
-        self.bottom = main.bottom
-
-    @classmethod
-    def from_file(cls, filename:str,
-            load_main_data:bool = False):
-        """
-        Initialize a Subswath object from a file
-        
-        Parameters
-        ----------
-        filename: str
-            Compressed subswath image
-        load_main_data: bool
-            If true, load the data of the main image, which can take a lot of
-            memory. Otherwise, use a placeholder instead.
-
-        Returns
-        ------
-        subswath: Subswath
-            Loaded subswath object
-        """
-        f = open(filename, 'rb')
-        header = np.fromfile(f, count = NHEAD, dtype = np.int32)
-        nrow0 = header[0]
-        ncol0 = header[1]
-        left, main_top, right, main_bottom = \
-                header[2], header[3], header[4], header[5]
-        main_nrow = main_bottom - main_top
-        ncol = right - left
-        if load_main_data:
-            main_data = np.fromfile(
-                    f, count = main_nrow * ncol, dtype = np.complex64)
-            main_data = np.reshape(main_data,(main_nrow, ncol))
+    def __init__(self, burst_files:List[str]):
+        self.bursts = np.array([CroppedImage.from_file(s) for s in burst_files])
+        self.size = len(self.bursts)
+        if self.size == 0:
+            self.nrow0 = 0
+            self.ncol0 = 0
         else:
-            main_data = filename
-            f.seek(main_nrow * ncol * 8, 1)
-        main_img = CroppedImage(nrow0, ncol0, left, main_top, right,
-                main_bottom, main_data)
-        nstrip = header[6]
-        sec_imgs = []
-        for i in range(nstrip):
-            sec_top = header[7 + 2*i]
-            sec_bottom = header[8 + 2*i]
-            sec_nrow = sec_bottom - sec_top
-            sec_data = np.fromfile(f, count = sec_nrow * ncol, dtype = np.complex64)
-            sec_data = np.reshape(sec_data, (sec_nrow, ncol))
-            sec_img = CroppedImage(nrow0, ncol0, left, sec_top, right,
-                    sec_bottom, sec_data)
-            sec_imgs.append(sec_img)  
-        f.close()
-        subswath = cls(main_img, sec_imgs)
-        return subswath
+            self.nrow0 = self.bursts[0].nrow0
+            self.ncol0 = self.bursts[0].ncol0
+        self.sort()
+
+    def bounds(self):
+        if self.is_empty():
+            return None
+        left = np.minimum(self.bursts[0].left, self.bursts[-1].left)
+        top = np.minimum(self.bursts[0].top, self.bursts[-1].top)
+        right = np.maximum(self.bursts[0].right, self.bursts[-1].right)
+        bottom = np.maximum(self.bursts[0].bottom, self.bursts[-1].bottom)
+        return [left, top, right, bottom]
+
+    def sort(self):
+        idx = np.zeros(self.size, dtype=int)
+        for i in range(self.size):
+            idx[i] = self.bursts[i].top+self.bursts[i].bottom
+        sorted_idx = np.argsort(idx)
+        self.bursts = np.array([self.bursts[i] for i in sorted_idx])
     
+    def is_empty(self):
+        return self.size == 0
+
     def __str__(self):
-        s = 'Main image:\n============\n' + self.main.__str__()
-        s = s + '\n\nSecondary images:'
-        for i, sec in enumerate(self.sec):
-            s = s + f'\n\nStrip No. {i+1}\n============\n' + sec.__str__()
+        s = ''
+        for i, burst in enumerate(self.burst):
+            s = s + f'Burst No. {i+1}\n============\n' + sec.__str__()
         return s
+
+class BurstGroup:
+    def __init__(self, burst_files:List[str]):
+        self.subswaths = []
+        for subswath in range(1,4):
+            burst_list = [s for s in burst_files if f'iw{subswath}' in s]
+            self.subswaths.append(Subswath(burst_list))
 
 def compress(
         main_img_file: str,

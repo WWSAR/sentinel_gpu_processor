@@ -8,7 +8,7 @@ io:
     unw_path: unw
     dem_file: elevation.dem
     rsc_file: elevation.dem.rsc
-    img_pair_file: igrams/subswath_list
+    img_pair_file: subswath_list
     geometry_path: geometry
     tropo_delay_path: tropo_delay
     tropo_corr_path: tropo_corrected
