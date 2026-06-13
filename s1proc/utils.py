@@ -166,6 +166,7 @@ def create_slc_pair_list(
         slc_dir: str = 'slc',
         proc_dir: str = 'proc',
         ifg_dir: str = 'igrams',
+        img_pair_file: str = 'subswath_list',
         demfile: str = 'elevation.dem',
         rscfile: str = 'elevation.dem.rsc'):
     """
@@ -187,6 +188,8 @@ def create_slc_pair_list(
         Directory storing auxilary parameters
     ifg_dir: str
         Directory storing interferograms
+    img_pair_file: str
+        File containing pairs of subswath images
     demfile: str
         DEM file
     rscfile: str
@@ -238,7 +241,7 @@ def create_slc_pair_list(
         slcs = bbox_sort(slcs)
         slc_dict[date_str] = slcs
 
-    f = open(os.path.join(ifg_dir,'subswath_list'),'w')
+    f = open(os.path.join(ifg_dir,img_pair_file),'w')
     ndates = len(unique_date_list)
     for i in range(ndates-1):
         date_str_ref = unique_date_list[i]
@@ -283,6 +286,40 @@ def create_slc_pair_list(
                 logger.warning('Numbers of SLC images do not match for '
                         f'{date_str_ref} and {date_str_sec}, skipping')
     f.close()
+
+def run_create_slc_pair_list(
+        min_tbl: int = 0,
+        max_tbl: int = 30000,
+        min_sbl: int = 0,
+        max_sbl: int = 10000,
+        config: str = 'config.yaml'):
+    """
+    Create a list of SLC pairs for interferogram generation
+
+    Parameters
+    ----------
+    min_tbl: int
+        minimum temporal baseline threshold
+    max_tbl: int
+        maximum temporal baseline threshold
+    min_sbl: int
+        minimum temporal baseline threshold
+    max_sbl: int
+        maximum temporal baseline threshold
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    create_slc_pair_list(min_tbl=min_tbl,
+            max_tbl=max_tbl,
+            min_sbl=min_sbl,
+            max_sbl=max_sbl,
+            slc_dir=icfg.slc_path,
+            proc_dir=icfg.proc_path,
+            ifg_dir=icfg.ifg_path,
+            img_pair_file=icfg.img_pair_file,
+            demfile=icfg.dem_file,
+            rscfile=icfg.rsc_file)
+    return
 
 def mid_orbit(
         orb_list: List[Path|str]|None = None,

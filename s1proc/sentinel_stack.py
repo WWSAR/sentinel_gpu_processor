@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python4
 import glob
 import numpy as np
 import os
@@ -125,3 +125,51 @@ def stack(
                 subswath_list, proc_dir, slc_dir, rm_rawslc, rm_zipfile,
                 rm_folder, hmin, hmax)
     logger.info('Loop over scenes complete.')
+
+def run_stack(
+        polarization: Literal['hh','hv','vh','vv'] = 'vv',
+        subswath_list: Sequence[int] = [1,2,3],
+        rm_rawslc: bool = True,
+        rm_zipfile: bool = False,
+        rm_folder: bool = False,
+        reprocess: bool = False,
+        zip_list: Sequence[str]|None = None,
+        config: str = 'config.yaml'):
+    """
+    Process a stack of sentinel products to coregistered geocoded SLCS
+    
+    Parameters
+    ----------
+    polarization: Literal
+        Polarization to process
+    subswath_list: Sequence[int]
+        Subswaths to process 
+    rm_rawslc: bool
+        Remove raw SLC files after image processing is done
+    rm_zipfile: bool
+        Remove the zipfile after image processing is done
+    rm_folder: bool
+        Remove the unzipped folder after image processing is done
+    reprocess: bool
+        Reprocess the geo file if it already exists
+    zip_list: Sequence[str]
+        List of zip files to process
+    config: Path|str
+        Configuration file
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    stack(data_dir=icfg.data_path,
+            eof_dir=icfg.eof_path,
+            proc_dir=icfg.proc_path,
+            slc_dir=icfg.slc_path,
+            demfile=icfg.dem_file,
+            rscfile=icfg.rsc_file,
+            polarization=polarization,
+            subswath_list=subswath_list,
+            rm_rawslc=rm_rawslc,
+            rm_zipfile=rm_zipfile,
+            rm_folder=rm_folder,
+            reprocess=reprocess,
+            zip_list=zip_list)
+    return

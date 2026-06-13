@@ -57,7 +57,6 @@ def multilook(slc_list: Sequence[str],
 def multilook_amp(
         slc_dir: str,
         rscfile: str,
-        /,
         amp_dir: str = 'amp',
         rowlook: int = 1,
         collook: int = 1):
@@ -91,11 +90,30 @@ def multilook_amp(
         amp = multilook(sub_slc_list, rowlook, collook)
         amp.tofile(outfile)
 
+def run_multilook_amp(
+        config: str = 'config.yaml'):
+    """
+    multilook all geocoded SLC images
+
+    Parameters
+    ----------
+    config: Path|str
+        Configuration file
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    multilook_amp(
+        slc_dir=icfg.slc_path,
+        rscfile=icfg.rsc_file,
+        amp_dir=icfg.amp_path,
+        rowlook=pcfg.rowlook,
+        collook=pcfg.collook)
+    return
+
 def coherence(
         ifg_dir: str,
         slc_dir: str,
         rscfile: str,
-        /,
         amp_dir: str = 'amp',
         rowlook: int = 1,
         collook: int = 1):
@@ -118,7 +136,6 @@ def coherence(
         Number of look in column direction
     """
     os.makedirs(amp_dir, exist_ok = True)
-    multilook_amp(slc_dir, rscfile, amp_dir, rowlook, collook)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook,collook)
     ifg_list = sorted(glob.glob(os.path.join(ifg_dir,'*.int')))
@@ -138,3 +155,25 @@ def coherence(
         amp2[amp2 == 0] = 1e-10
         c = np.abs(ifg)/amp1/amp2 
         c.astype(np.float32).tofile(out_file)
+
+def run_coherence(
+        config: str = 'config.yaml'):
+    """
+    Compute InSAR phase coherence
+
+    Parameters
+    ----------
+    config: Path|str
+        Configuration file
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    run_multilook_amp(config = config)
+    coherence(
+        ifg_dir=icfg.ifg_path,
+        slc_dir=icfg.slc_path,
+        rscfile=icfg.multilook_rsc_file,
+        amp_dir=icfg.amp_path,
+        rowlook=pcfg.rowlook,
+        collook=pcfg.collook)
+    return

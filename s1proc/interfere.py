@@ -60,14 +60,14 @@ def interfere_subswath(
 def stitch_patches(patch, ifg, left, right, out_float):
     temp = patch[:,left:right]
     if out_float:
-        common_mask = (temp!=0) & (ifg!=0)
+        overlap_mask = (temp!=0) & (ifg!=0)
     else:
-        common_mask = (temp.real!=0) & (ifg.real!=0)
-    if np.any(common_mask):
+        overlap_mask = (temp.real!=0) & (ifg.real!=0)
+    if np.any(overlap_mask):
         if out_float:
-            phase_diff = np.exp(1j*(-temp[common_mask] + ifg[common_mask]))
+            phase_diff = np.exp(1j*(-temp[overlap_mask] + ifg[overlap_mask]))
         else:
-            phase_diff = np.conj(temp[common_mask]) * ifg[common_mask]
+            phase_diff = np.conj(temp[overlap_mask]) * ifg[overlap_mask]
         mean_phase_diff = np.angle(np.mean(phase_diff)) 
         phase_diff = phase_diff * np.exp(-1j*mean_phase_diff)
         med_phase_diff = np.median(np.angle(phase_diff))
@@ -225,8 +225,8 @@ def parse_fname(fn:str)->Tuple[str, str]:
 def interfere(
         img_pair_file: str,
         rscfile: str,
+        multirscfile: str,
         direction: Literal['asc','desc'],
-        /,
         ifg_dir: str = 'igrams',
         rowlook: int = 1,
         collook: int = 1,
@@ -263,9 +263,11 @@ def interfere(
     intlist_file = os.path.join(ifg_dir, 'intlist')
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook,collook)
-    rsclook.save_as_rsc(os.path.join(ifg_dir,'dem.rsc'))
+    if os.path.dirname(multirscfile):
+        os.makedirs(os.path.dirname(multirscfile),exist_ok=True)
+    rsclook.save_as_rsc(multirscfile)
 
-    fin = open(img_pair_file,'r')
+    fin = open(os.path.join(ifg_dir,img_pair_file),'r')
     lines = fin.readlines()
     fin.close()
     main_list = []
@@ -344,3 +346,35 @@ def interfere(
     fout = open(intlist_file,'w')
     fout.write('\n'.join(intlist))
     fout.close()
+
+def run_interfere(
+        out_float: bool = False,
+        fast: bool = False,
+        verbose: bool = False,
+        config: str = 'config.yaml'):
+    """
+    Form interferograms from a subswath list
+
+    Parameters
+    ----------
+    out_float: bool
+        Output float rather than cpx images
+    fast: bool
+        Do not run crossmul_sec to remove burst line artifacts
+    verbose: bool
+        Set the logging level to debug
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    interfere(
+        img_pair_file=icfg.img_pair_file,
+        rscfile=icfg.rsc_file,
+        multirscfile=icfg.multilook_rsc_file,
+        direction=pcfg.direction,
+        ifg_dir=icfg.ifg_path,
+        rowlook=pcfg.rowlook,
+        collook=pcfg.collook,
+        out_float=out_float,
+        fast=fast,
+        verbose=verbose)
+    return

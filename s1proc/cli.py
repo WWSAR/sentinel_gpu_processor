@@ -13,11 +13,11 @@ def main()->int:
 
     import tyro
     from s1proc._config import initialize_config
-    from s1proc.utils import create_slc_pair_list
-    from s1proc.interfere import interfere
-    from s1proc.sentinel_stack import stack as stack
-    from s1proc.unwrap import batch_snaphu
-    from s1proc.coherence import multilook_amp, coherence
+    from s1proc.utils import run_create_slc_pair_list
+    from s1proc.interfere import run_interfere
+    from s1proc.sentinel_stack import run_stack
+    from s1proc.unwrap import run_batch_snaphu
+    from s1proc.coherence import run_multilook_amp, run_coherence
     from s1proc.query import query_asf
     from s1proc.utils import check_integrity
     from s1proc.tropo import main as tropo_correction
@@ -26,12 +26,12 @@ def main()->int:
             "init": initialize_config,
             "query": query_asf,
             "integrity": check_integrity,
-            "stack": stack,
-            "slcpairs": create_slc_pair_list,
-            "interfere": interfere,
-            "unwrap": batch_snaphu,
-            "amp": multilook_amp,
-            "coh": coherence,
+            "stack": run_stack,
+            "slcpairs": run_create_slc_pair_list,
+            "interfere": run_interfere,
+            "unwrap": run_batch_snaphu,
+            "amp": run_multilook_amp,
+            "coh": run_coherence,
             "tropo": tropo_correction
         })
     return os.EX_OK

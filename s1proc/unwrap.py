@@ -118,7 +118,7 @@ def batch_snaphu(
     nproc: int = 1,
     file_extension: str = ".int",
     cost_mode: str = "SMOOTH",
-    total_cpus: int = None
+    total_cpus: int | None = None
 ):
     """
     Batch unwrap using SNAPHU
@@ -209,3 +209,52 @@ def batch_snaphu(
         task_items=task_items,
         cores_per_task=final_nproc
     )
+
+def run_batch_snaphu(
+    rowtile: int = 1,
+    coltile: int = 1,
+    rowoverlap: int = 200,
+    coloverlap: int = 200,
+    nproc: int = 1,
+    file_extension: str = ".int",
+    cost_mode: str = "SMOOTH",
+    total_cpus: int | None = None,
+    config: str = 'config.yaml'
+):
+    """
+    Batch unwrap using SNAPHU
+
+    Parameters
+    ----------
+    rowtile : int
+        Number of tiles in row direction 
+    coltile : int
+        Number of tiles in column direction 
+    rowoverlap : int
+        Overlap in row direction 
+    coloverlap : int
+        Overlap in column direction 
+    nproc : int
+        Number of parallel processes 
+    file_extension : str
+        File extension filter (default: .int)
+    cost_mode : str
+        SNAPHU cost mode: 'DEFO', 'SMOOTH', 'TOPO'
+    total_cpus : int
+        Manually restrict total usable workstation CPU cores to prevent memory saturation (default: auto)
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    batch_snaphu(
+            input_folder=icfg.ifg_path,
+            output_folder=icfg.unw_path,
+            rsc_file=icfg.multilook_rsc_file,
+            rowtile=rowtile,
+            coltile=coltile,
+            rowoverlap=rowoverlap,
+            coloverlap=coloverlap,
+            nproc=nproc,
+            file_extension=file_extension,
+            cost_mode=cost_mode,
+            total_cpus=total_cpus)
+    return

@@ -13,10 +13,12 @@ class IoConfig:
     eof_path: str
     proc_path: str
     slc_path: str
+    amp_path: str
     ifg_path: str
     unw_path: str
     dem_file: str
     rsc_file: str
+    img_pair_file: str
     geometry_path: str
     tropo_delay_path: str
     tropo_corr_path: str
@@ -27,6 +29,7 @@ class IoConfig:
 class ProcessingConfig:
     rowlook: int
     collook: int
+    direction: str
     wavelength: float
     hour: int
     flip_sign: bool

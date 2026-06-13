@@ -4,9 +4,11 @@ io:
     proc_path: proc
     slc_path: slc
     ifg_path: igrams
+    amp_path: amp
     unw_path: unw
     dem_file: elevation.dem
     rsc_file: elevation.dem.rsc
+    img_pair_file: igrams/subswath_list
     geometry_path: geometry
     tropo_delay_path: tropo_delay
     tropo_corr_path: tropo_corrected
@@ -16,6 +18,7 @@ io:
 processing:
     rowlook: 10
     collook: 20
+    direction: null
     wavelength: 0.055465763
     hour: null
     flip_sign: False
