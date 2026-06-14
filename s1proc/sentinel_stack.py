@@ -117,8 +117,8 @@ def stack(
                 logger.info(f'Precise orbit file found: {orbitfilename}')
                 break
         dem = np.fromfile(demfile, dtype=np.int16)
-        hmin = dem.min()
-        hmax = dem.max()
+        hmin = dem.min() - 100
+        hmax = dem.max() + 100
         logger.info(f'Minimum elevation: {hmin} m, Maximum elevation: {hmax} m')
         del dem
         sentinel_scene(zip_file, demfile, rscfile, orbitfilename, polarization,

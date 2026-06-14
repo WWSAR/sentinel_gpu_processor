@@ -306,6 +306,10 @@ def create_db(
     sql_mod.add_param(c,swathfile,'samplesPerBurst')
     sql_mod.edit_param(c,swathfile,'samplesPerBurst',samplesPerBurst,'-','int*4',
             'Bursts in SLC')
+    sql_mod.add_param(c,swathfile,'hmin')
+    sql_mod.edit_param(c,swathfile,'hmin',-100,'m','real*8','Minimum elevation')
+    sql_mod.add_param(c,swathfile,'hmax')
+    sql_mod.edit_param(c,swathfile,'hmax',9000,'m','real*8','Maximum elevation')
     for i in range(len(azimuthTime)):
         sql_mod.add_param(c,swathfile,'azimuthTime'+str(i+1))
         sql_mod.edit_param(c,swathfile,'azimuthTime'+str(i+1),azimuthTime[i],

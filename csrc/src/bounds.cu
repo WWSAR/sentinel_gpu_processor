@@ -284,6 +284,7 @@ void rah2ll(double *rah, double *tt, double *xx, double *vv,
 
 void bounds(const double start_time, const double end_time,
             const double start_rng, const double end_rng,
+            const double hmin, const double hmax,
             double *tt, double *xx, double *vv,
             const std::size_t nstatvec, double* latlons,
             const std::string &look_dir){
@@ -300,9 +301,9 @@ void bounds(const double start_time, const double end_time,
             rah[3*i+1] = end_time;
         }
         if (i % 2 == 0){
-            rah[3*i+2] = 0.;
+            rah[3*i+2] = hmin;
         }else{
-            rah[3*i+2] = 10000.;
+            rah[3*i+2] = hmax;
         }
     }
     rah2ll(rah,tt,xx,vv,nstatvec,start_time,end_time,bnd_lat,bnd_lon,look_dir);

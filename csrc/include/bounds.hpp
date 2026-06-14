@@ -14,6 +14,7 @@
 
 void bounds(const double start_time, const double end_time,
             const double start_rng, const double end_rng,
+            const double hmin, const double hmax,
             double *tt, double *xx, double *vv,
             const std::size_t nstatvec, double* latlons,
             const std::string &look_dir = "RIGHT");

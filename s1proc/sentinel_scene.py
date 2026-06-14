@@ -351,6 +351,10 @@ def sentinel_scene(
         derampedslcfile = origslcfile.replace('rawslc','rawslc.deramp')
         sql_mod.edit_param(c,'file','slc_file',derampedslcfile,'-','char',
                 'deramped slc')
+        sql_mod.edit_param(c,'file','hmin', hmin, 'm', 'real*8',
+                'Minimum elevation')
+        sql_mod.edit_param(c,'file','hmax', hmin, 'm', 'real*8',
+                'Maximum elevation')
         rawslcfile = sql_mod.valuec(c,'file','raw_slc_file')
         con.commit()
         c.close()

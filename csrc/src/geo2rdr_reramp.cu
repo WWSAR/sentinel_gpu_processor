@@ -21,26 +21,34 @@
     #define SOL 299792458.0
 #endif
 
+// ----------------- Utility -----------------
+#define CHECK_CUDA(x) do { cudaError_t err = (x); \
+if (err != cudaSuccess) { \
+    std::cerr << "CUDA error " << cudaGetErrorString(err) \
+              << " at " << __FILE__ << ":" << __LINE__ << std::endl; \
+    exit(1); \
+} } while(0)
+
 bool file_exists(const std::string& filename) {
     std::ifstream f(filename);
     return f.good();
 }
 
 __global__
-void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
-               Complex *outdata, Complex *overlapdata,
+void reproject(const short int *dem,
+               const Complex *burstdata,
+               const double *deramp_phase,
+               Complex __restrict__ *outdata,
                double *tt, double *xx, double *vv, const std::size_t nstatvec,
                const double tmid, double *xmid, double *vmid,
                const double latmax, const double lonmin, const double dlat, 
                const double dlon, const std::size_t nlon, 
-               const double burst_latmin, const double burst_latmax,
-               const double burst_lonmin, const double burst_lonmax,
                const double rngstart, const double tstart,
                const double dmrg, const double dtaz, const int nrange,
                const int lines_per_burst, const int first_valid_line,
                const int last_valid_line, const int first_valid_sample,
                const int last_valid_sample, const double wvl,
-               const bool written, const std::size_t n){
+               const std::size_t n){
     std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
     std::size_t stride = blockDim.x * gridDim.x;
     int row, col, intr, inta;
@@ -50,7 +58,6 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
     double reramp1, reramp2, reramp, phase1, phase2, phase3, phase4, phase;
     double resx, resy, cosphase, sinphase;
     Complex cpx1, cpx2, burst1, burst2, burst3, burst4, res, zero;
-    bool overlapped;
     zero.x = 0;
     zero.y = 0;
     for (std::size_t i = index; i < n; i += stride){
@@ -59,25 +66,6 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
         lat = latmax + row*dlat;
         lon = lonmin + col*dlon;
         h = dem[i];
-        if (written){
-            res = outdata[i];
-        }else{
-            res.x = 0;
-            res.y = 0;
-            outdata[i] = zero;
-            overlapdata[i] = zero; 
-        }
-        if (lat > burst_latmax || lat < burst_latmin ||
-            lon > burst_lonmax || lon < burst_lonmin){
-            continue;
-        }
-        if (res.x != 0 || res.y !=0){
-            // if res is not zero, it means this pixel has been processed
-            // in a previous burst, so we need to save it to overlapdata
-            overlapped = true;
-        }else{
-            overlapped = false;
-        }
         llh[0] = lat;
         llh[1] = lon;
         llh[2] = h;
@@ -126,14 +114,9 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
             sinphase = sin(phase);
             res.x = resx*cosphase - resy*sinphase;
             res.y = resx*sinphase + resy*cosphase;
-        }else{
-            continue;
-        }
-        if (overlapped){
-            overlapdata[i] = res;
-        }
-        else{
             outdata[i] = res;
+        }else{
+            outdata[i] = zero;
         }
     }
 }
@@ -141,11 +124,6 @@ void reproject(short int *dem, Complex *burstdata, double *deramp_phase,
 int geo2rdr_reramp(const std::string &dbname,
                    const std::string &deramp_phase_file,
                    const std::string &slcoutfile,
-                   const std::string &overlapfile,
-                   const int left,
-                   const int top,
-                   const int right,
-                   const int bottom,
                    std::string &slcinfile){
     sqlite3 *db; // database that stores relevant paramters
 
@@ -156,25 +134,24 @@ int geo2rdr_reramp(const std::string &dbname,
     }
     // database table name
     const std::string tblname = "file";
+    // filenames
     std::string orbfile, demfile, rscfile;
-    std::size_t nstatvec, burstsize;
-    rsc demrsc;
+    std::size_t nstatvec, burstsize, buffer_size;
     int azimuth_bursts, lines_per_burst, nrange, blockSize=256, numBlocks;
-    int batch_lines = 3000, nbatch, nrow, ncol;
+    int nrow_buffer, ncol_buffer;
+    double prf, wvl,slant_range_time,range_sampling_rate,hmin,hmax;
+    rsc demrsc;
+
+    std::int32_t header[NHEADER] = {0};
     short int *dem, *d_dem;
-    std::int32_t main_header[NHEADER] = {0}, sec_header[NHEADER] = {0};
-    double prf, wvl,slant_range_time,range_sampling_rate;
+    double *latlons;
     double *startime, *tt, *xx, *vv, *xmid, *vmid;
     double *d_tt, *d_xx, *d_vv, *d_xmid, *d_vmid;
     int *first_valid_line, *last_valid_line;
     int *first_valid_sample, *last_valid_sample;
     Complex *burstdata, *d_burstdata, *outdata, *d_outdata;
-    Complex *overlapdata, *d_overlapdata;
     double *deramp_phase, *d_deramp_phase; 
-    bool written;
 
-    nrow = bottom - top;
-    ncol = right - left;
     demfile = get_params(db, tblname, "demfile");
     rscfile = get_params(db, tblname, "rscfile");
     nrange = get_parami(db,tblname,"samplesPerBurst");
@@ -182,6 +159,8 @@ int geo2rdr_reramp(const std::string &dbname,
     azimuth_bursts = get_parami(db,tblname,"azimuthBursts");
     prf = get_paramd(db,tblname,"prf");
     wvl = get_paramd(db,tblname,"wvl");
+    hmin = get_paramd(db,tblname,"hmin");
+    hmax = get_paramd(db,tblname,"hmax");
     range_sampling_rate = get_paramd(db,tblname,"rangeSamplingRate");
     slant_range_time = get_paramd(db,tblname,"slantRangeTime");
     orbfile = get_params(db,tblname,"orbinfo");
@@ -198,6 +177,8 @@ int geo2rdr_reramp(const std::string &dbname,
     vmid = (double*)malloc(sizeof(double)*3);
     burstdata = (Complex*)malloc(sizeof(Complex)*nrange*lines_per_burst);
     deramp_phase = (double*)malloc(sizeof(double)*nrange*lines_per_burst);
+    latlons = (double*)malloc(sizeof(double)*azimuth_bursts*4);
+    read_orbit_ascii(orbfile,nstatvec,&tt,&xx,&vv);
 
     std::cout << "number of azimuth bursts: " << azimuth_bursts << std::endl;
     for(int iburst=0; iburst<azimuth_bursts; iburst++){
@@ -216,111 +197,133 @@ int geo2rdr_reramp(const std::string &dbname,
         last_valid_line[iburst] = get_parami(db,tblname,last_valid_line_key);
         first_valid_sample[iburst] = get_parami(db,tblname,first_valid_sample_key);
         last_valid_sample[iburst]  = get_parami(db,tblname,last_valid_sample_key);
+
+        double tstart, dtaz, tend, tmid;
+        double rngstart, dmrg, rngend;
+        tstart = startime[iburst];
+        dtaz = 1./prf;
+        tend = tstart + (lines_per_burst-1)*dtaz;
+        tmid = (tstart + tend)*0.5;
+        intp_orbit(nstatvec, tt,xx,vv,tmid,xmid,vmid);
+        rngstart = slant_range_time*SOL/2.0;
+        dmrg = SOL/2.0/range_sampling_rate;
+        rngend = rngstart + (nrange-1)*dmrg;
+        // calculate lat/lon boundaries of current burst
+        bounds(tstart,tend,rngstart,rngend,hmin,hmax,tt,xx,vv,nstatvec,
+               latlons+iburst*4,"RIGHT");
     }
+
     if (sqlite3_close(db) != SQLITE_OK) {
         std::cerr << "Can't close database: " << sqlite3_errmsg(db) << std::endl;
         return -1;
     }
+
     demrsc = readrsc(rscfile);
-    // populate main_header
-    main_header[0] = demrsc.nlat;
-    main_header[1] = demrsc.nlon;
-    main_header[2] = left;
-    main_header[3] = top;
-    main_header[4] = right;
-    main_header[5] = bottom;
-    sec_header[0] = demrsc.nlat;
-    sec_header[1] = demrsc.nlon;
-    sec_header[2] = left;
-    sec_header[3] = right;
-    sec_header[4] = 0;
-    read_orbit_ascii(orbfile,nstatvec,&tt,&xx,&vv);
-    outdata = (Complex*)malloc(sizeof(Complex)*ncol*batch_lines);
-    overlapdata = (Complex*)malloc(sizeof(Complex)*ncol*batch_lines);
-    dem = (short int*)malloc(sizeof(short int)*ncol*batch_lines);
+
+    nrow_buffer = 0;
+    ncol_buffer = 0;
+    for (int i = 0; i < azimuth_bursts; i++){
+        double latmin, latmax, lonmin, lonmax;
+        int nrowi, ncoli;
+        latmin = latlons[4*i];
+        latmax = latlons[4*i+1];
+        lonmin = latlons[4*i+2];
+        lonmax = latlons[4*i+3];
+        nrowi = int((latmin - latmax)/demrsc.dlat+1);
+        nrow_buffer = std::max(nrowi, nrow_buffer);
+        ncoli = int((lonmax - lonmin)/demrsc.dlon+1);
+        ncol_buffer = std::max(ncoli, ncol_buffer);
+    }
+    //std::cout << "number of buffer rows: " << nrow_buffer << std::endl;
+    //std::cout << "number of buffer columns: " << ncol_buffer << std::endl;
+    buffer_size = sizeof(Complex) * nrow_buffer * ncol_buffer;
+
+    outdata = (Complex*)malloc(buffer_size);
+    dem = (short int*)malloc(sizeof(short int)*nrow_buffer*ncol_buffer);
     cudaMalloc((void**)&d_tt,sizeof(double)*nstatvec);
     cudaMalloc((void**)&d_xx,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_vv,sizeof(double)*nstatvec*3);
     cudaMalloc((void**)&d_xmid,sizeof(double)*3);
     cudaMalloc((void**)&d_vmid,sizeof(double)*3);
-    cudaMalloc((void**)&d_dem,sizeof(short int)*ncol*batch_lines);
-    cudaMalloc((void**)&d_outdata,sizeof(Complex)*ncol*batch_lines);
-    cudaMalloc((void**)&d_overlapdata,sizeof(Complex)*ncol*batch_lines);
+    cudaMalloc((void**)&d_dem,sizeof(short int)*nrow_buffer*ncol_buffer);
+    cudaMalloc((void**)&d_outdata,buffer_size);
     cudaMalloc((void**)&d_burstdata,sizeof(Complex)*nrange*lines_per_burst);
     cudaMalloc((void**)&d_deramp_phase,sizeof(double)*nrange*lines_per_burst);
 
     cudaMemcpy(d_tt,tt,sizeof(double)*nstatvec,cudaMemcpyHostToDevice);
     cudaMemcpy(d_xx,xx,sizeof(double)*nstatvec*3,cudaMemcpyHostToDevice);
     cudaMemcpy(d_vv,vv,sizeof(double)*nstatvec*3,cudaMemcpyHostToDevice);
-    nbatch = (nrow + batch_lines-1)/batch_lines;
-    for (int ibatch = 0; ibatch < nbatch; ++ibatch){
-        // calculate the first and the last lines of current batch of output file
-        std::size_t line_start = ibatch * batch_lines + top;
-        std::size_t line_end = line_start + batch_lines;
-        line_end = line_end < bottom ? line_end : bottom;
-        std::size_t nlines = line_end - line_start;
-        read_binary<short int>(demfile,demrsc.nlon,line_start,line_end,
+    for (int iburst = 0; iburst < azimuth_bursts; ++iburst){
+        double latmin, latmax, lonmin, lonmax;
+        int left, top, right, bottom, nrow, ncol;
+        latmin = latlons[4*iburst];
+        latmax = latlons[4*iburst+1];
+        lonmin = latlons[4*iburst+2];
+        lonmax = latlons[4*iburst+3];
+        left = int((lonmin - demrsc.lonmin)/demrsc.dlon);
+        top = int((latmax - demrsc.latmax)/demrsc.dlat);
+        right = int((lonmax - demrsc.lonmin)/demrsc.dlon + 1);
+        bottom = int((latmin - demrsc.latmax)/demrsc.dlat + 1);
+        left = std::max(0, left);
+        top = std::max(0, top);
+        right = std::min(demrsc.nlon, right);
+        bottom = std::min(demrsc.nlat, bottom);
+        if (left >= right || top >= bottom){
+            continue;
+        }
+        nrow = bottom - top;
+        ncol = right - left;
+        // populate header
+        header[0] = demrsc.nlat;
+        header[1] = demrsc.nlon;
+        header[2] = left;
+        header[3] = top;
+        header[4] = right;
+        header[5] = bottom;
+
+        read_binary<short int>(demfile,demrsc.nlon, top, bottom,
                 left, right, dem);
-        cudaMemcpy(d_dem,dem,sizeof(short int)*nlines*ncol,
+        cudaMemcpy(d_dem, dem, sizeof(short int) * nrow * ncol,
                 cudaMemcpyHostToDevice);
-        numBlocks = (nlines*ncol+blockSize-1)/blockSize;
-        std::cout << "Batch " << ibatch << ", nlines: " << nlines << std::endl;
+        numBlocks = (nrow * ncol + blockSize - 1)/blockSize;
+        std::cout << "Burst " << iburst << ", nrow: " << nrow << std::endl;
         
-        for (int iburst=0; iburst<azimuth_bursts; ++iburst){
-            double tstart, dtaz, tend, tmid;
-            double rngstart, dmrg, rngend;
-            double latlons[4];
-            if (iburst == 0){
-                written = false;
-            }else{
-                written = true;
-            }
-            tstart = startime[iburst];
-            dtaz = 1./prf;
-            tend = tstart + (lines_per_burst-1)*dtaz;
-            tmid = (tstart + tend)*0.5;
-            intp_orbit(nstatvec, tt,xx,vv,tmid,xmid,vmid);
-            rngstart = slant_range_time*SOL/2.0;
-            dmrg = SOL/2.0/range_sampling_rate;
-            rngend = rngstart + (nrange-1)*dmrg;
-
-            read_binary<Complex>(slcinfile,iburst*burstsize,burstsize,
-                    burstdata);
-            read_binary<double>(deramp_phase_file,iburst*burstsize,burstsize,
-                    deramp_phase);
-
-            // calculate lat/lon bnoudaries of current burst
-            bounds(tstart,tend,rngstart,rngend,tt,xx,vv,nstatvec,latlons,"RIGHT");
-            cudaMemcpy(d_burstdata,burstdata,sizeof(Complex)*burstsize,
-                    cudaMemcpyHostToDevice);
-            cudaMemcpy(d_deramp_phase,deramp_phase,sizeof(double)*burstsize,
-                    cudaMemcpyHostToDevice);
-            cudaMemcpy(d_xmid,xmid,sizeof(double)*3,cudaMemcpyHostToDevice);
-            cudaMemcpy(d_vmid,vmid,sizeof(double)*3,cudaMemcpyHostToDevice);
+        double tstart, dtaz, tend, tmid;
+        double rngstart, dmrg;
+        tstart = startime[iburst];
+        dtaz = 1./prf;
+        tend = tstart + (lines_per_burst - 1) * dtaz;
+        tmid = (tstart + tend) * 0.5;
+        rngstart = slant_range_time * SOL / 2.0;
+        dmrg = SOL / 2.0 / range_sampling_rate;
+        intp_orbit(nstatvec, tt, xx, vv, tmid, xmid, vmid);
+        read_binary<Complex>(slcinfile,iburst*burstsize,burstsize,
+                burstdata);
+        read_binary<double>(deramp_phase_file,iburst*burstsize,burstsize,
+                deramp_phase);
+        cudaMemcpy(d_burstdata,burstdata,sizeof(Complex)*burstsize,
+                cudaMemcpyHostToDevice);
+        cudaMemcpy(d_deramp_phase,deramp_phase,sizeof(double)*burstsize,
+                cudaMemcpyHostToDevice);
+        cudaMemcpy(d_xmid,xmid,sizeof(double)*3,cudaMemcpyHostToDevice);
+        cudaMemcpy(d_vmid,vmid,sizeof(double)*3,cudaMemcpyHostToDevice);
             
-            // reprojection
-            reproject<<<numBlocks,blockSize>>>(d_dem,d_burstdata,d_deramp_phase,
-            d_outdata,d_overlapdata,d_tt,d_xx,d_vv,nstatvec,tmid,d_xmid,d_vmid, 
-            demrsc.latmax+demrsc.dlat*line_start,demrsc.lonmin+demrsc.dlon*left,
-            demrsc.dlat,demrsc.dlon,ncol,
-            latlons[0],latlons[1],latlons[2],latlons[3],rngstart,tstart,dmrg,dtaz,
-            nrange, lines_per_burst, first_valid_line[iburst],
-            last_valid_line[iburst], first_valid_sample[iburst],
-            last_valid_sample[iburst], wvl, written, nlines*ncol);
-            cudaDeviceSynchronize();
-        }
-        cudaMemcpy(outdata,d_outdata,sizeof(Complex)*nlines*ncol,
+        // reprojection
+        reproject<<<numBlocks,blockSize>>>(d_dem,d_burstdata,d_deramp_phase,
+        d_outdata,d_tt,d_xx,d_vv,nstatvec,tmid,d_xmid,d_vmid, 
+        demrsc.latmax+demrsc.dlat*top,demrsc.lonmin+demrsc.dlon*left,
+        demrsc.dlat,demrsc.dlon,ncol,
+        rngstart,tstart,dmrg,dtaz,
+        nrange, lines_per_burst, first_valid_line[iburst],
+        last_valid_line[iburst], first_valid_sample[iburst],
+        last_valid_sample[iburst], wvl,  nrow*ncol);
+
+        CHECK_CUDA(cudaDeviceSynchronize());
+
+        cudaMemcpy(outdata,d_outdata,sizeof(Complex)*nrow*ncol,
                 cudaMemcpyDeviceToHost);
-        cudaMemcpy(overlapdata,d_overlapdata,sizeof(Complex)*nlines*ncol,
-                cudaMemcpyDeviceToHost);
-        if (ibatch == 0){
-            save_binary<Complex>(outdata,nlines*ncol,main_header,NHEADER,
-                    slcoutfile);
-        }else{
-            save_binary<Complex>(outdata,true,nlines*ncol,slcoutfile);
-        }
-        write_compressed_strips(sec_header, overlapdata, nlines, ncol,
-                line_start, overlapfile);
+        save_binary<Complex>(outdata,nrow*ncol,header,NHEADER,
+                slcoutfile+"_burst_"+std::to_string(iburst)+".gslc");
     }
 
     free(startime);
@@ -328,6 +331,7 @@ int geo2rdr_reramp(const std::string &dbname,
     free(last_valid_line);
     free(first_valid_sample);
     free(last_valid_sample);
+    free(latlons);
     free(burstdata);
     free(deramp_phase);
     free(dem);
@@ -348,25 +352,19 @@ int geo2rdr_reramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
-    if (argc<9){
+    if (argc<4){
         std::cout << "Usage: geo2rdr_reramp dbname deramp_phase_file " <<
-            "slcoutfile overlapfile left top right bottom [slcinfile]" <<
+            "slcoutfile [slcinfile]" <<
             std::endl;
         return 0;
     }
     const std::string dbname = std::string(argv[1]);
     const std::string deramp_phase_file = std::string(argv[2]);
     const std::string slcoutfile = std::string(argv[3]);
-    const std::string overlapfile = std::string(argv[4]);
-    const int left = std::stoi(argv[5]);
-    const int top = std::stoi(argv[6]);
-    const int right = std::stoi(argv[7]);
-    const int bottom = std::stoi(argv[8]);
     std::string slcinfile = "";
-    if (argc>9){
-        slcinfile = std::string(argv[9]);
+    if (argc>4){
+        slcinfile = std::string(argv[4]);
     }
-    geo2rdr_reramp(dbname,deramp_phase_file,slcoutfile,overlapfile,left,top,
-            right,bottom,slcinfile);
+    geo2rdr_reramp(dbname,deramp_phase_file,slcoutfile,slcinfile);
     return 0;
 }
