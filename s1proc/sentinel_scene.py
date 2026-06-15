@@ -17,7 +17,7 @@ from s1proc._log import setup_logger, set_logging_level
 from s1proc.geocoordinates import GeoCoordinates
 from s1proc.orbit import rah2ll
 from s1proc.precise_orbit import parse_orbit
-from s1proc.sario import sentinel_parser, compress
+from s1proc.sario import sentinel_parser
 from s1proc.sentinel_roidb import create_db
 logger = setup_logger(name = __name__, level = 'INFO')
 SOL = 299792458.

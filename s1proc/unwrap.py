@@ -146,7 +146,8 @@ def batch_snaphu(
     cost_mode : str
         SNAPHU cost mode: 'DEFO', 'SMOOTH', 'TOPO'
     total_cpus : int
-        Manually restrict total usable workstation CPU cores to prevent memory saturation (default: auto)
+        Manually restrict total usable workstation CPU cores to prevent
+        memory saturation (default: auto)
     """
 
     rsc = GeoCoordinates(rsc_file)
@@ -241,7 +242,8 @@ def run_batch_snaphu(
     cost_mode : str
         SNAPHU cost mode: 'DEFO', 'SMOOTH', 'TOPO'
     total_cpus : int
-        Manually restrict total usable workstation CPU cores to prevent memory saturation (default: auto)
+        Manually restrict total usable workstation CPU cores to prevent
+        memory saturation (default: auto)
     """
     from s1proc._config import load_config
     icfg,pcfg = load_config(config)

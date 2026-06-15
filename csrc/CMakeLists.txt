@@ -33,8 +33,6 @@ add_executable(deramp_burst src/deramp_burst.cu src/sql_mod.cpp
 add_executable(geo2rdr_reramp src/geo2rdr_reramp.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu src/bounds.cu)
 add_executable(crossmul src/crossmul.cu src/sario.cu)
-add_executable(crossmul_sec src/crossmul_sec.cu src/sario.cu)
-add_executable(multilook_amp src/multilook_amp.cu src/sario.cu)
 add_executable(phase_similarity src/phase_similarity.cu)
 add_executable(goldstein src/goldstein.cu)
 
@@ -45,8 +43,6 @@ target_include_directories(readgeotiff PRIVATE "include")
 target_include_directories(deramp_burst PRIVATE "include")
 target_include_directories(geo2rdr_reramp PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
-target_include_directories(crossmul_sec PRIVATE "include")
-target_include_directories(multilook_amp PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include")
 
@@ -57,7 +53,7 @@ target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul crossmul_sec multilook_amp phase_similarity goldstein
+install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein
         RUNTIME DESTINATION bin
 )
 

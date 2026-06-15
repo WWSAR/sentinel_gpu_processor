@@ -2,11 +2,11 @@
 import glob
 import numpy as np
 import os
-from typing import Tuple, Sequence, Literal, List
+from typing import Tuple, Sequence, List
 
 from s1proc import get_bin_path
 from s1proc import geocoordinates
-from s1proc.sario import CroppedImage, Subswath, BurstGroup, NHEAD
+from s1proc.sario import CroppedImage, Subswath, BurstGroup
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
@@ -41,7 +41,7 @@ def match_bursts(
         best_match = np.argmin(idx_diff)
         burst_pairs.append(
                 (ref_burst.data, sec_subswath.bursts[best_match].data))
-        print(burst_pairs[-1])
+        logger.debug(burst_pairs[-1])
     return burst_pairs
 
 def interfere_subswath(
@@ -78,6 +78,7 @@ def interfere_subswath(
     burst_ifgs = []
     unique_indices1 = []
     unique_indices2 = []
+    outfiles = []
     for main_img_file, sec_img_file in burst_pairs:
         basename1 = os.path.basename(main_img_file)
         name1,_ = os.path.splitext(basename1)
@@ -86,6 +87,7 @@ def interfere_subswath(
         name2,_ = os.path.splitext(basename2)
         unique_indices2.append(name2[0:20])
         outfile = os.path.join(ifg_path, name1+'_'+name2+'.int')
+        outfiles.append(outfile)
         burst_ifgs.append(outfile)
         if os.path.exists(outfile):
             continue
@@ -138,8 +140,8 @@ def interfere_subswath(
             old_data[replace_mask] = new_data[replace_mask]
         ifg = CroppedImage(subswath.nrow0, subswath.ncol0, left, top, right,
                 bottom, ifg_data)
-        #for subifg_file in subifg_files:
-        #    os.remove(subifg_file)
+        for outfile in outfiles:
+            os.remove(outfile)
         return ifg
     else:
         return None
@@ -183,7 +185,7 @@ def interfere_single_scene(
         outfile: str,
         rowlook: int,
         collook: int,
-        out_float: bool = False) -> str:
+        out_float: bool = False):
     """
     Form an interferogram for a single scene
 
@@ -242,8 +244,7 @@ def interfere(
         img_pair_file: str,
         slc_path: str,
         rscfile: str,
-        multirscfile: str,
-        direction: Literal['asc','desc'],
+        small_rsc_file: str,
         ifg_path: str = 'igrams',
         rowlook: int = 1,
         collook: int = 1,
@@ -260,8 +261,8 @@ def interfere(
         Directory of SLC files
     rscfile: str
         rsc file
-    direction: Literal['asc','desc']
-        Flight direction
+    small_rsc_file: str
+        Multilooked rsc file
     ifg_path: str
         Directory to save interferograms
     rowlook: int
@@ -278,9 +279,9 @@ def interfere(
     os.makedirs(ifg_path, exist_ok = True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook,collook)
-    if os.path.dirname(multirscfile):
-        os.makedirs(os.path.dirname(multirscfile),exist_ok=True)
-    rsclook.save_as_rsc(multirscfile)
+    if os.path.dirname(small_rsc_file):
+        os.makedirs(os.path.dirname(small_rsc_file),exist_ok=True)
+    rsclook.save_as_rsc(small_rsc_file)
     
     ref_dates = []
     sec_dates = []
@@ -328,14 +329,13 @@ def run_interfere(
     from s1proc._config import load_config
     icfg,pcfg = load_config(config)
     interfere(
-        img_pair_file=icfg.img_pair_file,
-        slc_path=icfg.slc_path,
-        rscfile=icfg.rsc_file,
-        multirscfile=icfg.multilook_rsc_file,
-        direction=pcfg.direction,
-        ifg_path=icfg.ifg_path,
-        rowlook=pcfg.rowlook,
-        collook=pcfg.collook,
-        out_float=out_float,
-        verbose=verbose)
+        img_pair_file = icfg.img_pair_file,
+        slc_path = icfg.slc_path,
+        rscfile = icfg.rsc_file,
+        small_rsc_file = icfg.multilook_rsc_file,
+        ifg_path = icfg.ifg_path,
+        rowlook = pcfg.rowlook,
+        collook = pcfg.collook,
+        out_float = out_float,
+        verbose = verbose)
     return
