@@ -48,7 +48,7 @@ int crossmul(const std::string &slcfile1,
     Complex *slc1, *slc2, *ifglook;
     Complex *d_slc1, *d_slc2, *d_ifg, *d_ifg_collook, *d_ifglook;
     float *phase, *d_phase;
-    int batch_lines = 3000, blockSize=256, batch_sm;
+    int batch_lines = 4000, blockSize=256, batch_sm;
     int nbatch, numBlocks, ncol_sm;
     // image parameters
     // image1
