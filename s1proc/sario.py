@@ -215,84 +215,6 @@ class BurstGroup:
             burst_list = [s for s in burst_files if f'iw{subswath}' in s]
             self.subswaths.append(Subswath(burst_list))
 
-def compress(
-        main_img_file: str,
-        sec_img_file: str,
-        outfile: str,
-        nrow: int,
-        ncol: int):
-    """
-    Compress a geocoded subswath by removing all-zero lines and columns
-
-    Parameters
-    ----------
-    main_img_file: str
-        Main image file
-    sec_img_file: str
-        Secondary image file only containing the radar image in areas where
-        adjacent burst overlap
-    outfile: str
-        Output image
-    nrow: int
-        Number of rows
-    ncol: int
-        Number of columns
-    """
-    header = np.zeros(NHEAD, dtype = np.int32) 
-    header[0] = nrow
-    header[1] = ncol
-    # compress the main image
-    main_img = np.memmap(main_img_file, dtype=np.complex64, mode="r",
-            shape=(nrow, ncol))
-    
-    # top
-    for top in range(nrow):
-        if np.any(np.abs(main_img[top,:]) != 0):
-            break
-    if top == nrow-1:
-        return
-    # bottom
-    for bottom in range(nrow-1, -1, -1):
-        if np.any(np.abs(main_img[bottom,:]) != 0):
-            bottom += 1
-            break
-    # left
-    for left in range(0, ncol, BLOCK):
-        sub = np.abs(main_img[:, left:left+BLOCK])
-        if np.any(sub != 0):
-            left += np.where(np.any(sub != 0, axis=0))[0][0]
-            break
-    # right
-    for right in range(ncol, 0, -BLOCK):
-        left_ = np.maximum(0, right - BLOCK)
-        sub = np.abs(main_img[:, left_:right])
-        if np.any(sub != 0):
-            right = left_ + np.where(np.any(sub != 0, axis = 0))[0][-1] + 1
-            break
-    header[2],header[3],header[4],header[5] = left, top, right, bottom
-
-    # compress the secondary image
-    sec_img = np.memmap(sec_img_file, dtype=np.complex64, mode="r",
-            shape=(nrow, ncol))
-    nonzero_rows = np.any(sec_img != 0, axis=1).astype(int)
-    p = np.pad(nonzero_rows, (1,1))       # add 0 at both ends
-    d = np.diff(p)
-    if np.all(d == 0):
-        nstrip = 0
-    else:
-        starts = np.where(d == 1)[0]
-        ends = np.where(d == -1)[0] - 1
-        nstrip = len(starts)
-    header[6] = nstrip
-    for i in range(nstrip):
-        header[7+2*i] = starts[i]
-        header[8+2*i] = ends[i] + 1
-    with open(outfile, 'wb') as f:
-        header.tofile(f)
-        main_img[top:bottom, left:right].tofile(f)
-        for i in range(nstrip):
-            sec_img[starts[i]:ends[i]+1,left:right].tofile(f)
-
 def sentinel_parser(filename):
     filename = os.path.split(filename)[-1]
     words = re.split(r'[_]+|\.',filename)
@@ -413,26 +335,26 @@ def savec(c,filename):
     tosave.tofile(f)
     f.close()
 
-def cpxlooks(imgbg,nlookaz,nlookrg):
+def cpxlooks(imgbg,rowlook,collook):
     naz,nrg = imgbg.shape
-    newnaz = np.floor(naz/nlookaz).astype(int)
-    newnrg = np.floor(nrg/nlookrg).astype(int)
+    newnaz = np.floor(naz/rowlook).astype(int)
+    newnrg = np.floor(nrg/collook).astype(int)
     imgaz = np.zeros((newnaz,nrg),dtype=imgbg.dtype)
     imgsm = np.zeros((newnaz,newnrg),dtype=imgbg.dtype)
-    if nlookaz>1:
+    if rowlook>1:
         for i in np.arange(0,newnaz):
-            imgaz[i,:] = np.sum(imgbg[i*nlookaz:(i+1)*nlookaz,:],axis=0)
+            imgaz[i,:] = np.sum(imgbg[i*rowlook:(i+1)*rowlook,:],axis=0)
     else:
         imgaz = imgbg
-    if nlookrg>1:
+    if collook>1:
         for i in np.arange(0,newnrg):
-            imgsm[:,i] = np.sum(imgaz[:,i*nlookrg:(i+1)*nlookrg],axis=1)
+            imgsm[:,i] = np.sum(imgaz[:,i*collook:(i+1)*collook],axis=1)
     else:
         imgsm = imgaz
-    return imgsm/nlookrg/nlookaz
+    return imgsm/collook/rowlook
 
-def powlooks(imgbg,nlookaz,nlookrg):
-    return np.abs(cpxlooks(np.abs(imgbg)**2,nlookrg,nlookaz))
+def powlooks(imgbg,rowlook,collook):
+    return np.abs(cpxlooks(np.abs(imgbg)**2,rowlook,collook))
 
 def multilooks(imgfile: str, outfile: str, dtype:type,
                nr: int, nc: int, nrlook:int, nclook:int,
@@ -502,15 +424,6 @@ def read_orbit(orbfile:str)->np.ndarray:
             for j in range(7):
                 orb[i,j] = float(words[j])
     return orb
-
-def correlation(slc1,slc2,nlookaz,nlookrg,igram=None):
-    if igram is None:
-        igram = interferogram(slc1,slc2,nlookrg,nlookaz)
-    ampslc1 = np.sqrt(powlooks(slc1,nlookrg,nlookaz))
-    ampslc2 = np.sqrt(powlooks(slc2,nlookrg,nlookaz))
-    amp = np.real(abs(igram))
-    c = np.real(amp/(np.finfo(float).eps+ampslc1*ampslc2))
-    return c,amp,igram
 
 def bwr_cmap(n):
     x = np.array([-1,0,1])
