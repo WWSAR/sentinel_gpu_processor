@@ -8,7 +8,6 @@ import pandas as pd
 import re
 import shutil
 from datetime import datetime
-from functools import cmp_to_key
 from pathlib import Path
 from tqdm import tqdm
 from typing import List, Tuple, Sequence
@@ -141,7 +140,7 @@ def create_slc_pair_list(
     os.makedirs(ifg_dir, exist_ok = True)
     # find all slc images in the parent directory
     burst_list = glob.glob(
-            os.path.join(slc_dir,f'*burst_0*.gslc'))
+            os.path.join(slc_dir,f'*.gslc'))
     date_list = []
     for burst_file in burst_list:
         basename = os.path.basename(burst_file)
