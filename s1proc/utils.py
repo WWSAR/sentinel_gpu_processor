@@ -385,9 +385,6 @@ def move_files(
 
 def check_integrity(
         amp_dir: str,
-        nrow: int,
-        ncol: int,
-        /,
         max_deviation: float = 0.05,
         outfile: str = 'incomplete_date.txt',
         movedata: bool = False,
@@ -403,10 +400,6 @@ def check_integrity(
     ----------
     amp_dir: str
         Amplitude image directory
-    nrow: int
-        Number of rows in each image
-    ncol: int
-        Number of columns in each image
     max_diviation: float
         For a given amplitude image, if its number of nonzero pixels is smaller
         than (1-max_diviation) * the meidan of all images, then it is
@@ -459,6 +452,49 @@ def check_integrity(
         move_files(unw_dir, out_dir, f'*{date}*.unw')
     return bad_dates
  
+def run_check_integrity(
+        max_deviation: float = 0.05,
+        outfile: str = 'incomplete_date.txt',
+        movedata: bool = False,
+        out_dir: str = 'incomplete',
+        config: str = 'config.yaml'):
+    """
+    Check data integrity based on the number of nonzero pixels in amplitude
+    images.
+
+    Parameters
+    ----------
+    max_diviation: float
+        For a given amplitude image, if its number of nonzero pixels is smaller
+        than (1-max_diviation) * the meidan of all images, then it is
+        considered as an incomplete image
+    outfile: str
+        A txt file containing all dates with data loss
+    movedata: bool
+        If True, move all incomplete files to out_dir
+    out_dir: str
+        Output directory
+    config: Path|str
+        Configuration file
+
+    Returns
+    -------
+    bad_dates: List[str]
+        A list of dates with data loss     
+    """
+    from s1proc._config import load_config
+    icfg,pcfg = load_config(config)
+    check_integrity(
+        amp_dir=icfg.amp_path,
+        max_deviation=max_deviation,
+        outfile=outfile,
+        movedata=movedata,
+        slc_dir=icfg.slc_path,
+        ifg_dir=icfg.ifg_path,
+        unw_dir=icfg.unw_path,
+        out_dir=out_dir)
+    return
+
 class IfgList:
     def __init__(self,imglist:Sequence[str])->pd.DataFrame:
         """
