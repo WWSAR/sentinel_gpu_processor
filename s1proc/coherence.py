@@ -5,13 +5,13 @@ import shutil
 from typing import Sequence
 from tqdm import tqdm
 
-from s1proc import geocoordinates
 from s1proc import get_bin_path
-from s1proc.sario import CroppedImage
+from s1proc.sario import CroppedImage, powlooks
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
 def multilook(slc_list: Sequence[str],
+              outfile: str,
               rowlook: int,
               collook: int):
     """
@@ -21,42 +21,41 @@ def multilook(slc_list: Sequence[str],
     ----------
     slc_list: Sequence[str]
         List of subswath images
+    outfile: str
+        Output amplitude image
     rowlook: int
         Number of look in row direction
     collook: int
         Number of look in column direction
     """
-    exe = get_bin_path('multilook_amp')
-    temp_dir = 'temp'
-    os.makedirs(temp_dir, exist_ok = True)
-    amp_list = []
-    for slc_file in slc_list:
-        basename = os.path.basename(slc_file)
-        outfile = os.path.join(temp_dir, basename+'.amp')
-        if os.path.exists(outfile):
-            continue
-        amp_list.append(outfile)
-        command = f'{exe} {slc_file} {outfile} {rowlook} {collook}'
-        os.system(command)
-    nsubswath = len(slc_list)
-    if nsubswath == 1:
-        ci1 = CroppedImage.fromfile(amp_list[0], load_data = True,
-                dtype = np.float32)
-        amp = ci1.data
-    else:
-        ci1 = CroppedImage.from_file(amp_list[0], dtype = np.float32)
-        amp = ci1.load_data()
-        for i in range(1, nsubswath):
-            ci2 = CroppedImage.from_file(amp_list[i], dtype = np.float32)
-            amp2 = ci2.load_data()
-            mask = amp == 0
-            amp[mask] = amp2[mask]
-    shutil.rmtree(temp_dir)
-    return amp
+    mmap_arr = None
+    for i in range(len(slc_list)):
+        ci = CroppedImage.from_file(slc_list[i], load_data = True)
+        left_sm = (ci.left + collook - 1) // collook
+        top_sm = (ci.top + rowlook - 1) // rowlook
+        right_sm = ci.right // collook
+        bottom_sm = ci.bottom // rowlook 
+        if mmap_arr is None:
+            nrow_sm = ci.nrow0 // rowlook
+            ncol_sm = ci.ncol0 // collook
+            mmap_arr = np.memmap(outfile, dtype = np.float32, mode = 'w+',
+                shape = (nrow_sm, ncol_sm))
+        row_start = top_sm * rowlook - ci.top
+        row_end = bottom_sm * rowlook - ci.top
+        col_start = left_sm * collook - ci.left
+        col_end = right_sm * collook - ci.left
+        new_data = np.sqrt(powlooks(
+            ci.data[row_start:row_end,col_start:col_end], rowlook, collook))
+        if i == 0:
+            mmap_arr[top_sm:bottom_sm, left_sm:right_sm] = new_data
+        else:
+            old_data = mmap_arr[top_sm:bottom_sm, left_sm:right_sm]
+            replace_mask = (old_data == 0) & (new_data != 0)
+            old_data[replace_mask] = new_data[replace_mask]
+    mmap_arr.flush()
 
 def multilook_amp(
         slc_dir: str,
-        rscfile: str,
         amp_dir: str = 'amp',
         rowlook: int = 1,
         collook: int = 1):
@@ -67,8 +66,6 @@ def multilook_amp(
     ----------
     slc_dir: str
         Directory of geocoded SLC images
-    rscfile: str
-        rsc file
     amp_dir: str
         Directory to save multilooked amplitude images
     rowlook: int
@@ -77,18 +74,15 @@ def multilook_amp(
         Number of look in column direction
     """
     os.makedirs(amp_dir, exist_ok = True)
-    rsc = geocoordinates.GeoCoordinates(rscfile)
-    rsclook = rsc.take_look(rowlook,collook)
-    rsclook.save_as_rsc(os.path.join(amp_dir,'dem.rsc'))
-
-    slc_list = glob.glob(os.path.join(slc_dir, '*main.geo'))
+    slc_list = glob.glob(os.path.join(slc_dir, '*.gslc'))
     date_list = sorted(np.unique([os.path.basename(s)[0:8] for s in slc_list]))
     nslc = len(date_list)
     for date in tqdm(date_list, desc = 'multilook'):
-        sub_slc_list = glob.glob(os.path.join(slc_dir, f'{date}*main.geo'))
+        sub_slc_list = glob.glob(os.path.join(slc_dir, f'{date}*.gslc'))
         outfile = os.path.join(amp_dir, f'{date}.amp')
-        amp = multilook(sub_slc_list, rowlook, collook)
-        amp.tofile(outfile)
+        if os.path.exists(outfile):
+            continue
+        multilook(sub_slc_list, outfile, rowlook, collook)
 
 def run_multilook_amp(
         config: str = 'config.yaml'):
@@ -104,16 +98,13 @@ def run_multilook_amp(
     icfg,pcfg = load_config(config)
     multilook_amp(
         slc_dir=icfg.slc_path,
-        rscfile=icfg.rsc_file,
         amp_dir=icfg.amp_path,
         rowlook=pcfg.rowlook,
         collook=pcfg.collook)
     return
 
 def coherence(
-        ifg_dir: str,
-        slc_dir: str,
-        rscfile: str,
+        ifg_dir: str = 'igrams',
         amp_dir: str = 'amp',
         rowlook: int = 1,
         collook: int = 1):
@@ -124,10 +115,6 @@ def coherence(
     ----------
     ifg_dir: str
         Directory of interferograms
-    slc_dir: str
-        Directory of geocoded SLC images
-    rscfile: str
-        rsc file
     amp_dir: str
         Directory to save multilooked amplitude images
     rowlook: int
@@ -136,8 +123,6 @@ def coherence(
         Number of look in column direction
     """
     os.makedirs(amp_dir, exist_ok = True)
-    rsc = geocoordinates.GeoCoordinates(rscfile)
-    rsclook = rsc.take_look(rowlook,collook)
     ifg_list = sorted(glob.glob(os.path.join(ifg_dir,'*.int')))
     prev_date1 = None
     for ifg_file in tqdm(ifg_list, desc = 'coherence'):
@@ -168,11 +153,13 @@ def run_coherence(
     """
     from s1proc._config import load_config
     icfg,pcfg = load_config(config)
-    run_multilook_amp(config = config)
+    multilook_amp(
+        slc_dir=icfg.slc_path,
+        amp_dir=icfg.amp_path,
+        rowlook=pcfg.rowlook,
+        collook=pcfg.collook)
     coherence(
         ifg_dir=icfg.ifg_path,
-        slc_dir=icfg.slc_path,
-        rscfile=icfg.multilook_rsc_file,
         amp_dir=icfg.amp_path,
         rowlook=pcfg.rowlook,
         collook=pcfg.collook)

@@ -354,7 +354,10 @@ def cpxlooks(imgbg,rowlook,collook):
     return imgsm/collook/rowlook
 
 def powlooks(imgbg,rowlook,collook):
-    return np.abs(cpxlooks(np.abs(imgbg)**2,rowlook,collook))
+    if rowlook == 1 and collook == 1:
+        return np.abs(imgbg)
+    else:
+        return np.abs(cpxlooks(np.abs(imgbg)**2,rowlook,collook))
 
 def multilooks(imgfile: str, outfile: str, dtype:type,
                nr: int, nc: int, nrlook:int, nclook:int,
