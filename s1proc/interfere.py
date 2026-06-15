@@ -3,6 +3,7 @@ import glob
 import numpy as np
 import os
 from typing import Tuple, Sequence, List
+from matplotlib import pyplot as plt
 
 from s1proc import get_bin_path
 from s1proc import geocoordinates
@@ -98,6 +99,7 @@ def interfere_subswath(
     if len(burst_pairs) > 0:
         subswath = Subswath(burst_ifgs)
         left, top, right, bottom = subswath.bounds()
+        prev_mean_phase_diff = 0.
         for i, burst in enumerate(subswath.bursts):
             if i == 0:
                 ifg_data = burst.load_data(left, top, right, bottom)
@@ -119,6 +121,9 @@ def interfere_subswath(
                     overlap_mask = (old_data != 0) & (new_data != 0)
                 else:
                     overlap_mask = (old_data.real != 0) & (new_data != 0)
+                mean_phase_diff = 0.
+            else:
+                mean_phase_diff = prev_mean_phase_diff
             if overlap_mask is not None and np.any(overlap_mask): 
                 if out_float:
                     phase_diff = np.exp(1j*(-old_data[overlap_mask] + \
@@ -130,6 +135,7 @@ def interfere_subswath(
                 phase_diff = phase_diff * np.exp(-1j*mean_phase_diff)
                 med_phase_diff = np.median(np.angle(phase_diff))
                 mean_phase_diff += med_phase_diff
+            if mean_phase_diff != 0:
                 logger.info(f'mean phase offset: {mean_phase_diff} rad')
                 if out_float:
                     new_data = new_data - mean_phase_diff
@@ -138,6 +144,8 @@ def interfere_subswath(
                 else:
                     new_data = new_data * np.exp(-1j*mean_phase_diff)
             old_data[replace_mask] = new_data[replace_mask]
+            prev_mean_phase_diff = mean_phase_diff
+
         ifg = CroppedImage(subswath.nrow0, subswath.ncol0, left, top, right,
                 bottom, ifg_data)
         for outfile in outfiles:
