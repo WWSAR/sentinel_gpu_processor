@@ -29,7 +29,6 @@ class IoConfig:
 class ProcessingConfig:
     rowlook: int
     collook: int
-    direction: str
     wavelength: float
     hour: int
     flip_sign: bool
