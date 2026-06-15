@@ -18,7 +18,6 @@ io:
 processing:
     rowlook: 10
     collook: 20
-    direction: null
     wavelength: 0.055465763
     hour: null
     flip_sign: False
