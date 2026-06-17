@@ -19,13 +19,13 @@ def main()->int:
     from s1proc.unwrap import run_batch_snaphu
     from s1proc.coherence import run_multilook_amp, run_coherence
     from s1proc.query import query_asf
-    from s1proc.utils import check_integrity
+    from s1proc.utils import run_check_integrity
     from s1proc.tropo import main as tropo_correction
     tyro.extras.subcommand_cli_from_dict(
         {
             "init": initialize_config,
             "query": query_asf,
-            "integrity": check_integrity,
+            "integrity": run_check_integrity,
             "stack": run_stack,
             "slcpairs": run_create_slc_pair_list,
             "interfere": run_interfere,
