@@ -2,12 +2,15 @@ import glob
 import numpy as np
 import os
 import re
+import zarr
 
 from datetime import datetime
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
+from numpy.typing import DTypeLike
+from pathlib import Path
 from tqdm import tqdm
-from typing import List
+from typing import List, Tuple, Dict, Any, Callable, Sequence
 NHEAD = 64
 BLOCK = 512
 
@@ -438,3 +441,37 @@ def bwr_cmap(n):
     return c
 
 bwrcmap = ListedColormap(bwr_cmap(256))
+
+def img2zarr(
+        input_files: Sequence[str],
+        load_function: Callable,
+        output_file: Path|str,
+        nrow: int,
+        ncol: int,
+        dtype: DTypeLike,
+        attrs: Dict[str, Any],
+        chunks: Tuple[int,int,int]|None = None):
+
+    nimg = len(input_files)
+    # create a data set
+    if chunks is None:
+        chunk_nrow = np.minimum(512, nrow)
+        chunk_ncol = np.minimum(512, ncol)
+        chunks = (1, chunk_nrow, chunk_ncol)
+    z = zarr.open(
+            output_file,
+            mode = 'w',
+            shape = (nimg, nrow, ncol),
+            chunks = chunks,
+            dtype = dtype,
+            compressor = zarr.Blosc(cname = 'zstd', clevel = 3))
+
+    # copy attrs
+    for key in attrs:
+        z.attrs[key] = attrs[key]
+
+    for i, input_file in tqdm(enumerate(input_files), total = nimg,
+            desc = 'reading data'):
+        img = load_function(input_file, nrow, ncol)
+        z[i, :, : ] = img
+
