@@ -38,7 +38,7 @@ __global__
 void reproject(const short int *dem,
                const Complex *burstdata,
                const double *deramp_phase,
-               Complex __restrict__ *outdata,
+               Complex* __restrict__ outdata,
                double *tt, double *xx, double *vv, const std::size_t nstatvec,
                const double tmid, double *xmid, double *vmid,
                const double latmax, const double lonmin, const double dlat, 
