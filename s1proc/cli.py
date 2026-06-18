@@ -20,7 +20,7 @@ def main()->int:
     from s1proc.coherence import run_multilook_amp, run_coherence
     from s1proc.query import query_asf
     from s1proc.utils import run_check_integrity
-    from s1proc.tropo import main as tropo_correction
+    from s1proc.phase_correction import phase_correction
     tyro.extras.subcommand_cli_from_dict(
         {
             "init": initialize_config,
@@ -32,7 +32,7 @@ def main()->int:
             "unwrap": run_batch_snaphu,
             "amp": run_multilook_amp,
             "coh": run_coherence,
-            "tropo": tropo_correction
+            "phasecorr": phase_correction
         })
     return os.EX_OK
 
