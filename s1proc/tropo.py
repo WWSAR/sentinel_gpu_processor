@@ -6,6 +6,7 @@ import numpy as np
 import os
 from datetime import datetime
 from matplotlib import pyplot as plt
+from numpy.typing import NDArray
 from pathlib import Path
 from tqdm import tqdm
 from typing import Sequence, Tuple
@@ -15,6 +16,7 @@ from s1proc import geocoordinates
 from s1proc import orbit
 from s1proc import sario
 from s1proc.utils import multilook_dem, los, IfgList
+from s1proc._config import TroposphericParams
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name = __name__, level = 'INFO')
 
@@ -188,35 +190,27 @@ def tropo_proj_era5(
             logger.info(f'Save projected tropospheric delay to {output_file}')
 
 def _era5_correction(
-        input_files: Sequence[str],
-        nrow:int,
-        ncol:int,
-        wvl = 0.055465763,
-        delay_path: Path|str = 'tropo',
-        output_path: Path|str ='tropo_corr',
-        flip_sign: bool = False):
+        input_file: Path|str,
+        output_file: Path|str,
+        nrow: int,
+        ncol: int,
+        tropo_params: TroposphericParams,
+        wvl = 0.055465763):
     """
     Perform tropospheric noise correction
 
     Parameters
     ----------
-    input_files: Sequence[str]
-        List of interferograms (either wrapped or unwrapped)
+    input_file: Path|str
+        Interferogram to be corrected
     nrow: int
         number of rows of the image
     ncol: int
         number of columns of the image
+    tropo_params: TroposphericParams
+        Parameters for tropospheric delay correction
     wvl: float
         Wavelength in meter
-    delay_path: Path|str
-        Direcotry of tropospheric delay files
-    output_path: Path|str
-        Directory of corrected interferograms
-    flip_sign:bool
-        This boolean argument decides how we correct the tropospheric noise
-        from original interferograms. By default (flip_sign=False), the
-        tropospheric noise should be subtracted. If this does not work, change
-        flip_sign to True and try again.
 
     Notes
     -------
@@ -224,36 +218,29 @@ def _era5_correction(
     secondary date and the reference date of the interferogram, performs the
     tropospheric noise correction.
     """
-    os.makedirs(output_path,exist_ok=True)
-
-    logger.info('perform tropospheric noise correction')
-    logger.info(f'output interferograms will be saved to {output_path}')
-    for ifg_file in tqdm(input_files,desc='tropo correction'):
-        basename = os.path.basename(ifg_file)
-        date1 = basename[0:8]
-        date2 = basename[9:17]
-        delay1 = np.fromfile(os.path.join(delay_path,f'{date1}.delay'),
-                             dtype=np.float32)
-        delay2 = np.fromfile(os.path.join(delay_path,f'{date2}.delay'),
-                             dtype=np.float32)
-        aps = (delay1-delay2)/wvl*4*np.pi
-        aps = np.reshape(aps,(nrow,ncol))
-        if basename[-4:] == '.int':
-            ifg = sario.readslc(ifg_file,ncol)
-            if flip_sign:
-                ifgcorr = ifg*np.exp(1j*aps)
-            else:
-                ifgcorr = ifg*np.exp(-1j*aps)
-            output_file = os.path.join(output_path, f'{date1}_{date2}.int')
-            sario.saveslc(ifgcorr,output_file)
+    basename = os.path.basename(input_file)
+    date1 = basename[0:8]
+    date2 = basename[9:17]
+    delay_file1 = os.path.join(tropo_params.delay_path, f'{date1}.delay')
+    delay_file2 = os.path.join(tropo_params.delay_path, f'{date2}.delay')
+    delay1 = np.fromfile(delay_file1, dtype = np.float32)
+    delay2 = np.fromfile(delay_file2, dtype = np.float32)
+    aps = (delay1-delay2)/wvl*4*np.pi
+    aps = np.reshape(aps,(nrow,ncol))
+    if basename[-4:] == '.int':
+        ifg = sario.readslc(input_file,ncol)
+        if tropo_params.flip_sign:
+            ifgcorr = ifg*np.exp(1j*aps)
         else:
-            ifg = sario.readc(ifg_file,ncol)
-            if flip_sign:
-                ifg.imag = ifg.imag+aps
-            else:
-                ifg.imag = ifg.imag-aps
-            output_file = os.path.join(output_path, f'{date1}_{date2}.unw')
-            sario.savec(ifg,output_file)
+            ifgcorr = ifg*np.exp(-1j*aps)
+        sario.saveslc(ifgcorr, output_file)
+    else:
+        ifg = sario.readc(input_file,ncol)
+        if tropo_params.flip_sign:
+            ifg = ifg.real + 1j*(ifg.imag + aps)
+        else:
+            ifg = ifg.real + 1j*(ifg.imag - aps)
+        sario.savec(ifgcorr, output_file)
 
 def tropo_proj(
         dem_file: Path|str,
@@ -294,42 +281,10 @@ def tropo_proj(
     grb_files = glob.glob(os.path.join(grb_path,'*.grb'))
     tropo_proj_era5(grb_files,lat,lon,dem,inc,tropo_delay_path,verbose=verbose)
 
-def era5_correction(
-        ifg_list: Sequence[str],
-        rsc_file: Path|str,
-        /,
-        delay_path: Path|str = 'tropo',
-        output_path: Path|str = 'tropo_corr',
-        flip_sign: bool = False):
-    """
-    Carry out tropospheric noise correction
-
-    Parameters
-    ----------
-    ifg_list: Sequence[str]
-        Input list of interferograms
-    rsc_file: Path|str
-        rsc file
-    delay_path: Path|str
-        Direcotry of tropospheric delay files
-    output_path: Path|str
-        Directory of corrected interferograms
-    flip_sign: bool
-        This boolean argument decides how we correct the tropospheric noise
-        from original interferograms. By default (flip_sign=False), the
-        tropospheric noise should be subtracted. If this does not work, change
-        flip_sign to True and try again.
-    """
-    rsc = geocoordinates.GeoCoordinates(rsc_file)
-    nrow, ncol = rsc.nlat, rsc.nlon
-    # tropospheric noise correction
-    _era5_correction(ifg_list, nrow, ncol, delay_path = delay_path,
-            output_path = output_path, flip_sign = flip_sign)
-
-def main(ifg_path: str,
-         /,
-         config: str = 'config.yaml',
-         verbose: bool = False):
+def tropo_preproc(
+        ifg_path: str|None = None,
+        config: str = 'config.yaml',
+        verbose: bool = False):
     """
     Run tropospheric noise correction
     
@@ -345,10 +300,13 @@ def main(ifg_path: str,
     if verbose:
         set_logging_level(logger, 'DEBUG')
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
+    pcfg = cfg.proc
+    tcfg = cfg.tropo
 
     # determine the acquisition hour
-    if pcfg.hour is None:
+    if tcfg.parameters.hour is None:
         zip_list_file = os.path.join(icfg.data_path,'zip_list')
         zip_file = None
         if not os.path.exists(zip_list_file):
@@ -370,15 +328,19 @@ def main(ifg_path: str,
             start_time = datetime.strptime(sent['start_time'],"%Y%m%dT%H%M%S")
             sdate = datetime.strftime(start_time,"%Y%m%d")
             hour = start_time.hour
+    else:
+        hour = tcfg.parameters.hour
     logger.debug(f'Acquisition hour is set to {hour}')
 
     # parse input data
+    if ifg_path is None:
+        ifg_path = icfg.ifg_path
     raw_ifg_list = get_input_files(ifg_path)
     ifg_list = IfgList(raw_ifg_list)
     date_list = ifg_list.get_date_list()
 
     # download files for tropospheric noise correction
-    tropo_delay_path = icfg.tropo_delay_path
+    tropo_delay_path = tcfg.parameters.delay_path
     grb_path = os.path.join(tropo_delay_path, 'grb')
     os.makedirs(grb_path, exist_ok = True)
     logger.info('download files for tropspheric noise correction')
@@ -398,10 +360,4 @@ def main(ifg_path: str,
     if not os.path.exists(look_angle_file):
         los(dem_file, rsc_file, icfg.proc_path, losvec_file, look_angle_file)
     tropo_proj(dem_file, rsc_file, look_angle_file, tropo_delay_path, verbose)
-
-    # tropospheric phase correction
-    era5_correction(raw_ifg_list, rsc_file, tropo_delay_path,
-            icfg.tropo_corr_path, pcfg.flip_sign)
      
-    return
-

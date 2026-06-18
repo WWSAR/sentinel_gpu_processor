@@ -1,23 +1,51 @@
+# I/O paths
 io:
-    data_path: data
-    eof_path: eof
-    proc_path: proc
-    slc_path: slc
-    ifg_path: igrams
-    amp_path: amp
-    unw_path: unw
-    dem_file: elevation.dem
-    rsc_file: elevation.dem.rsc
-    img_pair_file: subswath_list
-    geometry_path: geometry
-    tropo_delay_path: tropo_delay
-    tropo_corr_path: tropo_corrected
-    multilook_dem_file: dem/multilook.dem
-    multilook_rsc_file: dem/multilook.rsc
+    data_path: data                       # zip files
+    eof_path: eof                         # eof files
+    proc_path: proc                       # intermediate outpus
+    slc_path: slc                         # geocoded SLC
+    ifg_path: igrams                      # raw wrapped interferograms
+    amp_path: amp                         # multilooked amplitude 
+    unw_path: unw                         # unwrapped interferograms
+    dem_file: elevation.dem               # DEM grid
+    rsc_file: elevation.dem.rsc           # rsc description file
+    img_pair_file: subswath_list          # list of interferograms to process
+    geometry_path: geometry               # geometry-related files (los/inc)
+    ifg_corr_path: ifg_corrected          # corrected wrapped interferograms
+    unw_corrected_path: unw_corrected     # corrected unwrapped interferograms
+    multilook_dem_file: dem/multilook.dem # multilooked DEM
+    multilook_rsc_file: dem/multilook.rsc # multilooked rsc file
 
-processing:
+# SLC and interferogram generation parameters
+proc:
     rowlook: 10
     collook: 20
     wavelength: 0.055465763
-    hour: null
-    flip_sign: False
+    min_tbl: int = 6       # minimum temporal baseline
+    max_tbl: int = 360     # maximum temporal baseline
+    min_sbl: int = 0       # minimum spatial baseline
+    max_sbl: int = 300     # maximum spatial baseline
+
+# Wrapped interferogram processing
+# Interferogram filtering, for the moment, only Goldstein filter is implemented
+filter:
+    enable: false
+    method: "goldstein"
+    parameters:
+        window_size: 32
+        goldstein_alpha: 0.5
+
+# Tropospheric delay correction, for the moment, era5 is the only allowed option
+tropo:
+    enable: true
+    method: "era5"
+    parameters:
+        delay_path: tropo_delay # projected tropospheric delay
+        hour: null
+        flip_sign: false
+
+# Phase ramp removal
+detrend:
+    enable: false
+    type: "plane"       # plane or quadratic
+

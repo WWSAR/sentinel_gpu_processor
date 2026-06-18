@@ -101,10 +101,10 @@ def estimatebaseline(orbfile1,orbfile2,demfile,demrscfile):
     return bperp
 
 def create_slc_pair_list(
-        min_tbl: int = 0,
-        max_tbl: int = 30000,
+        min_tbl: int = 6,
+        max_tbl: int = 360,
         min_sbl: int = 0,
-        max_sbl: int = 10000,
+        max_sbl: int = 300,
         slc_dir: str = 'slc',
         proc_dir: str = 'proc',
         ifg_dir: str = 'igrams',
@@ -172,37 +172,30 @@ def create_slc_pair_list(
     f.close()
 
 def run_create_slc_pair_list(
-        min_tbl: int = 0,
-        max_tbl: int = 30000,
-        min_sbl: int = 0,
-        max_sbl: int = 10000,
         config: str = 'config.yaml'):
     """
     Create a list of SLC pairs for interferogram generation
 
     Parameters
     ----------
-    min_tbl: int
-        minimum temporal baseline threshold
-    max_tbl: int
-        maximum temporal baseline threshold
-    min_sbl: int
-        minimum temporal baseline threshold
-    max_sbl: int
-        maximum temporal baseline threshold
+    config: str
+        Configuration file
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
-    create_slc_pair_list(min_tbl=min_tbl,
-            max_tbl=max_tbl,
-            min_sbl=min_sbl,
-            max_sbl=max_sbl,
-            slc_dir=icfg.slc_path,
-            proc_dir=icfg.proc_path,
-            ifg_dir=icfg.ifg_path,
-            img_pair_file=icfg.img_pair_file,
-            demfile=icfg.dem_file,
-            rscfile=icfg.rsc_file)
+    cfg = load_config(config)
+    icfg = cfg.io
+    pcfg = cfg.proc
+    create_slc_pair_list(
+            min_tbl = pcfg.min_tbl,
+            max_tbl = pcfg.max_tbl,
+            min_sbl = pcfg.min_sbl,
+            max_sbl = pcfg.max_sbl,
+            slc_dir = icfg.slc_path,
+            proc_dir = icfg.proc_path,
+            ifg_dir = icfg.ifg_path,
+            img_pair_file = icfg.img_pair_file,
+            demfile = icfg.dem_file,
+            rscfile = icfg.rsc_file)
     return
 
 def mid_orbit(
@@ -483,16 +476,17 @@ def run_check_integrity(
         A list of dates with data loss     
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
     check_integrity(
-        amp_dir=icfg.amp_path,
-        max_deviation=max_deviation,
-        outfile=outfile,
-        movedata=movedata,
-        slc_dir=icfg.slc_path,
-        ifg_dir=icfg.ifg_path,
-        unw_dir=icfg.unw_path,
-        out_dir=out_dir)
+        amp_dir = icfg.amp_path,
+        max_deviation = max_deviation,
+        outfile = outfile,
+        movedata = movedata,
+        slc_dir = icfg.slc_path,
+        ifg_dir = icfg.ifg_path,
+        unw_dir = icfg.unw_path,
+        out_dir = out_dir)
     return
 
 class IfgList:

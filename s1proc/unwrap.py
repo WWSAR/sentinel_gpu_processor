@@ -1,8 +1,10 @@
+import glob
+import multiprocessing
+import numpy as np
 import os
 import subprocess
-import multiprocessing
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import List, Dict, Any, Callable
 
 from s1proc._log import setup_logger
@@ -246,7 +248,8 @@ def run_batch_snaphu(
         memory saturation (default: auto)
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
     batch_snaphu(
             input_folder=icfg.ifg_path,
             output_folder=icfg.unw_path,
@@ -260,3 +263,68 @@ def run_batch_snaphu(
             cost_mode=cost_mode,
             total_cpus=total_cpus)
     return
+
+def get_input_files(input_path:str) -> List[str]:
+    """
+    Get interferograms to be corrected
+
+    Parameters
+    ----------
+    input_path: str
+        Input path
+    
+    Returns
+    -------
+    ifg_list: List[str]
+        A list of interferograms to prcoess
+    """
+    p = Path(input_path)
+    if p.is_file():
+        return [input_path]
+    elif p.is_dir():
+        ifg_list = glob.glob(os.path.join(input_path,'*.unw'))
+        if len(ifg_list) == 0:
+            logger.warning('Cannot find any interferogram from the input ' +
+                    f'directory {input_path}.')
+    else:
+        ifg_list = glob.glob(input_path)
+        if len(ifg_list) == 0:
+            logger.warning('Cannot find any interferogram from the input ' +
+                    f'pattern {input_path}.')
+    return ifg_list
+
+def load_unwrapped_interferograms(
+        ifg_path: str|Path|None = None,
+        config: str = 'config.yaml'):
+    from s1proc._config import load_config
+    from s1proc.sario import img2zarr, readc
+    from s1proc.utils import IfgList
+    cfg = load_config(config)
+    icfg = cfg.io
+
+    if ifg_path is None:
+        ifg_path = icfg.unw_path
+
+    ifg_files = get_input_files(ifg_path)  
+    nifg = len(ifg_files)
+    logger.debug(f'Number of interferograms: {nifg}')
+    
+    rsc = GeoCoordinates(icfg.multilook_rsc_file)
+    nrow, ncol = rsc.nlat, rsc.nlon
+    logger.debug(f'Image shape: {nrow} x {ncol}')
+
+    ifg_list = IfgList(ifg_files)
+    
+    attrs = {
+        "name":"unwrapped interferograms",
+        "date1":ifg_list.df['date1'].tolist(),
+        "date2":ifg_list.df['date2'].tolist(),
+        "tempbl":ifg_list.df['tempbl'].tolist()}
+    
+    def load_function(input_file:str, nrow: int, ncol:int):
+        img = readc(input_file, ncol)
+        return img.imag
+
+    img2zarr(ifg_files, load_function, 'unwrapped_interferograms.zarr',
+            nrow, ncol, np.float32, attrs)
+    

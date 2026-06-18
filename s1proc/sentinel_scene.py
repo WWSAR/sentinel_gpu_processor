@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import zipfile
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, List
 
 from s1proc import sql_mod, get_bin_path
 from s1proc._log import setup_logger, set_logging_level
@@ -167,7 +167,7 @@ def sentinel_scene(
         rm_zipfile: bool = False,
         rm_folder: bool = False,
         hmin = 0,
-        hmax = 1e4):
+        hmax = 1e4) -> List[str]:
     """
     Process one sentinel scene files to coregistered geocoded slc
 
@@ -199,6 +199,11 @@ def sentinel_scene(
         Minimum elevation of the study area
     hmax: int
         Maximum elevation of the study area
+
+    Returns
+    -------
+    slc_files: List[str]
+        Output SLC list
     """
     logger.info(f'Processing: {zip_file} to a geocoded SLC')
     logger.debug(f'input orbit file: {orbfile}')
@@ -326,6 +331,7 @@ def sentinel_scene(
             subprocess.check_call(command, shell=True)
 
     # Now, process each subswath to a geocoded slc
+    slc_files = []
     for ifile, fn in enumerate(swathfiles):
         bounds = bounds_list[ifile]
         if bounds is None:
@@ -367,10 +373,10 @@ def sentinel_scene(
             subprocess.check_call(command, shell=True)
 
         # and geocode/reramp the slave
-        main_slc_file = os.path.join(slc_dir,
+        slc_file = os.path.join(slc_dir,
                 f'{acq_date}_{mission_id}_{unique_id}_iw{subswath}')
         command = f'{geo2rdr_reramp} {slavedb} {deramp_phase_file} ' + \
-                   f'{main_slc_file}'
+                   f'{slc_file}'
         logger.info(command)
         subprocess.check_call(command, shell=True)
         if os.path.exists(origslcfile):
@@ -378,7 +384,7 @@ def sentinel_scene(
         if rm_rawslc:
             os.remove(derampedslcfile)
             os.remove(deramp_phase_file)
-        logger.info('Swath processed to common coordinates and coregistered.')
+        slc_files.extend(glob.glob(slc_file+'*.gslc'))
     # Clean up zip files to lessen disk space requirements
     if rm_zipfile:
         os.remove(zip_file)
@@ -387,4 +393,5 @@ def sentinel_scene(
         shutil.rmtree(data_dir)
 
     logger.info('Loop over swaths complete.')
+    return slc_files
 

@@ -95,7 +95,9 @@ def run_multilook_amp(
         Configuration file
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
+    pcfg = cfg.proc
     multilook_amp(
         slc_dir=icfg.slc_path,
         amp_dir=icfg.amp_path,
@@ -152,7 +154,9 @@ def run_coherence(
         Configuration file
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
+    pcfg = cfg.proc
     multilook_amp(
         slc_dir=icfg.slc_path,
         amp_dir=icfg.amp_path,

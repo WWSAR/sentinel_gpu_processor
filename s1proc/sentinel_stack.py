@@ -1,14 +1,29 @@
 #!/usr/bin/env python4
 import glob
+import json
 import numpy as np
 import os
 from datetime import datetime
+from pathlib import Path
 from typing import Literal, Sequence
 
 from s1proc._log import setup_logger, set_logging_level
 from s1proc.sario import sentinel_acq_time, sentinel_parser
 from s1proc.sentinel_scene import sentinel_scene 
 logger = setup_logger(name = __name__, level = 'INFO')
+
+def is_processed(input_zip_path, status_dir):
+    # Sentinel-1 zip name is unique
+    input_name = Path(input_zip_path).stem
+    status_file = Path(status_dir) / f"{input_name}.done"
+    return status_file.exists()
+
+def mark_processed(input_zip_path, status_dir, output_files_list):
+    input_name = Path(input_zip_path).stem
+    status_file = Path(status_dir) / f"{input_name}.done"
+    # Optionally write metadata like outputs, timestamp
+    with open(status_file, 'w') as f:
+        json.dump({"processed_at": time.time(), "outputs": output_files_list}, f)
 
 def parse_orbitfilename(orbitfilelist):
     start_date = []
@@ -89,6 +104,8 @@ def stack(
     # loop over directories and process each with sentinel_scene
     # sentinel_scene needs zip_file and precise orbit if available
     for ifile,zip_file in enumerate(zips):
+        if is_processed(zip_file, proc_dir) and not reprocess:
+            continue
         #  which precise orbit file for this scene?
         logger.info(f'Processing {zip_file}')
         sent = sentinel_parser(zip_file)
@@ -109,9 +126,10 @@ def stack(
         hmax = dem.max() + 100
         logger.info(f'Minimum elevation: {hmin} m, Maximum elevation: {hmax} m')
         del dem
-        sentinel_scene(zip_file, demfile, rscfile, orbitfilename, polarization,
-                subswath_list, proc_dir, slc_dir, rm_rawslc, rm_zipfile,
-                rm_folder, hmin, hmax)
+        slc_files = sentinel_scene(zip_file, demfile, rscfile, orbitfilename,
+                polarization, subswath_list, proc_dir, slc_dir, rm_rawslc,
+                rm_zipfile, rm_folder, hmin, hmax)
+        mark_processed(zip_file, proc_dir, slc_files)
     logger.info('Loop over scenes complete.')
 
 def run_stack(
@@ -146,7 +164,8 @@ def run_stack(
         Configuration file
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
     stack(data_dir=icfg.data_path,
             eof_dir=icfg.eof_path,
             proc_dir=icfg.proc_path,

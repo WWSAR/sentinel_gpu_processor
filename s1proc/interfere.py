@@ -335,7 +335,9 @@ def run_interfere(
         Set the logging level to debug
     """
     from s1proc._config import load_config
-    icfg,pcfg = load_config(config)
+    cfg = load_config(config)
+    icfg = cfg.io
+    pcfg = cfg.proc
     interfere(
         img_pair_file = icfg.img_pair_file,
         slc_path = icfg.slc_path,
