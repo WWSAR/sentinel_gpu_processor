@@ -1,6 +1,6 @@
 context:
   name: "s1proc"
-  version: "0.1.2"
+  version: "0.1.0"
 
 package:
   name: ${{ name }}
@@ -53,8 +53,11 @@ requirements:
     - tyro >=0.9
     - tqdm >=4
     - pyaps3 >=0.3.7
+    - sentineleof >=0.12.0
+    - sardem >=0.13.0
+    - zarr >=2.18.3
+    - dacite >=1.9.2
 
 tests:
   - script:
-      # 这里的测试命令在执行时，由于下面指定了编译器，rattler-build 会自动拉起编译器环境
       - python -c "import s1proc; print('import ok')"

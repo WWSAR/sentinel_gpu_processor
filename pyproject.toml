@@ -19,7 +19,11 @@ dependencies = [
     "requests>=2.31",
     "tyro>=0.9",
     "tqdm>=4",
-    "pyaps3>=0.3.7"
+    "pyaps3>=0.3.7",
+    "sentineleof>=0.12.0",
+    "sardem>=0.13.0",
+    "zarr>=2.18.3",
+    "dacite>=1.9.2"
 ]
 
 [tool.setuptools.packages.find]
