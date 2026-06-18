@@ -55,26 +55,29 @@ target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein
-        RUNTIME_DEPENDENCY_SET deps
         RUNTIME DESTINATION bin
 )
+#install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein
+#        RUNTIME_DEPENDENCY_SET deps
+#        RUNTIME DESTINATION bin
+#)
 
-if(WIN32)
-    install(RUNTIME_DEPENDENCY_SET deps
-        DESTINATION bin
-        DIRECTORIES 
-            "$ENV{CONDA_PREFIX}/bin"
-            "$ENV{CONDA_PREFIX}/Library/bin"
-            "${CUDAToolkit_BIN_DIR}"
-        PRE_EXCLUDE_REGEXES 
-            ".*kernel32.*"
-            ".*wpaxholder.*"
-            ".*[Aa]zure.*"
-            ".*[Hh]vsi.*"
-            ".*[Pp]dm.*"
-            "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
-            "^[Aa][Pp][Ii]-[Mm][Ss]-.*"
-            "^[Ee][Mm][Ss][Mm][Pp][Cc][Mm].*"  
-            "^[Ee][Cc][Mm][Aa][Pp][Ii].*"
-    )
-endif()
+#if(WIN32)
+#    install(RUNTIME_DEPENDENCY_SET deps
+#        DESTINATION bin
+#        DIRECTORIES 
+#            "$ENV{CONDA_PREFIX}/bin"
+#            "$ENV{CONDA_PREFIX}/Library/bin"
+#            "${CUDAToolkit_BIN_DIR}"
+#        PRE_EXCLUDE_REGEXES 
+#            ".*kernel32.*"
+#            ".*wpaxholder.*"
+#            ".*[Aa]zure.*"
+#            ".*[Hh]vsi.*"
+#            ".*[Pp]dm.*"
+#            "^[Ee][Xx][Tt]-[Mm][Ss]-.*"
+#            "^[Aa][Pp][Ii]-[Mm][Ss]-.*"
+#            "^[Ee][Mm][Ss][Mm][Pp][Cc][Mm].*"  
+#            "^[Ee][Cc][Mm][Aa][Pp][Ii].*"
+#    )
+#endif()
