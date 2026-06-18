@@ -28,6 +28,7 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+          toolset: 14.40
 
       - name: Add NVIDIA Repository (Linux only)
         if: matrix.os == 'ubuntu-latest'
