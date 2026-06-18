@@ -43,8 +43,6 @@ requirements:
     - sqlite
     - libcufft
     - libtiff
-    - libstdcxx-ng
-    - libgcc-ng
     - numpy >=1.23
     - pandas >=2.0
     - numba >=0.58
