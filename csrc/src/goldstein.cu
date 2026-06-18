@@ -230,10 +230,8 @@ __global__ void batched_overlap_add_kernel(
     int patch_y = blockIdx.y;
     
     // Each thread processes one pixel in the patch
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
 
-    if (tx >= n_win || ty >= n_win) return;
+    if (threadIdx.x >= n_win || threadIdx.y >= n_win) return;
 
     int patch_idx = patch_y * n_win_j + patch_x;
     
@@ -245,24 +243,28 @@ __global__ void batched_overlap_add_kernel(
     if (i1 + n_win > nrow) i1 = nrow - n_win;
     if (j1 + n_win > ncol) j1 = ncol - n_win;
 
-    int target_y = i1 + ty;
-    int target_x = j1 + tx;
+    for (int tx = threadIdx.x; tx < n_win; tx += 16){
+        for (int ty = threadIdx.y; ty < n_win; ty += 16){
+            int target_y = i1 + ty;
+            int target_x = j1 + tx;
 
-    float wx = (tx < n_win / 2) ? tx : (n_win - 1 - tx);
-    float wy = (ty < n_win / 2) ? ty : (n_win - 1 - ty);
-    float weight = wx + wy; 
+            float wx = (tx < n_win / 2) ? tx : (n_win - 1 - tx);
+            float wy = (ty < n_win / 2) ? ty : (n_win - 1 - ty);
+            float weight = wx + wy; 
 
-    int src_offset = patch_idx * n_win * n_win + ty * n_win + tx;
-    cufftComplex val = d_filtered_patches[src_offset];
+            int src_offset = patch_idx * n_win * n_win + ty * n_win + tx;
+            cufftComplex val = d_filtered_patches[src_offset];
 
-    // Add the weight to the corresponding position in the output image
-    int dest_offset = target_y * ncol + target_x;
-    
-    float norm = 1.0f / (n_win * n_win);
-    
-    atomicAdd(&d_out_ph[dest_offset].x, val.x * weight * norm);
-    atomicAdd(&d_out_ph[dest_offset].y, val.y * weight * norm);
-    atomicAdd(&d_out_weight[dest_offset], weight);
+            // Add the weight to the corresponding position in the output image
+            int dest_offset = target_y * ncol + target_x;
+            
+            float norm = 1.0f / (n_win * n_win);
+            
+            atomicAdd(&d_out_ph[dest_offset].x, val.x * weight * norm);
+            atomicAdd(&d_out_ph[dest_offset].y, val.y * weight * norm);
+            atomicAdd(&d_out_weight[dest_offset], weight);
+        }
+    }
 }
 
 /**
@@ -292,10 +294,8 @@ __global__ void extract_patches_kernel(
     int n_win, int n_inc, int n_win_j, int nrow, int ncol) {
     int patch_x = blockIdx.x;
     int patch_y = blockIdx.y;
-    int tx = threadIdx.x;
-    int ty = threadIdx.y;
 
-    if (tx >= n_win || ty >= n_win) return;
+    if (threadIdx.x >= n_win || threadIdx.y >= n_win) return;
 
     int i1 = patch_y * n_inc;
     int j1 = patch_x * n_inc;
@@ -303,10 +303,13 @@ __global__ void extract_patches_kernel(
     if (j1 + n_win > ncol) j1 = ncol - n_win;
 
     int patch_idx = patch_y * n_win_j + patch_x;
-    int src_idx = (i1 + ty) * ncol + (j1 + tx);
-    int dst_idx = patch_idx * n_win * n_win + ty * n_win + tx;
-
-    d_patches[dst_idx] = d_in[src_idx];
+    for (int tx = threadIdx.x; tx < n_win; tx += 16){
+        for (int ty = threadIdx.y; ty < n_win; ty += 16){
+            int src_idx = (i1 + ty) * ncol + (j1 + tx);
+            int dst_idx = patch_idx * n_win * n_win + ty * n_win + tx;
+            d_patches[dst_idx] = d_in[src_idx];
+        }
+    }
 }
 
 /**
