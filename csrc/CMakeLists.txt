@@ -56,7 +56,7 @@ target_include_directories(deramp_burst PRIVATE "include")
 target_include_directories(geo2rdr_reramp PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
-target_include_directories(goldstein PRIVATE "include")
+target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIRS})
 
 # Link libraries with platform-specific handling
 target_link_libraries(readgeotiff PRIVATE TIFF::TIFF)
