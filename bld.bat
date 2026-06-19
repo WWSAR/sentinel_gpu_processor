@@ -1,6 +1,8 @@
 @echo off
+set
 
 echo "=== Check Local Compilers ==="
+echo %BUILD_PREFIX%
 where cl
 where nvcc
 
