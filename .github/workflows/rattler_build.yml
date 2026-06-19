@@ -15,7 +15,7 @@ jobs:
       fail-fast: false
       matrix:
         # Matrix testing: Validate both Windows 64-bit and Linux 64-bit simultaneously
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-20.04]
 
     steps:
       # 1. Pull the source code from the repository
@@ -31,14 +31,14 @@ jobs:
           toolset: 14.40
 
       - name: Add NVIDIA Repository (Linux only)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-20.04'
         run: |
-          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+          wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2004/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
 
       - name: Install CUDA (Linux)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-20.04'
         uses: Jimver/cuda-toolkit@v0.2.22
         with:
           cuda: '12.4.0'
