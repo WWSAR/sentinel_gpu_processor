@@ -17,14 +17,14 @@ cmake --build build --target install
 if errorlevel 1 exit 1
 
 :: ==========================================
-:: 2. Install the package using pip
+:: 2. Copy external dependencies to the output directory
 :: ==========================================
-"%PYTHON%" -m pip install . --no-deps --ignore-installed --no-cache-dir -vv
+echo "=== Copying External Dependencies ==="
+copy "%SRC_DIR%\extern\*" "%SRC_DIR%\s1proc\bin\" /Y
 if errorlevel 1 exit 1
 
 :: ==========================================
-:: 3. Copy external dependencies to the output directory
+:: 3. Install the package using pip
 :: ==========================================
-echo "=== Copying External Dependencies ==="
-copy "%SRC_DIR%\extern\*" "%PREFIX%\s1proc\bin\" /Y
+"%PYTHON%" -m pip install . --no-deps --ignore-installed --no-cache-dir -vv
 if errorlevel 1 exit 1

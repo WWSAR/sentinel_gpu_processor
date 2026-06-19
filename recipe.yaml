@@ -11,6 +11,8 @@ source:
 
 build:
   number: 0
+  c_stdlib: sysroot
+  c_stdlib_version: "2.17"   # [linux]
   script:
     - if: win
       then:
