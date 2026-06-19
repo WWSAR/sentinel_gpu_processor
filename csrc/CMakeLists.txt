@@ -19,6 +19,24 @@ find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
 #find_package(CUDAToolkit REQUIRED)
 find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
+
+message(STATUS "🔍 Checking if cufft.h exists in Conda build prefix...")
+
+# 1. 探测绝对路径
+set(EXPECTED_CUFFT_H "$ENV{BUILD_PREFIX}/include/cufft.h")
+if(EXISTS "${EXPECTED_CUFFT_H}")
+    message(STATUS "✅ Found cufft.h via EXACT PATH: ${EXPECTED_CUFFT_H}")
+else()
+    message(WARNING "❌ CRITICAL: cufft.h DOES NOT exist at ${EXPECTED_CUFFT_H} !!!")
+endif()
+
+# 2. 扫描 include 目录下所有的 .h 文件并印出来
+file(GLOB_RECURSE FOUND_HEADERS RELATIVE "$ENV{BUILD_PREFIX}/include" "$ENV{BUILD_PREFIX}/include/*.h")
+message(STATUS "📁 List of all headers found in Conda include directory:")
+foreach(header ${FOUND_HEADERS})
+    message(STATUS "   -> [Header File]: ${header}")
+endforeach()
+
 if(NOT TARGET SQLite::SQLite3 AND TARGET SQLite3::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
