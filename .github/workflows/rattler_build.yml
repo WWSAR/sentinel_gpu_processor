@@ -16,6 +16,7 @@ jobs:
       matrix:
         # Matrix testing: Validate both Windows 64-bit and Linux 64-bit simultaneously
         os: [windows-latest, ubuntu-latest]
+        cuda_version: ["11.8", "12.2", "12.4"]
 
     steps:
       # 1. Pull the source code from the repository
