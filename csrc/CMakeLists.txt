@@ -19,6 +19,16 @@ find_package(SQLite3 REQUIRED)
 #find_package(CUDAToolkit REQUIRED)
 find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
 
+if(DEFINED ENV{BUILD_PREFIX})
+    list(APPEND CUDAToolkit_INCLUDE_DIRS "$ENV{BUILD_PREFIX}/Library/include")
+endif()
+if(DEFINED ENV{CONDA_PREFIX})
+    list(APPEND CUDAToolkit_INCLUDE_DIRS "$ENV{CONDA_PREFIX}/Library/include")
+endif()
+
+# 强迫 CMake 将 CUDA 的外部包含路径一律转化为 nvcc 认得的 -I，而不是 -isystem
+set(CMAKE_INCLUDE_SYSTEM_FLAG_CUDA "-I")
+
 if(NOT TARGET SQLite::SQLite3 AND TARGET SQLite3::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
