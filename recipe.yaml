@@ -28,17 +28,20 @@ requirements:
     - ${{ compiler('cxx') }}
     - cmake
     - ninja
+    - cuda-cudart-dev
+    - libcufft-dev
+    - cuda-nvcc >=11.0
   host:
     - python
     - pip
     - setuptools
     - libtiff
     - sqlite
-    - cuda-version ==12.4
-    - cuda-cudart-dev
+    - cudatoolkit >=11.0   # [win]  # Windows 构建时启用
   run:
     - python
     - cuda-cudart
+    - cudatoolkit >=11.0   # [win]  # Windows 构建时启用
     - sqlite
     - libcufft
     - libtiff
