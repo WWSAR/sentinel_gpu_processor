@@ -1,6 +1,6 @@
 @echo off
 
-echo "=== 检查本地物理编译器 ==="
+echo "=== Check Local Compilers ==="
 where cl
 where nvcc
 
@@ -20,4 +20,11 @@ if errorlevel 1 exit 1
 :: 2. Install the package using pip
 :: ==========================================
 "%PYTHON%" -m pip install . --no-deps --ignore-installed --no-cache-dir -vv
+if errorlevel 1 exit 1
+
+:: ==========================================
+:: 3. Copy external dependencies to the output directory
+:: ==========================================
+echo "=== Copying External Dependencies ==="
+copy "%SRC_DIR%\extern\*" "%PREFIX%\s1proc\bin\" /Y
 if errorlevel 1 exit 1
