@@ -1,31 +1,30 @@
 cmake_minimum_required(VERSION 3.21)
+
+if(UNIX)
+    add_subdirectory(snaphu)
+endif()
+
 project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
+
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 
 # Automatically set architectures based on specific flags
 set(CMAKE_CUDA_ARCHITECTURES 60 70 75 80 89 90)
-
-#if(DEFINED ENV{CONDA_PREFIX})
-#    include_directories("$ENV{CONDA_PREFIX}/include")
-#    link_directories("$ENV{CONDA_PREFIX}/lib")
-#endif()
 
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
 find_package(CUDAToolkit REQUIRED)
-#find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
+if(NOT TARGET SQLite::SQLite3 AND TARGET SQLite3::SQLite3)
+    add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
+endif()
 
-#message(STATUS "PREFIX=$ENV{PREFIX}")
-#message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
-#find_path(
-#    CUFFT_INCLUDE_DIR
-#    cufft.h
-#)
+if(NOT TARGET SQLite3::SQLite3 AND TARGET SQLite::SQLite3)
+    add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+endif()
 
-message(STATUS "CUDAToolkit_INCLUDE_DIRS=${CUDAToolkit_INCLUDE_DIRS}")
-message(STATUS "CUDAToolkit_BIN_DIR=${CUDAToolkit_BIN_DIR}")
 # Add source files
 
 add_executable(readgeotiff src/readgeotiff.cpp)
