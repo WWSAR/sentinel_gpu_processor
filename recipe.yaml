@@ -11,7 +11,6 @@ source:
 
 build:
   number: 0
-  string: cuda${{ cuda_variant }}_${{ hash }}_${{ build_number }}
   script:
     - if: win
       then:
@@ -29,10 +28,9 @@ requirements:
     - ${{ compiler('cxx') }}
     - cmake
     - ninja
-    - cuda-version ==${{ cuda_variant }}
-    - ${{ "cuda-toolkit ==" ~ cuda_variant if (cuda_variant == "11.8" or cuda_variant == "12.2") else "cuda-cudart-dev ==" ~ cuda_variant }}
-    - ${{ "" if cuda_variant == "11.8" else "libcufft-dev >=11.0,<=11.3" }}
-    - ${{ "" if cuda_variant == "11.8" else "cuda-nvcc >=12,<13" }}
+    - cuda-nvcc ==12.4.*
+    - cuda-cudart-dev ==12.4.*
+    - libcufft-dev >=11.0,<12
   host:
     - python
     - pip
@@ -41,8 +39,8 @@ requirements:
     - sqlite
   run:
     - python
-    - ${{ "__cuda >=" ~ cuda_variant if (cuda_variant == "11.8" or cuda_variant == "12.2") else "cuda-cudart ==" ~ cuda_variant }}
-    - ${{ "" if cuda_variant == "11.8" else "libcufft >=11.0,<=11.3" }}
+    - cuda-cudart ==12.4.*
+    - libcufft >=11.0,<12
     - sqlite
     - libtiff
     - numpy >=1.23
