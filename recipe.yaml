@@ -49,7 +49,6 @@ requirements:
     - libcufft-dev >=11.0,<12
   run:
     - python
-    - cuda-version ==12.4
     - cuda-cudart 12.4.*
     - libcufft >=11.0,<12
     - sqlite
