@@ -29,7 +29,10 @@ requirements:
     - cmake
     - ninja
     - cuda-nvcc 12.4.*
+    - cuda-cudart 12.4.*
     - cuda-cudart-dev 12.4.*
+    - if: win
+      then: cuda-static 12.4.*
     - if: unix
       then: cuda-cudart-static 12.4.*
     - libcufft-dev >=11.0,<12
