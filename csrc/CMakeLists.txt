@@ -12,6 +12,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 
 # Automatically set architectures based on specific flags
 set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
+set(CMAKE_INCLUDE_SYSTEM_FLAG_CUDA "-I")
 
 # Find packages (order matters: tries custom paths first, then system)
 find_package(TIFF REQUIRED)
