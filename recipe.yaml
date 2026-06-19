@@ -11,6 +11,7 @@ source:
 
 build:
   number: 0
+  string: cuda${{ cuda_variant }}_${{ hash }}_${{ build_number }}
   script:
     - if: win
       then:
@@ -28,7 +29,8 @@ requirements:
     - ${{ compiler('cxx') }}
     - cmake
     - ninja
-    - cuda-toolkit
+    - cuda-version ==${{ cuda_variant }}
+    - cuda-toolkit ==${{ cuda_variant }}
   host:
     - python
     - pip
@@ -37,9 +39,9 @@ requirements:
     - sqlite
   run:
     - python
-    - cuda-cudart
+    - cuda-cudart ==${{ cuda_variant }}
     - sqlite
-    - libcufft
+    - libcufft ==${{ cuda_variant }}
     - libtiff
     - numpy >=1.23
     - pandas >=2.0
