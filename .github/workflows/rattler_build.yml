@@ -44,7 +44,7 @@ jobs:
       # this focuses purely on validating whether the package compiles and builds successfully.
       - name: Run rattler-build
         run: |
-          rattler-build build --recipe recipe.yaml -c nvidia -c conda-forge
+          rattler-build build --recipe recipe.yaml -c nvidia -c conda-forge --set cuda_version=${{ matrix.cuda_version }}
 
       # 5. Optional: Upload the built .conda packages as build artifacts to GitHub Actions UI for download
       - name: Upload Conda Package Artifact
