@@ -28,8 +28,8 @@ requirements:
     - ${{ compiler('cxx') }}
     - cmake
     - ninja
-    - cuda-nvcc ==12.4.*
-    - cuda-cudart-dev ==12.4.*
+    - cuda-nvcc 12.4.*
+    - cuda-cudart-dev 12.4.*
     - libcufft-dev >=11.0,<12
   host:
     - python
@@ -39,7 +39,7 @@ requirements:
     - sqlite
   run:
     - python
-    - cuda-cudart ==12.4.*
+    - cuda-cudart 12.4.*
     - libcufft >=11.0,<12
     - sqlite
     - libtiff
