@@ -30,7 +30,9 @@ requirements:
     - cmake
     - ninja
     - cuda-version ==${{ cuda_variant }}
-    - cuda-toolkit ==${{ cuda_variant }}
+    - ${{ "cuda-toolkit ==" ~ cuda_variant (if cuda_variant == "11.8" or cuda_variant == "12.2") else "cuda-cudart-dev ==" ~ cuda_variant }}
+    - ${{ "" if cuda_variant == "11.8" else "libcufft-dev >=11.0,<=11.3" }}
+    - ${{ "" if cuda_variant == "11.8" else "cuda-nvcc >=12,<13" }}
   host:
     - python
     - pip
@@ -39,9 +41,9 @@ requirements:
     - sqlite
   run:
     - python
-    - cuda-cudart ==${{ cuda_variant }}
+    - ${{ "__cuda >=" ~ cuda_variant if (cuda_variant == "11.8" or cuda_variant == "12.2") else "cuda-cudart ==" ~ cuda_variant }}
+    - ${{ "" if cuda_variant == "11.8" else "libcufft >=11.0,<=11.3" }}
     - sqlite
-    - libcufft ==${{ cuda_variant }}
     - libtiff
     - numpy >=1.23
     - pandas >=2.0
