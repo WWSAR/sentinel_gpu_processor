@@ -28,8 +28,7 @@ requirements:
     - ${{ compiler('cxx') }}
     - cmake
     - ninja
-    - cuda-toolkit
-    - libcufft-dev
+    - cuda-toolkit >=11.8,<13
   host:
     - python
     - pip
