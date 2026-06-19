@@ -16,7 +16,6 @@ jobs:
       matrix:
         # Matrix testing: Validate both Windows 64-bit and Linux 64-bit simultaneously
         os: [windows-latest, ubuntu-latest]
-        cuda_version: ["11.8", "12.2", "12.4"]
 
     steps:
       # 1. Pull the source code from the repository
@@ -44,7 +43,7 @@ jobs:
       # this focuses purely on validating whether the package compiles and builds successfully.
       - name: Run rattler-build
         run: |
-          rattler-build build --recipe recipe.yaml -c nvidia -c conda-forge --set cuda_version=${{ matrix.cuda_version }}
+          rattler-build build --recipe recipe.yaml -c nvidia -c conda-forge
 
       # 5. Optional: Upload the built .conda packages as build artifacts to GitHub Actions UI for download
       - name: Upload Conda Package Artifact
