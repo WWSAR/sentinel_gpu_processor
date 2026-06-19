@@ -34,19 +34,17 @@ requirements:
     - if: unix
       then: cuda-cudart-static 12.4.*
     - libcufft-dev >=11.0,<12
-    - cuda 12.4.*
   host:
     - python
     - pip
     - setuptools
     - libtiff
     - sqlite
-    #- cuda-cudart 12.4.*
-    #- cuda-cudart-dev 12.4.*
-    #- if: unix
-    #  then: cuda-cudart-static 12.4.*
-    #- libcufft-dev >=11.0,<12
-    - cuda 12.4.*
+    - cuda-cudart 12.4.*
+    - cuda-cudart-dev 12.4.*
+    - if: unix
+      then: cuda-cudart-static 12.4.*
+    - libcufft-dev >=11.0,<12
   run:
     - python
     - cuda-cudart 12.4.*
