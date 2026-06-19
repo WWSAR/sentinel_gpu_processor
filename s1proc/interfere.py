@@ -96,6 +96,7 @@ def interfere_subswath(
                   f'{rowlook} {collook} {out_float_flag}'
         logger.info(command)
         os.system(command)
+    burst_ifgs = [b for b in burst_ifgs if os.path.exists(b)]
     if len(burst_pairs) > 0:
         subswath = Subswath(burst_ifgs)
         left, top, right, bottom = subswath.bounds()
@@ -316,6 +317,8 @@ def interfere(
         ref_burst_group = date_burst_map[ref_date]
         sec_burst_group = date_burst_map[sec_date]
         outfile = os.path.join(ifg_path, f'{ref_date}_{sec_date}.int')
+        if os.path.exists(outfile):
+            continue
         interfere_single_scene(
                 ref_burst_group, sec_burst_group,
                 ifg_path, outfile, rowlook, collook, out_float)
