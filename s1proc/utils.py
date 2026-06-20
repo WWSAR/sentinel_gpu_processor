@@ -489,6 +489,43 @@ def run_check_integrity(
         out_dir = out_dir)
     return
 
+def get_files(
+        input_path:str,
+        extension:str|None = None) -> List[str]:
+    """
+    Get files from input_path, input_path can either be a single file,
+    a folder, or a pattern.
+
+    Parameters
+    ----------
+    input_path: str
+        Input path
+    extension: str
+        Input file extension
+    
+    Returns
+    -------
+    file_list: List[str]
+        A list of files
+    """
+    p = Path(input_path)
+    if p.is_file():
+        return [input_path]
+    elif p.is_dir():
+        if extension is None:
+            file_list = glob.glob(os.path.join(input_path,'*'))
+        else:
+            file_list = glob.glob(os.path.join(input_path,'*'+extension))
+        if len(file_list) == 0:
+            logger.warning('Cannot find any file from the input ' +
+                    f'directory {input_path}.')
+    else:
+        file_list = glob.glob(input_path)
+        if len(file_list) == 0:
+            logger.warning('Cannot find any file using the input ' +
+                    f'pattern {input_path}.')
+    return file_list
+
 class IfgList:
     def __init__(self,imglist:Sequence[str])->pd.DataFrame:
         """

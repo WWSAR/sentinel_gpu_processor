@@ -9,39 +9,10 @@ from pathlib import Path
 from typing import List
 
 from s1proc import get_bin_path
-from s1proc.utils import IfgList
+from s1proc.utils import IfgList, get_files
 from s1proc._log import setup_logger, set_logging_level
 from s1proc.tropo import tropo_preproc, _era5_correction
 logger = setup_logger(name = __name__, level = 'INFO')
-
-def get_input_files(input_path:str) -> List[str]:
-    """
-    Get interferograms to be corrected
-
-    Parameters
-    ----------
-    input_path: str
-        Input path
-    
-    Returns
-    -------
-    ifg_list: List[str]
-        A list of interferograms to prcoess
-    """
-    p = Path(input_path)
-    if p.is_file():
-        return [input_path]
-    elif p.is_dir():
-        ifg_list = glob.glob(os.path.join(input_path,'*.int'))
-        if len(ifg_list) == 0:
-            logger.warning('Cannot find any interferogram from the input ' +
-                    f'directory {input_path}.')
-    else:
-        ifg_list = glob.glob(input_path)
-        if len(ifg_list) == 0:
-            logger.warning('Cannot find any interferogram from the input ' +
-                    f'pattern {input_path}.')
-    return ifg_list
 
 def phase_correction(
         ifg_path: str|None = None,
@@ -71,7 +42,7 @@ def phase_correction(
     if ifg_path is None:
         ifg_path = icfg.ifg_path
 
-    ifg_files = get_input_files(ifg_path)  
+    ifg_files = get_files(ifg_path, 'int')  
     nifg = len(ifg_files)
     logger.debug(f'Number of interferograms: {nifg}')
     
