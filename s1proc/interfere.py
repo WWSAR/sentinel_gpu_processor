@@ -1,7 +1,8 @@
-#!/usr/bin/env python3
 import glob
 import numpy as np
 import os
+import subprocess
+from tqdm.auto import tqdm
 from typing import Tuple, Sequence, List
 from matplotlib import pyplot as plt
 
@@ -48,10 +49,7 @@ def match_bursts(
 def interfere_subswath(
     ref_subswath: Subswath,
     sec_subswath: Subswath,
-    ifg_path: str,
-    rowlook: int,
-    collook: int,
-    out_float: bool)->List[str]:
+    ifg_path: str)->List[Tuple[str,str,str]]:
     """
     Form an interferogram from two subswath geo-coded SLC images
 
@@ -61,140 +59,131 @@ def interfere_subswath(
         Reference subswath
     sec_subswath: Subswath
         Secondary subswath
-    rowlook: int
-        Number of looks in the row direction
-    collook: int
-        Number of looks in the column direction
-    out_float: bool
-        Only output phase
+    ifg_path: str
+        Directory to save interferograms
 
     Returns
     -------
-    ifg_list: List[str]
-        List of output burst interferograms
+    burst_pairs: List[Tuple[str,str,str]]
+        List of tuples, each tuple contains reference/secondary burst SLCs and
+        the output interferogram
     """
-    burst_pairs = match_bursts(ref_subswath, sec_subswath)
-    crossmul = get_bin_path('crossmul')
-    out_float_flag = 1 if out_float else 0 
-    burst_ifgs = []
-    unique_indices1 = []
-    unique_indices2 = []
-    outfiles = []
-    for main_img_file, sec_img_file in burst_pairs:
+    _burst_pairs = match_bursts(ref_subswath, sec_subswath)
+    burst_pairs = []
+    for main_img_file, sec_img_file in _burst_pairs:
         basename1 = os.path.basename(main_img_file)
         name1,_ = os.path.splitext(basename1)
-        unique_indices1.append(name1[0:20])
         basename2 = os.path.basename(sec_img_file)
         name2,_ = os.path.splitext(basename2)
-        unique_indices2.append(name2[0:20])
         outfile = os.path.join(ifg_path, name1+'_'+name2+'.int')
-        outfiles.append(outfile)
-        burst_ifgs.append(outfile)
-        if os.path.exists(outfile):
+        burst_pairs.append((main_img_file, sec_img_file, outfile))
+    return burst_pairs
+
+def stitch_subswath(burst_ifgs, out_float):
+    subswath = Subswath(burst_ifgs)
+    left, top, right, bottom = subswath.bounds()
+    mean_phase_diff = 0.
+    # unique_ids are used to check if the reference and secondary bursts used
+    # to form the current interferogram are the same as those for the previous
+    # interferogram
+    prev_unique_idx1 = None
+    prev_unique_idx2 = None
+    for i, burst in enumerate(subswath.bursts):
+        basename = os.path.basename(burst.data)
+        words = basename.split('_')
+        unique_idx1 = words[1] + words[2]
+        unique_idx2 = words[7] + words[8]
+
+        if i == 0:
+            ifg_data = burst.load_data(left, top, right, bottom)
+            prev_unique_idx1 = unique_idx1
+            prev_unique_idx2 = unique_idx2
             continue
-        command = f'{crossmul} {main_img_file} {sec_img_file} {outfile} ' + \
-                  f'{rowlook} {collook} {out_float_flag}'
-        logger.info(command)
-        os.system(command)
-    burst_ifgs = [b for b in burst_ifgs if os.path.exists(b)]
-    if len(burst_pairs) > 0:
-        subswath = Subswath(burst_ifgs)
-        left, top, right, bottom = subswath.bounds()
-        prev_mean_phase_diff = 0.
-        for i, burst in enumerate(subswath.bursts):
-            if i == 0:
-                ifg_data = burst.load_data(left, top, right, bottom)
-                continue
-            old_data = ifg_data[
-                    burst.top - top : burst.bottom - top,
-                    burst.left - left: burst.right - left]
-            new_data = burst.load_data(
-                    burst.left, burst.top, burst.right, burst.bottom)
+
+        old_data = ifg_data[
+                burst.top - top : burst.bottom - top,
+                burst.left - left: burst.right - left]
+        new_data = burst.load_data(
+                burst.left, burst.top, burst.right, burst.bottom)
+        if out_float:
+            replace_mask = (old_data == 0) & (new_data != 0)
+        else:
+            replace_mask = (old_data.real == 0) & \
+                    (new_data.real != 0)
+        
+        # calculate overlap mask between bursts
+        overlap_mask = None
+        if unique_idx1 != prev_unique_idx1 or \
+           unique_idx2 != prev_unique_idx2:
             if out_float:
-                replace_mask = (old_data == 0) & (new_data != 0)
+                overlap_mask = (old_data != 0) & (new_data != 0)
             else:
-                replace_mask = (old_data.real == 0) & \
-                        (new_data.real != 0)
-            overlap_mask = None
-            if unique_indices1[i] != unique_indices1[i-1] or \
-               unique_indices2[i] != unique_indices2[i-1]:
-                if out_float:
-                    overlap_mask = (old_data != 0) & (new_data != 0)
-                else:
-                    overlap_mask = (old_data.real != 0) & (new_data != 0)
-                mean_phase_diff = 0.
+                overlap_mask = (old_data.real != 0) & (new_data != 0)
+        prev_unique_idx1 = unique_idx1
+        prev_unique_idx2 = unique_idx2
+
+        if overlap_mask is not None and np.any(overlap_mask): 
+            if out_float:
+                phase_diff = np.exp(1j*(-old_data[overlap_mask] + \
+                        new_data[overlap_mask]))
             else:
-                mean_phase_diff = prev_mean_phase_diff
-            if overlap_mask is not None and np.any(overlap_mask): 
-                if out_float:
-                    phase_diff = np.exp(1j*(-old_data[overlap_mask] + \
-                            new_data[overlap_mask]))
-                else:
-                    phase_diff = np.conj(old_data[overlap_mask]) * \
-                            new_data[overlap_mask]
-                mean_phase_diff = np.angle(np.mean(phase_diff)) 
-                phase_diff = phase_diff * np.exp(-1j*mean_phase_diff)
-                med_phase_diff = np.median(np.angle(phase_diff))
-                mean_phase_diff += med_phase_diff
-            if mean_phase_diff != 0:
-                logger.info(f'mean phase offset: {mean_phase_diff} rad')
-                if out_float:
-                    new_data = new_data - mean_phase_diff
-                    new_data[ifg > np.pi] -= 2*np.pi
-                    new_data[ifg < -np.pi] += 2*np.pi
-                else:
-                    new_data = new_data * np.exp(-1j*mean_phase_diff)
-            old_data[replace_mask] = new_data[replace_mask]
-            prev_mean_phase_diff = mean_phase_diff
+                phase_diff = np.conj(old_data[overlap_mask]) * \
+                        new_data[overlap_mask]
 
-        ifg = CroppedImage(subswath.nrow0, subswath.ncol0, left, top, right,
-                bottom, ifg_data)
-        for outfile in outfiles:
-            os.remove(outfile)
-        return ifg
-    else:
-        return None
+            # more robust than just computing the mean phase difference
+            mean_phase_diff = np.angle(np.mean(phase_diff)) 
+            phase_diff = phase_diff * np.exp(-1j*mean_phase_diff)
+            med_phase_diff = np.median(np.angle(phase_diff))
+            mean_phase_diff += med_phase_diff
 
-def stitch_patches(patch, ifg, left, right, out_float):
-    temp = patch[:,left:right]
+        if mean_phase_diff != 0:
+            logger.debug(f'mean phase offset: {mean_phase_diff} rad')
+            if out_float:
+                new_data = new_data - mean_phase_diff
+                new_data[ifg > np.pi] -= 2*np.pi
+                new_data[ifg < -np.pi] += 2*np.pi
+            else:
+                new_data = new_data * np.exp(-1j*mean_phase_diff)
+        old_data[replace_mask] = new_data[replace_mask]
+
+    ifg = CroppedImage(subswath.nrow0, subswath.ncol0, left, top, right,
+            bottom, ifg_data)
+    #for outfile in outfiles:
+    #    os.remove(outfile)
+    return ifg
+
+def stitch(burst_pairs, outfile, out_float):
+    subswath_ifgs = []
+    for i in range(1,4):
+        _burst_pairs = \
+            [b for b in burst_pairs if (f'iw{i}' in b) and os.path.exists(b)]
+        if len(_burst_pairs) > 0:
+            subswath_ifgs.append(stitch_subswath(_burst_pairs, out_float))
+    if len(subswath_ifgs) == 0:
+        logger.warning(f'Empty subswaths for {outfile}')
+        return
+    nrow0, ncol0 = subswath_ifgs[0].nrow0, subswath_ifgs[0].ncol0
     if out_float:
-        overlap_mask = (temp!=0) & (ifg!=0)
+        mmap_arr = np.memmap(outfile, dtype = np.float32, mode = 'w+',
+                shape = (nrow0, ncol0))
     else:
-        overlap_mask = (temp.real!=0) & (ifg.real!=0)
-    if np.any(overlap_mask):
+        mmap_arr = np.memmap(outfile, dtype = np.complex64, mode = 'w+',
+                shape = (nrow0, ncol0))
+    for subswath_ifg in subswath_ifgs:
+        old_data = mmap_arr[subswath_ifg.top:subswath_ifg.bottom,
+                            subswath_ifg.left:subswath_ifg.right]
+        new_data = subswath_ifg.data
         if out_float:
-            phase_diff = np.exp(1j*(-temp[overlap_mask] + ifg[overlap_mask]))
+            replace_mask = new_data != 0
         else:
-            phase_diff = np.conj(temp[overlap_mask]) * ifg[overlap_mask]
-        mean_phase_diff = np.angle(np.mean(phase_diff)) 
-        phase_diff = phase_diff * np.exp(-1j*mean_phase_diff)
-        med_phase_diff = np.median(np.angle(phase_diff))
-        mean_phase_diff += med_phase_diff
-        logger.info(f'mean phase offset: {mean_phase_diff} rad')
-        if out_float:
-            replace_mask = (temp == 0) & (ifg != 0)
-            ifg = ifg - mean_phase_diff
-            ifg[ifg > np.pi] -= 2*np.pi
-            ifg[ifg < -np.pi] += 2*np.pi
-        else:
-            replace_mask = temp.real == 0
-            ifg = ifg * np.exp(-1j*mean_phase_diff)
-    else:
-        if out_float:
-            replace_mask = (temp == 0) & (ifg != 0)
-        else:
-            replace_mask = temp.real == 0
-    temp[replace_mask] = ifg[replace_mask]
-    return
+            replace_mask = new_data.real != 0
+        old_data[replace_mask] = new_data[replace_mask]
+    mmap_arr.flush()
 
 def interfere_single_scene(
         ref_burst_group: BurstGroup,
         sec_burst_group: BurstGroup,
-        ifg_path: str,
-        outfile: str,
-        rowlook: int,
-        collook: int,
-        out_float: bool = False):
+        ifg_path: str)->List[Tuple[str,str,str]]:
     """
     Form an interferogram for a single scene
 
@@ -206,42 +195,20 @@ def interfere_single_scene(
         bursts of the secondary image
     ifg_path: str
         Directory to save interferograms
-    outfile: str
-        Output interferogram
-    rowlook: int
-        Number of looks in the row direction
-    collook: int
-        Number of looks in the column direction
-    out_float: bool
-        Only write phase to disk
+
+    Returns
+    -------
+    burst_pairs:
+        List of tuples, each tuple contains reference/secondary burst SLCs and
+        the output interferogram
     """
-    subswath_ifgs = []
+    burst_pairs = []
     for i in range(3):
-        subswath_ifgs.append(interfere_subswath(
+        burst_pairs.extend(interfere_subswath(
                 ref_burst_group.subswaths[i],
                 sec_burst_group.subswaths[i],
-                ifg_path, rowlook, collook, out_float))
-    for subswath_ifg in subswath_ifgs:
-        if subswath_ifg is not None:
-            nrow0, ncol0 = subswath_ifg.nrow0, subswath_ifg.ncol0
-    if out_float:
-        mmap_arr = np.memmap(outfile, dtype = np.float32, mode = 'w+',
-               shape = (nrow0, ncol0))
-    else:
-        mmap_arr = np.memmap(outfile, dtype = np.complex64, mode = 'w+',
-               shape = (nrow0, ncol0))
-    for subswath_ifg in subswath_ifgs:
-        if subswath_ifg is None:
-            continue
-        old_data = mmap_arr[subswath_ifg.top:subswath_ifg.bottom,
-                        subswath_ifg.left:subswath_ifg.right]
-        new_data = subswath_ifg.data
-        if out_float:
-            replace_mask = new_data != 0
-        else:
-            replace_mask = new_data.real != 0
-        old_data[replace_mask] = new_data[replace_mask]
-    mmap_arr.flush()
+                ifg_path))
+    return burst_pairs
 
 def parse_fname(fn:str)->Tuple[str, str]:
     basename = os.path.basename(fn)
@@ -291,6 +258,7 @@ def interfere(
     if os.path.dirname(small_rsc_file):
         os.makedirs(os.path.dirname(small_rsc_file),exist_ok=True)
     rsclook.save_as_rsc(small_rsc_file)
+    burst_pair_file = os.path.join(ifg_path, 'burst_pair_list.txt')
     
     ref_dates = []
     sec_dates = []
@@ -313,15 +281,37 @@ def interfere(
                 burst_group = BurstGroup(burst_files)
                 date_burst_map[sec_date] = burst_group
 
+    burst_pairs = []
+    burst_pair_map = {}
     for ref_date, sec_date in zip(ref_dates, sec_dates):
         ref_burst_group = date_burst_map[ref_date]
         sec_burst_group = date_burst_map[sec_date]
         outfile = os.path.join(ifg_path, f'{ref_date}_{sec_date}.int')
         if os.path.exists(outfile):
             continue
-        interfere_single_scene(
-                ref_burst_group, sec_burst_group,
-                ifg_path, outfile, rowlook, collook, out_float)
+        _burst_pairs = interfere_single_scene(
+                ref_burst_group, sec_burst_group, ifg_path)
+        burst_pair_map[outfile] = [b[2] for b in _burst_pairs]
+        if not all([os.path.exists(b[2]) for b in _burst_pairs]):
+            burst_pairs.extend(_burst_pairs)
+    
+    n_pair = len(burst_pairs)
+    n_ifg = len(burst_pair_map)
+    if n_pair > 0:
+        with open(burst_pair_file, 'w') as f:
+            for i in range(n_pair-1):
+                f.write(' '.join(burst_pairs[i])+'\n')
+            f.write(' '.join(burst_pairs[-1]))
+    logger.info(f'Find {n_pair} burst pairs in {n_ifg} interferograms')
+
+    del burst_pairs
+    crossmul = get_bin_path('crossmul')
+    cmd = [crossmul, burst_pair_file, str(rowlook), str(collook),
+           "1" if out_float else "0"]
+    subprocess.run(cmd, check = True)
+    for outfile in tqdm(burst_pair_map, desc='stitching'):
+        stitch(burst_pair_map[outfile], outfile, out_float)
+    logger.info('All interferograms are generated.')
 
 def run_interfere(
         out_float: bool = False,
