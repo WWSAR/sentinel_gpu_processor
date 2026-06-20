@@ -475,3 +475,38 @@ def img2zarr(
         img = load_function(input_file, nrow, ncol)
         z[i, :, : ] = img
 
+def load_unwrapped_interferograms(
+        ifg_path: str|Path|None = None,
+        config: str = 'config.yaml'):
+    from s1proc._config import load_config
+    from s1proc.sario import img2zarr, readc
+    from s1proc.utils import IfgList
+    cfg = load_config(config)
+    icfg = cfg.io
+
+    if ifg_path is None:
+        ifg_path = icfg.unw_path
+
+    ifg_files = get_ifg_files(ifg_path,'unw')
+    nifg = len(ifg_files)
+    logger.debug(f'Number of interferograms: {nifg}')
+    
+    rsc = GeoCoordinates(icfg.multilook_rsc_file)
+    nrow, ncol = rsc.nlat, rsc.nlon
+    logger.debug(f'Image shape: {nrow} x {ncol}')
+
+    ifg_list = IfgList(ifg_files)
+    
+    attrs = {
+        "name":"unwrapped interferograms",
+        "date1":ifg_list.df['date1'].tolist(),
+        "date2":ifg_list.df['date2'].tolist(),
+        "tempbl":ifg_list.df['tempbl'].tolist()}
+    
+    def load_function(input_file:str, nrow: int, ncol:int):
+        img = readc(input_file, ncol)
+        return img.imag
+
+    img2zarr(ifg_files, load_function, 'unwrapped_interferograms.zarr',
+            nrow, ncol, np.float32, attrs)
+    

@@ -6,7 +6,7 @@ from typing import Sequence
 from tqdm import tqdm
 
 from s1proc import get_bin_path
-from s1proc.sario import CroppedImage, powlooks
+from s1proc.sario import CroppedImage, powlooks, savec
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
@@ -106,10 +106,12 @@ def run_multilook_amp(
     return
 
 def coherence(
-        ifg_dir: str = 'igrams',
-        amp_dir: str = 'amp',
-        rowlook: int = 1,
-        collook: int = 1):
+        ifg_dir: str,
+        amp_dir: str,
+        nrow: int,
+        ncol: int,
+        rowlook: int,
+        collook: int):
     """
     Compute InSAR phase coherence
 
@@ -119,6 +121,10 @@ def coherence(
         Directory of interferograms
     amp_dir: str
         Directory to save multilooked amplitude images
+    nrow: int
+        Number of rows of each interferogram
+    ncol: int
+        Number of columns of each interferogram
     rowlook: int
         Number of look in row direction
     collook: int
@@ -136,12 +142,12 @@ def coherence(
         if date1 != prev_date1:
             amp1 = np.fromfile(os.path.join(amp_dir, f'{date1}.amp'),
                                dtype = np.float32)
-            amp1[amp1 == 0] = 1e-10
         amp2 = np.fromfile(os.path.join(amp_dir, f'{date2}.amp'),
                            dtype = np.float32)
-        amp2[amp2 == 0] = 1e-10
-        c = np.abs(ifg)/amp1/amp2 
-        c.astype(np.float32).tofile(out_file)
+        c = np.abs(ifg) / (amp1 + 1e-12) / (amp2 + 1e-12)
+        c = amp1*amp2 + 1j*c
+        c = np.reshape(c, (nrow, ncol))
+        savec(c, out_file)
 
 def run_coherence(
         config: str = 'config.yaml'):
@@ -154,17 +160,21 @@ def run_coherence(
         Configuration file
     """
     from s1proc._config import load_config
+    from s1proc.geocoordinates import GeoCoordinates
     cfg = load_config(config)
     icfg = cfg.io
     pcfg = cfg.proc
+    rsc = GeoCoordinates(icfg.multilook_rsc_file)
     multilook_amp(
-        slc_dir=icfg.slc_path,
-        amp_dir=icfg.amp_path,
-        rowlook=pcfg.rowlook,
-        collook=pcfg.collook)
+        slc_dir = icfg.slc_path,
+        amp_dir = icfg.amp_path,
+        rowlook = pcfg.rowlook,
+        collook = pcfg.collook)
     coherence(
-        ifg_dir=icfg.ifg_path,
-        amp_dir=icfg.amp_path,
-        rowlook=pcfg.rowlook,
-        collook=pcfg.collook)
+        ifg_dir = icfg.ifg_path,
+        amp_dir = icfg.amp_path,
+        nrow = rsc.nlat,
+        ncol = rsc.nlon,
+        rowlook = pcfg.rowlook,
+        collook = pcfg.collook)
     return

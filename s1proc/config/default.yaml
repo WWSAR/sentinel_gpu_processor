@@ -21,10 +21,10 @@ proc:
     rowlook: 10
     collook: 20
     wavelength: 0.055465763
-    min_tbl: int = 6       # minimum temporal baseline
-    max_tbl: int = 360     # maximum temporal baseline
-    min_sbl: int = 0       # minimum spatial baseline
-    max_sbl: int = 300     # maximum spatial baseline
+    min_tbl: 6       # minimum temporal baseline
+    max_tbl: 360     # maximum temporal baseline
+    min_sbl: 0       # minimum spatial baseline
+    max_sbl: 300     # maximum spatial baseline
 
 # Wrapped interferogram processing
 # Interferogram filtering, for the moment, only Goldstein filter is implemented
@@ -40,7 +40,7 @@ tropo:
     enable: true
     method: "era5"
     parameters:
-        delay_path: tropo_delay # projected tropospheric delay
+        delay_path: "tropo_delay" # projected tropospheric delay
         hour: null
         flip_sign: false
 
@@ -49,3 +49,18 @@ detrend:
     enable: false
     type: "plane"       # plane or quadratic
 
+# Phase unwrapping
+unwrap:
+    method: "whirlwind" # select between [whirlwind (recommended) and snaphu]
+    parameters:
+        only_save_phase: true
+        # whirldinw parameters
+        conncomp: false
+        bridge: false
+        # snaphu parameters
+        cost_mode: "smooth" # select from [smooth, topo, defo]
+        rowtile: null
+        coltile: null
+        rowoverlap: 200
+        coloverlap: 200
+        tile_nproc: null

@@ -16,7 +16,7 @@ def main()->int:
     from s1proc.utils import run_create_slc_pair_list
     from s1proc.interfere import run_interfere
     from s1proc.sentinel_stack import run_stack
-    from s1proc.unwrap import run_batch_snaphu
+    from s1proc.unwrap import batch_unwrap
     from s1proc.coherence import run_multilook_amp, run_coherence
     from s1proc.query import query_asf
     from s1proc.utils import run_check_integrity
@@ -29,7 +29,7 @@ def main()->int:
             "stack": run_stack,
             "slcpairs": run_create_slc_pair_list,
             "interfere": run_interfere,
-            "unwrap": run_batch_snaphu,
+            "unwrap": batch_unwrap,
             "amp": run_multilook_amp,
             "coh": run_coherence,
             "phasecorr": phase_correction

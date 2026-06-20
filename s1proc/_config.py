@@ -56,7 +56,7 @@ class TroposphericParams:
 class TroposphericConfig:
     enable: bool = True
     method: Literal["era5"] = "era5"
-    parameters: TroposphericParams = field(default_factory=TroposphericParams)
+    parameters: TroposphericParams = field(default_factory = TroposphericParams)
 
 @dataclass
 class DetrendingConfig:
@@ -64,12 +64,30 @@ class DetrendingConfig:
     type: Literal["plane", "quadratic"] = "plane"
 
 @dataclass
+class UnwrapParams:
+    only_save_phase: bool = True
+    cost_mode: Optional[Literal["smooth","topo","defo"]] = "smooth"
+    rowtile: Optional[int] = None
+    coltile: Optional[int] = None
+    rowoverlap: Optional[int] = 200
+    coloverlap: Optional[int] = 200
+    tile_nproc: Optional[int] = None
+    conncomp: Optional[bool] = False
+    bridge: Optional[bool] = False
+
+@dataclass
+class UnwrapConfig:
+    method: Literal['snaphu','whirlwind'] = 'whirlwind'
+    parameters: UnwrapParams = field(default_factory = UnwrapParams)
+    
+@dataclass
 class S1Config:
     io: IoConfig = field(default_factory = IoConfig)
     proc: ProcessingConfig = field(default_factory = ProcessingConfig)
     filter: FilteringConfig = field(default_factory = FilteringConfig)
     tropo: TroposphericConfig = field(default_factory = TroposphericConfig)
     detrend: DetrendingConfig = field(default_factory = DetrendingConfig)
+    unwrap: UnwrapConfig = field(default_factory = UnwrapConfig)
 
 def ensure_config(path="config.yaml", overwrite=False):
     path = Path(path)
