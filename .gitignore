@@ -10,3 +10,4 @@ __pycache__
 *.so
 output/
 conda_test/
+tests/
