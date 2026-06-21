@@ -22,6 +22,7 @@ from s1proc import get_cache_dir
 from s1proc._log import setup_logger
 from s1proc._config import load_config
 from s1proc.query import _geojson_to_metalink
+from s1proc.sentinel_downloader import download_metalink
 from s1proc.utils import gtiff2roipac
 
 logger = setup_logger(name=__name__, level="INFO")
@@ -258,17 +259,20 @@ def preprocess(config_file="config.yaml"):
 
     Reads *config_file* and:
 
-    1. Queries ASF for Sentinel-1 SLC scenes using ``date.start``,
-       ``date.end``, ``area.bbox``, and ``area.flight_direction``.
-    2. Filters the returned GeoJSON to retain only scenes whose
-       ``frameNumber`` belongs to ``area.frame_list``.
-    3. Regenerates the corresponding metalink file so it matches the
-       filtered GeoJSON.
-    4. Computes the study-area bounds as the intersection of the
+    1. Filters the GeoJSON (``roi.geojson``) to retain only scenes
+       whose ``frameNumber`` belongs to ``area.frame_list``.
+    2. Generates a metalink file (``roi.metalink``) from the filtered
+       GeoJSON.
+    3. Computes the study-area bounds as the intersection of the
        bounding box of all retained frame footprints with
        ``area.bbox``.
-    5. Downloads the COP DEM (int16, ROI_PAC format, pixel-center RSC
-       convention) upsampled by ``--xrate 6`` and ``--yrate 3``.
+    4. Downloads the COP DEM as a GeoTIFF (int16, upsampled 6x/3x)
+       and converts it to ROI_PAC format.
+    5. Downloads Sentinel-1 SLC zip files via ``aria2c`` using the
+       metalink, saving to ``io.slc_path``.
+    6. Downloads precise orbit (EOF) files via *sentineleof*, scanning
+       ``io.slc_path`` for Sentinel-1 products and saving orbits to
+       ``io.eof_path``.
 
     Parameters
     ----------
@@ -330,4 +334,19 @@ def preprocess(config_file="config.yaml"):
     if tif_file.exists():
         os.remove(tif_file)
     _download_dem(tif_file, bbox, vrt_file, 6, 3, 'GTiff', 'int16')
-    gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16) 
+    gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16)
+
+    # Download SLC data
+    slc_path = Path(cfg.io.slc_path)
+    slc_path.mkdir(parents=True, exist_ok=True)
+    download_metalink(str(metalink_file), output_dir=str(slc_path))
+
+    # Download precise orbit files
+    from eof import download as eof_download
+
+    eof_path = Path(cfg.io.eof_path)
+    eof_path.mkdir(parents=True, exist_ok=True)
+    eof_download.main(
+        search_path=str(slc_path),
+        save_dir=str(eof_path)
+    )

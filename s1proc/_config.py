@@ -210,7 +210,7 @@ def initialize_config(
         config_file: Path | str = 'config.yaml',
         start_date: str | None = None,
         end_date: str | None = None,
-        bbox: List[float] = None,
+        bbox: List[float] | None = None,
         flight_direction: Literal['ASCENDING','DESCENDING'] | None = None,
         overwrite: bool = False,
         setup_only: bool = False):
