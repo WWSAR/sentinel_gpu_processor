@@ -12,7 +12,7 @@ io:
     img_pair_file: subswath_list          # list of interferograms to process
     geometry_path: geometry               # geometry-related files (los/inc)
     ifg_corr_path: ifg_corrected          # corrected wrapped interferograms
-    unw_corrected_path: unw_corrected     # corrected unwrapped interferograms
+    unw_corr_path: unw_corrected     # corrected unwrapped interferograms
     multilook_dem_file: dem/multilook.dem # multilooked DEM
     multilook_rsc_file: dem/multilook.rsc # multilooked rsc file
 
@@ -64,3 +64,19 @@ unwrap:
         rowoverlap: 200
         coloverlap: 200
         tile_nproc: null
+
+# date and study area
+date:
+    start:
+    end:
+area:
+    # [west, south, east, north]
+    bbox:
+    # [Descending, Ascending, null]
+    flight_direction:
+    # path_list is only used in the main configuration
+    # users can remove paths that they do not want to process
+    path_list:
+    # users can remove frames that they do not want to process
+    path_number:
+    frame_list:

@@ -9,6 +9,7 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+from numpy.typing import DTypeLike
 from tqdm import tqdm
 from typing import List, Tuple, Sequence
 
@@ -16,7 +17,6 @@ from s1proc import geocoordinates
 from s1proc import geometry
 from s1proc import orbit
 from s1proc import sario
-from s1proc.sario import CroppedImage
 from s1proc._log import setup_logger, set_logging_level
 logger = setup_logger(name=__name__,level='INFO')
 
@@ -525,6 +525,104 @@ def get_files(
             logger.warning('Cannot find any file using the input ' +
                     f'pattern {input_path}.')
     return file_list
+
+def gtiff2roipac(
+        tif_file: Path|str,
+        output_image: Path|str|None = None,
+        output_rsc: Path|str|None = None,
+        output_type: DTypeLike = np.float32,
+        shift:bool = True):
+    """
+    Convert a GeoTIFF image to a binary image and an rsc file
+
+    Parameters
+    ----------
+    tif_file: Path|str
+        Input GeoTIFF file
+    output_image: Path|str|None
+        Output binary image file
+    output_rsc: Path|str|None
+        Output rsc file
+    output_type: DTypeLike
+        Output image type
+    shift: bool
+        If true, shift lonmin, latmin by a half pixel to respect the convention
+        of rsc definition
+    """
+    from osgeo import gdal
+    ds = gdal.Open(tif_file)
+    gt = ds.GetGeoTransform()
+    if shift:
+        lonmin = gt[0] + gt[1]*0.5
+        latmax = gt[3] + gt[5]*0.5
+    else:
+        lonmin = gt[0]
+        latmax = gt[3]
+    dlon = gt[1]
+    dlat = gt[5]
+    nlon = ds.RasterXSize
+    nlat = ds.RasterYSize
+    rscparams = {}
+    rscparams['nlon'] = nlon
+    rscparams['nlat'] = nlat
+    rscparams['lonmin'] = lonmin
+    rscparams['latmax'] = latmax
+    rscparams['dlon'] = dlon
+    rscparams['dlat'] = dlat
+    rsc = geocoordinates.GeoCoordinates(rscparams = rscparams)
+    rsc.save_as_rsc(output_rsc)
+    img = ds.ReadAsArray()
+    img.astype(output_type).tofile(output_image)
+
+def roipac2gtiff(
+        imgfile:str,
+        rscfile:str,
+        input_type: DTypeLike,
+        output_type: int, 
+        shift:bool = True,
+        output_file: str|None = None):
+    """
+    Convert a binary image to a GeoTiff
+
+    Parameters
+    ----------
+    rscfile: Path|str
+        An rsc file
+    imgfile: Path|str
+        Input image file
+    input_type: DTypeLike
+        Type of the input image (e.g., np.float32)
+    output_type: int
+        Type of the output iamge (e.g., gdal.GDT_Float32)
+    shfit: bool
+        If True, shift edge coordinates by a half pixel such following the
+        edge convention of gdal
+    output_file: Path|str|None
+        Output image file
+    """
+    from osgeo import gdal, osr
+    rsc = geocoordinates.GeoCoordinates(rscfile)
+    if output_file is None:
+        output_file = imgfile + '.tif'
+    nrow, ncol = rsc.nlat, rsc.nlon
+    dlon = rsc.dlon
+    dlat = rsc.dlat
+    if shift:
+        lonmin = rsc.lonmin - 0.5*dlon
+        latmax = rsc.latmax - 0.5*dlat
+        
+    img = np.fromfile(imgfile,dtype=input_type).reshape(nrow,ncol)
+
+    geotransform = (lonmin,dlon,0,latmax,0,dlat)
+    outtif = gdal.GetDriverByName('GTiff').Create(
+             output_file,ncol,nrow,1,output_type)
+    outtif.SetGeoTransform(geotransform)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    outtif.SetProjection(srs.ExportToWkt())
+    outtif.GetRasterBand(1).WriteArray(img)
+    outtif.FlushCache()
+    outtif=None
 
 class IfgList:
     def __init__(self,imglist:Sequence[str])->pd.DataFrame:

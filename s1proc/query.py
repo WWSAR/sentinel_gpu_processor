@@ -7,6 +7,7 @@ import shutil
 import tqdm
 import xml.etree.ElementTree as ET
 from datetime import datetime
+from pathlib import Path
 from typing import List, Literal, Optional
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -72,7 +73,6 @@ def merge_asf_geojson(temp_dir, output_file):
     logger.info("Merged %d geojson files", len(all_files))
     logger.info("Unique scenes: %d", len(features))
     logger.info("Saved to %s", output_file)
-
 
 def merge_asf_metalink(temp_dir, output_file):
     """
@@ -150,25 +150,17 @@ def merge_asf_metalink(temp_dir, output_file):
     logger.info("Saved to %s", output_file)
 
 
-def _geojson_to_metalink(geojson_path, metalink_path):
+def _geojson_to_metalink(data: dict, metalink_path: Path|str):
     """
-    Extract download metadata from a merged ASF GeoJSON file and write a
-    matching metalink XML file.
-
-    The generated metalink mirrors the structure returned by the ASF API
-    when ``output=metalink``, so it can be fed directly to ``aria2c`` via
-    ``--metalink-file``.
+    Helper function to convert a geojson dictionary to metalink
 
     Parameters
     ----------
-    geojson_path : str
-        Path to the merged GeoJSON file.
-    metalink_path : str
+    data: dict
+        geojson data
+    metalink_path: Path | str     
         Destination path for the generated metalink file.
     """
-    with open(geojson_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-
     if data.get("type") != "FeatureCollection":
         logger.warning("GeoJSON is not a FeatureCollection; skipping metalink extraction.")
         return
@@ -214,6 +206,26 @@ def _geojson_to_metalink(geojson_path, metalink_path):
     tree.write(metalink_path, encoding="UTF-8", xml_declaration=True)
 
     logger.info("Extracted %d download URLs to %s", count, metalink_path)
+    
+def geojson_to_metalink(geojson_path: Path|str, metalink_path: Path|str):
+    """
+    Extract download metadata from a merged ASF GeoJSON file and write a
+    matching metalink XML file.
+
+    The generated metalink mirrors the structure returned by the ASF API
+    when ``output=metalink``, so it can be fed directly to ``aria2c`` via
+    ``--metalink-file``.
+
+    Parameters
+    ----------
+    geojson_path : Path|str|dict
+        Path to the merged GeoJSON file.
+    metalink_path : str
+        Destination path for the generated metalink file.
+    """
+    with open(geojson_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    _geojson_to_metalink(data, metalink_path)
 
 def create_session(max_retries=5):
     retry_strategy = Retry(
@@ -409,10 +421,4 @@ def query_asf(
         merge_asf_metalink(temp_dir, outfile)
     else:
         merge_asf_geojson(temp_dir, outfile)
-        # Also produce a metalink from the merged geojson
-        if outfile.endswith(".geojson"):
-            metalink_path = outfile[: -len(".geojson")] + ".metalink"
-        else:
-            metalink_path = outfile + ".metalink"
-        _geojson_to_metalink(outfile, metalink_path)
     shutil.rmtree(temp_dir)

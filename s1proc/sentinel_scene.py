@@ -278,9 +278,6 @@ def sentinel_scene(
         # create a cursor
         c = con.cursor()
         swathfile='file'
-        # get slc product times (may not need these two)
-        firsttime=sql_mod.valuef(c,swathfile,'raw_slc_first_line_time')
-        lasttime=sql_mod.valuef(c,swathfile,'raw_slc_last_line_time')
         #  Reversing lines or pixels?
         lineTimeOrdering=sql_mod.valuec(c,swathfile,'lineTimeOrdering')
         pixelTimeOrdering=sql_mod.valuec(c,swathfile,'pixelTimeOrdering')

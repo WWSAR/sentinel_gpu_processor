@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+import platformdirs
 
 __version__ = "0.1.0"
 
@@ -24,3 +25,14 @@ def get_bin_path(bin_name: str) -> str:
         )
 
     return str(bin_path)
+
+def get_cache_dir() -> Path:
+    """
+    Get a cache dir for the package
+
+    Returns:
+        cache_dir: Path
+    """
+    cache_dir = Path(platformdirs.user_cache_dir("s1proc", "wuhu_meiri_tech"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
