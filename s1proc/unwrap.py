@@ -283,7 +283,7 @@ def batch_unwrap(
     config: str = 'config.yaml',
     verbose: bool = False):
     """
-    Batch unwrap using SNAPHU
+    Batch phase unwrapping using whirlwind or snaphu.
 
     Parameters
     ----------
@@ -370,7 +370,7 @@ def batch_unwrap(
                 "ncol": ncol,
                 "only_save_phase": ucfg.parameters.only_save_phase,
                 "conncomp": ucfg.parameters.conncomp,
-                "bridge": uncfg.parameters.bridge
+                "bridge": ucfg.parameters.bridge
             })
         elif ucfg.method == "snaphu":
             task_items.append({
@@ -396,7 +396,7 @@ def batch_unwrap(
     # Call the generic Class Scheduler tool
     scheduler = TaskScheduler(total_cpus=max_cpus)
     scheduler.execute_parallel_tasks(
-        worker_function = unwrap_snaphu,
+        worker_function = unwrap_func,
         task_items = task_items,
         cores_per_task = cores_per_task,
         identifier = "ifg_file"
