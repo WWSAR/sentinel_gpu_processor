@@ -8,6 +8,9 @@ csrc/CMakeFiles
 __pycache__
 *.egg-info
 *.so
+build/
 output/
 conda_test/
 tests/
+.ruff_cache
+.claude
