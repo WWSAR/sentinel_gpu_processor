@@ -302,7 +302,7 @@ def interfere(
     task_per_gpu: int
         Number of tasks running on each GPU in parallel
     """
-    from s1proc.utils import GpuTaskScheduler, get_gpu_count
+    from s1proc.utils import GpuTaskScheduler, _detect_gpu_count
 
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
@@ -357,7 +357,7 @@ def interfere(
     logger.info(f"Find {n_pair} burst pairs in {n_ifg} interferograms.")
 
     # Run crossmul to form interferograsm
-    max_ngpu = get_gpu_count()
+    max_ngpu = _detect_gpu_count()
     if ngpu is None:
         ngpu = max_ngpu
     elif ngpu > max_ngpu:
