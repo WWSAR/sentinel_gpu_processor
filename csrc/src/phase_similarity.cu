@@ -5,6 +5,7 @@
 #include <thread>
 
 #include <cuda_runtime.h>
+#include "gpu_device.hpp"
 #include <sario.hpp>
 
 // ----------------- Utility -----------------
@@ -595,10 +596,11 @@ void similarity(
 }
 
 int main(int argc, char *argv[]){
+    set_gpu(parse_gpu_arg(argc, argv));
     if (argc<9){
         std::cout << "Usage: phase_similarity infile psfile med_sim_outfile "
                   << "max_sim_outfile N rdmin rdmax med_sim_th"
-                  << std::endl;
+                  << " [--gpu DEVICE_ID]" << std::endl;
         return 0;
     }
     const std::string infile = std::string(argv[1]);

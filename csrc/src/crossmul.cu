@@ -11,6 +11,7 @@
 #include <vector>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include "gpu_device.hpp"
 #include "sario.hpp"
 
 #ifndef M_PI
@@ -278,9 +279,10 @@ int crossmul(const std::string &input_file,
 }
 
 int main(int argc, char *argv[]){
+    set_gpu(parse_gpu_arg(argc, argv));
     if (argc<5){
         std::cout << "Usage: crossmul input_file rowlook " <<
-            "collook out_float" << std::endl;
+            "collook out_float [--gpu DEVICE_ID]" << std::endl;
         return 0;
     }
     const std::string input_file = std::string(argv[1]);

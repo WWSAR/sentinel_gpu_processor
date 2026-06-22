@@ -7,6 +7,7 @@
 #include <sqlite3.h>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include "gpu_device.hpp"
 #include "sql_mod.hpp"
 #include "sario.hpp"
 #include "orbit.hpp"
@@ -263,9 +264,10 @@ int deramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
+    set_gpu(parse_gpu_arg(argc, argv));
     if (argc<4){
         std::cout << "Usage: deramp_burst dbname burstfile deramp_phase_file"
-            << std::endl;
+            << " [--gpu DEVICE_ID]" << std::endl;
         return 0;
     }
     const std::string dbname = std::string(argv[1]);

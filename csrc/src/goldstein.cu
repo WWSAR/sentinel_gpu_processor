@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
 #include <cufft.h>
+#include "gpu_device.hpp"
 #include <device_launch_parameters.h>
 #include <fstream>
 #include <iostream>
@@ -499,9 +500,10 @@ void goldstein_filter(
 }
 
 int main(int argc, char *argv[]){
+    set_gpu(parse_gpu_arg(argc, argv));
     if (argc<6){
         std::cout << "Usage: goldstein in_str nrow ncol n_win alpha [out_str]"
-                  << std::endl;
+                  << " [--gpu DEVICE_ID]" << std::endl;
         return 0;
     }
     const std::string in_str = std::string(argv[1]);

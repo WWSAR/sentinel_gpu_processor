@@ -8,6 +8,7 @@
 #include <string>
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include "gpu_device.hpp"
 #include "sql_mod.hpp"
 #include "sario.hpp"
 #include "orbit.hpp"
@@ -352,9 +353,10 @@ int geo2rdr_reramp(const std::string &dbname,
 }
 
 int main(int argc, char *argv[]){
+    set_gpu(parse_gpu_arg(argc, argv));
     if (argc<4){
         std::cout << "Usage: geo2rdr_reramp dbname deramp_phase_file " <<
-            "slcoutfile [slcinfile]" <<
+            "slcoutfile [slcinfile] [--gpu DEVICE_ID]" <<
             std::endl;
         return 0;
     }

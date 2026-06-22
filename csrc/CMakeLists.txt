@@ -10,6 +10,16 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
 
+if(MSVC)
+    # force MSVC compiler to use UTF-8 to decode source and header files
+    add_compile_options("$<$<COMPILE_LANGUAGE:CXX>:/utf-8>")
+    add_compile_options("$<$<COMPILE_LANGUAGE:C>:/utf-8>")
+    
+    if(CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+        add_compile_options("$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>")
+    endif()
+endif()
+
 # Automatically set architectures based on specific flags
 set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
 
