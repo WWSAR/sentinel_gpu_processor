@@ -20,34 +20,35 @@
  *     Zero-based index of the CUDA device to activate.
  */
 inline void set_gpu(int device_id) {
-    if (device_id < 0) return;
+  if (device_id < 0)
+    return;
 
-    int device_count;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    if (err != cudaSuccess) {
-        std::cerr << "Warning: Cannot query CUDA device count: "
-                  << cudaGetErrorString(err) << std::endl;
-        return;
-    }
+  int device_count;
+  cudaError_t err = cudaGetDeviceCount(&device_count);
+  if (err != cudaSuccess) {
+    std::cerr << "Warning: Cannot query CUDA device count: "
+              << cudaGetErrorString(err) << std::endl;
+    return;
+  }
 
-    if (device_id >= device_count) {
-        std::cerr << "Warning: Requested GPU device " << device_id
-                  << " but only " << device_count << " device(s) available. "
-                  << "Falling back to device 0." << std::endl;
-        device_id = 0;
-    }
+  if (device_id >= device_count) {
+    std::cerr << "Warning: Requested GPU device " << device_id << " but only "
+              << device_count << " device(s) available. "
+              << "Falling back to device 0." << std::endl;
+    device_id = 0;
+  }
 
-    err = cudaSetDevice(device_id);
-    if (err != cudaSuccess) {
-        std::cerr << "Error: Failed to set CUDA device to " << device_id
-                  << ": " << cudaGetErrorString(err) << std::endl;
-        exit(1);
-    }
+  err = cudaSetDevice(device_id);
+  if (err != cudaSuccess) {
+    std::cerr << "Error: Failed to set CUDA device to " << device_id << ": "
+              << cudaGetErrorString(err) << std::endl;
+    exit(1);
+  }
 
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, device_id);
-    std::cout << "Using GPU device " << device_id << ": " << prop.name
-              << std::endl;
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, device_id);
+  std::cout << "Using GPU device " << device_id << ": " << prop.name
+            << std::endl;
 }
 
 /**
@@ -68,13 +69,13 @@ inline void set_gpu(int device_id) {
  *     The requested GPU index, or -1 if ``--gpu`` was not found.
  */
 inline int parse_gpu_arg(int argc, char *argv[]) {
-    for (int i = 1; i < argc - 1; ++i) {
-        std::string arg(argv[i]);
-        if (arg == "--gpu" || arg == "-g") {
-            return std::stoi(argv[i + 1]);
-        }
+  for (int i = 1; i < argc - 1; ++i) {
+    std::string arg(argv[i]);
+    if (arg == "--gpu" || arg == "-g") {
+      return std::stoi(argv[i + 1]);
     }
-    return -1;
+  }
+  return -1;
 }
 
-#endif  // GPU_DEVICE_HPP
+#endif // GPU_DEVICE_HPP

@@ -23,7 +23,6 @@ SOL = 299792458.0
 
 
 def clip_polygon_with_rect(poly, lon_min, lat_min, lon_max, lat_max):
-
     def inside_left(p):
         return p[0] >= lon_min
 
@@ -272,7 +271,8 @@ def sentinel_scene(
     for ifile, fn in enumerate(swathfiles):
         #    for itemp in range(1):  # remove to go back to usual
         #        file=swathfiles[ifile-1] # remove to go back to usual
-        # create the orbtiming file, roi.db.X file with metadata, file table for each subswath
+        # create the orbtiming file, roi.db.X file with metadata, file table for each
+        # subswath
         subswath = subswath_list[ifile]
         dbfname = os.path.join(
             proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.db"

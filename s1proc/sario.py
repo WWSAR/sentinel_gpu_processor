@@ -520,7 +520,6 @@ def img2zarr(
     attrs: Dict[str, Any],
     chunks: Tuple[int, int, int] | None = None,
 ):
-
     nimg = len(input_files)
     # create a data set
     if chunks is None:

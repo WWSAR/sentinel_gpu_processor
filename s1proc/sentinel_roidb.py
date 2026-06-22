@@ -35,7 +35,6 @@ def create_db(
     dcfname: str,
     fmratefname: str,
 ):
-
     # open a database file
     if os.path.exists(dbfname):
         os.remove(dbfname)

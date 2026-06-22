@@ -212,9 +212,9 @@ def merge2geos(geo1, geo2):
 def project(imgi, geoi, geof):
     nlat = imgi.shape[0]
     nlon = imgi.shape[1]
-    assert nlon == geoi.nlon and nlat == geoi.nlat, (
-        "The input geocoordinate does not match with the image."
-    )
+    assert (
+        nlon == geoi.nlon and nlat == geoi.nlat
+    ), "The input geocoordinate does not match with the image."
     lat, lon = geoi.grid()
     xf, yf = geof.ll2xy(lat, lon)
     validmask = (xf >= 0) & (xf < geof.nlat) & (yf > 0) & (yf < geof.nlon)
