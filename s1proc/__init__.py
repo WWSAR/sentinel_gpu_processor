@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+
 import platformdirs
 
 __version__ = "0.1.0"
@@ -8,6 +9,7 @@ __version__ = "0.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 
 BIN_DIR = os.path.join(BASE_DIR, "bin")
+
 
 def get_bin_path(bin_name: str) -> str:
     """
@@ -25,6 +27,7 @@ def get_bin_path(bin_name: str) -> str:
         )
 
     return str(bin_path)
+
 
 def get_cache_dir() -> Path:
     """

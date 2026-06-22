@@ -7,31 +7,34 @@ study area bounding-box computation, and COP DEM download via sardem.
 """
 
 import json
-import numpy as np
 import os
-import requests
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from requests.adapters import HTTPAdapter
 from typing import Sequence
 from urllib.parse import urljoin
+
+import numpy as np
+import requests
+from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from s1proc import get_cache_dir
-from s1proc._log import setup_logger
 from s1proc._config import load_config
+from s1proc._log import setup_logger
 from s1proc.query import _geojson_to_metalink
 from s1proc.sentinel_downloader import download_metalink
 from s1proc.utils import gtiff2roipac
 
 logger = setup_logger(name=__name__, level="INFO")
 
+
 def download_vrt_file():
     """
     Recursively download COP vrt files
 
     """
+
     def create_session():
         session = requests.Session()
 
@@ -86,7 +89,7 @@ def download_vrt_file():
         refs = parse_vrt(local_file)
 
         for ref in refs:
-            if ref is None or 'vsicurl' in ref:
+            if ref is None or "vsicurl" in ref:
                 continue
             # Handle relative paths
             full_url = urljoin(url, ref)
@@ -97,9 +100,10 @@ def download_vrt_file():
     visited = set()
     root_url = "https://raw.githubusercontent.com/scottstanie/sardem/master/sardem/data/cop_global.vrt"
     logger.info(f"Downloading vrt files from {root_url}, it may take a while.")
-    cache_dir = get_cache_dir() 
+    cache_dir = get_cache_dir()
     recursive_download(root_url, cache_dir)
-    logger.info(f"cop_global.vrt is successfully downloaded.")
+    logger.info("cop_global.vrt is successfully downloaded.")
+
 
 def _compute_frames_bbox(features):
     """
@@ -169,6 +173,7 @@ def _intersect_bbox(bbox1, bbox2):
         return (west, south, east, north)
     return None
 
+
 def _download_dem(
     output_name,
     bbox,
@@ -193,10 +198,10 @@ def _download_dem(
     yrate : int
         Upsampling factor in the y (latitude) direction.
     """
+    from osgeo import gdal
     from sardem import conversions, utils
     from sardem.constants import DEFAULT_RES
     from sardem.cop_dem import _gdal_cmd_from_options
-    from osgeo import gdal
 
     code = conversions.EPSG_CODES["egm08"]
     s_srs = "epsg:4326+{}".format(code)
@@ -225,11 +230,10 @@ def _download_dem(
     cmd = _gdal_cmd_from_options(vrt_filename, output_name, option_dict)
     logger.info("Running GDAL command:")
     logger.info(cmd)
-    subprocess.check_call(cmd, shell = True)
+    subprocess.check_call(cmd, shell=True)
 
-def _filter_by_frame(
-    s1_data: dict,
-    frame_list: Sequence[int]) -> dict:
+
+def _filter_by_frame(s1_data: dict, frame_list: Sequence[int]) -> dict:
     """
     Filter Sentinel-1 data based on frame numbers
 
@@ -252,6 +256,7 @@ def _filter_by_frame(
         return None
     s1_data["features"] = filtered
     return s1_data
+
 
 def preprocess(config_file="config.yaml"):
     """
@@ -295,22 +300,21 @@ def preprocess(config_file="config.yaml"):
 
     with open(geojson_file, "r", encoding="utf-8") as f:
         s1_data = json.load(f)
-        
+
     if frame_list is None or len(frame_list) == 0:
-        logger.warning("frame list is empty or not set, frame filter " + \
-                       "will not be applied")
+        logger.warning(
+            "frame list is empty or not set, frame filter " + "will not be applied"
+        )
     else:
         s1_data = _filter_by_frame(s1_data, frame_list)
     metalink_file = root_dir / "roi.metalink"
     _geojson_to_metalink(s1_data, metalink_file)
-    logger.info(f'Write filtered Sentinel-1 metalinks to {metalink_file}') 
+    logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
 
     # Compute study area bounds
     frames_bbox = _compute_frames_bbox(s1_data["features"])
     if frames_bbox is None:
-        raise RuntimeError(
-            "No frame footprints found — cannot determine study area"
-        )
+        raise RuntimeError("No frame footprints found — cannot determine study area")
 
     logger.info("Frames bounding box: %s", frames_bbox)
 
@@ -318,8 +322,7 @@ def preprocess(config_file="config.yaml"):
     study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
     if study_bbox is None:
         raise RuntimeError(
-            f"Frame footprints {frames_bbox} do not overlap with "
-            f"area.bbox {bbox_tuple}"
+            f"Frame footprints {frames_bbox} do not overlap with area.bbox {bbox_tuple}"
         )
     logger.info("Study area (intersection): %s", study_bbox)
 
@@ -330,10 +333,10 @@ def preprocess(config_file="config.yaml"):
     # download the vrt file if it does not exist
     if not vrt_file.exists():
         download_vrt_file()
-    tif_file = root_dir / 'roi_dem.tif'
+    tif_file = root_dir / "roi_dem.tif"
     if tif_file.exists():
         os.remove(tif_file)
-    _download_dem(tif_file, bbox, vrt_file, 6, 3, 'GTiff', 'int16')
+    _download_dem(tif_file, bbox, vrt_file, 6, 3, "GTiff", "int16")
     gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16)
 
     # Download SLC data
@@ -346,7 +349,4 @@ def preprocess(config_file="config.yaml"):
 
     eof_path = Path(cfg.io.eof_path)
     eof_path.mkdir(parents=True, exist_ok=True)
-    eof_download.main(
-        search_path=str(slc_path),
-        save_dir=str(eof_path)
-    )
+    eof_download.main(search_path=str(slc_path), save_dir=str(eof_path))

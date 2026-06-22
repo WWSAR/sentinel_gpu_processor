@@ -1,23 +1,17 @@
-import glob
-import numpy as np
 import os
-import shutil
 import subprocess
 
-from matplotlib import pyplot as plt
-from pathlib import Path
-from typing import List
-
 from s1proc import get_bin_path
-from s1proc.utils import IfgList, get_files
-from s1proc._log import setup_logger, set_logging_level
-from s1proc.tropo import tropo_preproc, _era5_correction
-logger = setup_logger(name = __name__, level = 'INFO')
+from s1proc._log import set_logging_level, setup_logger
+from s1proc.tropo import _era5_correction, tropo_preproc
+from s1proc.utils import get_files
+
+logger = setup_logger(name=__name__, level="INFO")
+
 
 def phase_correction(
-        ifg_path: str|None = None,
-        config: str = 'config.yaml',
-        verbose: bool = False):
+    ifg_path: str | None = None, config: str = "config.yaml", verbose: bool = False
+):
     """
     Run phase correction for wrapped interferograms
 
@@ -31,10 +25,11 @@ def phase_correction(
         If True, set the logging level to DEBUG
     """
     if verbose:
-        set_logging_level(logger, 'DEBUG')
+        set_logging_level(logger, "DEBUG")
 
     from s1proc._config import load_config
     from s1proc.geocoordinates import GeoCoordinates
+
     cfg = load_config(config)
     icfg = cfg.io
     pcfg = cfg.proc
@@ -42,44 +37,49 @@ def phase_correction(
     if ifg_path is None:
         ifg_path = icfg.ifg_path
 
-    ifg_files = get_files(ifg_path, 'int')  
+    ifg_files = get_files(ifg_path, "int")
     nifg = len(ifg_files)
-    logger.debug(f'Number of interferograms: {nifg}')
-    
+    logger.debug(f"Number of interferograms: {nifg}")
+
     if not os.path.exists(icfg.multilook_rsc_file):
         rsc = GeoCoordinates(icfg.rsc_file)
         rsc = rsc.take_look(pcfg.rowlook, pcfg.collook)
         rsc.save_as_rsc(icfg.multilook_rsc_file)
     rsc = GeoCoordinates(icfg.multilook_rsc_file)
     nrow, ncol = rsc.nlat, rsc.nlon
-    logger.debug(f'Image shape: {nrow} x {ncol}')
+    logger.debug(f"Image shape: {nrow} x {ncol}")
 
-    ifg_list = IfgList(ifg_files)
     output_files = []
-    os.makedirs(icfg.ifg_corr_path, exist_ok = True)
+    os.makedirs(icfg.ifg_corr_path, exist_ok=True)
     if cfg.tropo.enable:
-        logger.info('Tropospheric noise correction')
+        logger.info("Tropospheric noise correction")
         tropo_preproc(ifg_path, config, verbose)
         for ifg_file in ifg_files:
-            output_file = os.path.join(icfg.ifg_corr_path,
-                    os.path.basename(ifg_file))
-            _era5_correction(ifg_file, output_file, nrow, ncol,
-                    cfg.tropo.parameters, cfg.proc.wavelength)
+            output_file = os.path.join(icfg.ifg_corr_path, os.path.basename(ifg_file))
+            _era5_correction(
+                ifg_file,
+                output_file,
+                nrow,
+                ncol,
+                cfg.tropo.parameters,
+                cfg.proc.wavelength,
+            )
             output_files.append(output_file)
-    
+
     if len(output_files) == 0:
         output_files = ifg_files
     if cfg.filter.enable:
         fcfg = cfg.filter
-        temp_dir = 'temp_filter'
-        os.makedirs(temp_dir, exist_ok = True)
-        ifglist_file = os.path.join(temp_dir, 'ifg_list')
-        with open(ifglist_file, 'w') as f:
-            f.write('\n'.join(output_files))
-        goldstein = get_bin_path('goldstein')
-        command = f'{goldstein} {ifglist_file} {nrow} {ncol} ' + \
-                  f'{fcfg.parameters.window_size} ' + \
-                  f'{fcfg.parameters.goldstein_alpha}'
+        temp_dir = "temp_filter"
+        os.makedirs(temp_dir, exist_ok=True)
+        ifglist_file = os.path.join(temp_dir, "ifg_list")
+        with open(ifglist_file, "w") as f:
+            f.write("\n".join(output_files))
+        goldstein = get_bin_path("goldstein")
+        command = (
+            f"{goldstein} {ifglist_file} {nrow} {ncol} "
+            + f"{fcfg.parameters.window_size} "
+            + f"{fcfg.parameters.goldstein_alpha}"
+        )
         logger.info(command)
-        subprocess.check_call(command, shell = True) 
-
+        subprocess.check_call(command, shell=True)

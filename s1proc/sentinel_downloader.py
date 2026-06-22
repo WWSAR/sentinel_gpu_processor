@@ -75,9 +75,7 @@ def _check_earthdata_netrc() -> Optional[Tuple[str, str]]:
         auth = netrc.netrc(str(netrc_path))
         entry = auth.authenticators(NASA_MACHINE)
         if entry is None:
-            logger.debug(
-                "netrc file found but no entry for %s.", NASA_MACHINE
-            )
+            logger.debug("netrc file found but no entry for %s.", NASA_MACHINE)
             return None
         login, _, password = entry
         if login and password:
@@ -165,9 +163,7 @@ def ensure_earthdata_credentials() -> Tuple[str, str]:
         return creds
 
     netrc_path = _netrc_write_path()
-    logger.info(
-        "Earthdata credentials not found. Prompting for input..."
-    )
+    logger.info("Earthdata credentials not found. Prompting for input...")
     return _prompt_earthdata_credentials(netrc_path)
 
 
@@ -253,9 +249,7 @@ def download_metalink(
     """
     metalink_path = Path(metalink_file).resolve()
     if not metalink_path.is_file():
-        raise FileNotFoundError(
-            f"Metalink file not found: {metalink_path}"
-        )
+        raise FileNotFoundError(f"Metalink file not found: {metalink_path}")
 
     out_path = Path(output_dir).resolve()
     out_path.mkdir(parents=True, exist_ok=True)
@@ -266,12 +260,18 @@ def download_metalink(
     aria2c = _find_aria2c()
     cmd = [
         aria2c,
-        "--metalink-file", str(metalink_path),
-        "--dir", str(out_path),
-        "-j", "3",
-        "-x", "16",
-        "-s", "16",
-        "--console-log-level","error",
+        "--metalink-file",
+        str(metalink_path),
+        "--dir",
+        str(out_path),
+        "-j",
+        "3",
+        "-x",
+        "16",
+        "-s",
+        "16",
+        "--console-log-level",
+        "error",
         "--check-integrity=true",
     ]
     if continue_on_error:

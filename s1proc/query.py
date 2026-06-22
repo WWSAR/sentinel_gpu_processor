@@ -1,26 +1,31 @@
 import glob
 import json
-import numpy as np
 import os
-import requests
 import shutil
-import tqdm
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 from typing import List, Literal, Optional
+
+import numpy as np
+import requests
+import tqdm
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from s1proc._log import setup_logger, set_logging_level
-logger = setup_logger(name = __name__, level = 'INFO')
+from s1proc._log import setup_logger
+
+logger = setup_logger(name=__name__, level="INFO")
 
 METALINK_NS = "http://www.metalinker.org/"
 METALINK_VERSION = "3.0"
 
 BASE_URL = "https://api.daac.asf.alaska.edu/services/search/param?"
-QUERY_TEMPLATE = BASE_URL + 'dataset={}&beamMode={}&processingLevel={}' + \
-                 '&start={}T00:00:00Z&end={}T23:59:59Z&output={}'
+QUERY_TEMPLATE = (
+    BASE_URL
+    + "dataset={}&beamMode={}&processingLevel={}"
+    + "&start={}T00:00:00Z&end={}T23:59:59Z&output={}"
+)
 
 
 def merge_asf_geojson(temp_dir, output_file):
@@ -62,10 +67,7 @@ def merge_asf_geojson(temp_dir, output_file):
             seen.add(scene_id)
             features.append(feat)
 
-    merged = {
-        "type": "FeatureCollection",
-        "features": features
-    }
+    merged = {"type": "FeatureCollection", "features": features}
 
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(merged, f, indent=2, ensure_ascii=False)
@@ -73,6 +75,7 @@ def merge_asf_geojson(temp_dir, output_file):
     logger.info("Merged %d geojson files", len(all_files))
     logger.info("Unique scenes: %d", len(features))
     logger.info("Saved to %s", output_file)
+
 
 def merge_asf_metalink(temp_dir, output_file):
     """
@@ -150,7 +153,7 @@ def merge_asf_metalink(temp_dir, output_file):
     logger.info("Saved to %s", output_file)
 
 
-def _geojson_to_metalink(data: dict, metalink_path: Path|str):
+def _geojson_to_metalink(data: dict, metalink_path: Path | str):
     """
     Helper function to convert a geojson dictionary to metalink
 
@@ -158,11 +161,13 @@ def _geojson_to_metalink(data: dict, metalink_path: Path|str):
     ----------
     data: dict
         geojson data
-    metalink_path: Path | str     
+    metalink_path: Path | str
         Destination path for the generated metalink file.
     """
     if data.get("type") != "FeatureCollection":
-        logger.warning("GeoJSON is not a FeatureCollection; skipping metalink extraction.")
+        logger.warning(
+            "GeoJSON is not a FeatureCollection; skipping metalink extraction."
+        )
         return
 
     root = ET.Element("metalink", xmlns=METALINK_NS, version=METALINK_VERSION)
@@ -206,8 +211,9 @@ def _geojson_to_metalink(data: dict, metalink_path: Path|str):
     tree.write(metalink_path, encoding="UTF-8", xml_declaration=True)
 
     logger.info("Extracted %d download URLs to %s", count, metalink_path)
-    
-def geojson_to_metalink(geojson_path: Path|str, metalink_path: Path|str):
+
+
+def geojson_to_metalink(geojson_path: Path | str, metalink_path: Path | str):
     """
     Extract download metadata from a merged ASF GeoJSON file and write a
     matching metalink XML file.
@@ -227,12 +233,13 @@ def geojson_to_metalink(geojson_path: Path|str, metalink_path: Path|str):
         data = json.load(f)
     _geojson_to_metalink(data, metalink_path)
 
+
 def create_session(max_retries=5):
     retry_strategy = Retry(
-        total=max_retries,          # total number of retries
-        backoff_factor=1,           # delay: 1s, 2s, 4s, ...
+        total=max_retries,  # total number of retries
+        backoff_factor=1,  # delay: 1s, 2s, 4s, ...
         status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
+        allowed_methods=["GET", "POST"],
     )
 
     adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -242,11 +249,21 @@ def create_session(max_retries=5):
     session.mount("https://", adapter)
     return session
 
-def _build_query(dataset, beam_mode, processing_level, start_date, end_date,
-                  output_type, flight_direction=None, bbox_str=None):
+
+def _build_query(
+    dataset,
+    beam_mode,
+    processing_level,
+    start_date,
+    end_date,
+    output_type,
+    flight_direction=None,
+    bbox_str=None,
+):
     """Build an ASF query URL with the given parameters."""
-    query_string = QUERY_TEMPLATE.format(dataset, beam_mode, processing_level,
-                                         start_date, end_date, output_type)
+    query_string = QUERY_TEMPLATE.format(
+        dataset, beam_mode, processing_level, start_date, end_date, output_type
+    )
     if flight_direction:
         query_string += f"&flightDirection={flight_direction}"
     if bbox_str:
@@ -258,7 +275,7 @@ def _do_query(session, query_string, outfile):
     """Execute a single ASF query and save the response to *outfile*."""
     response = session.get(query_string)
     response.raise_for_status()
-    with open(outfile, 'wb') as f:
+    with open(outfile, "wb") as f:
         f.write(response.content)
 
 
@@ -266,10 +283,10 @@ def query_asf(
     bbox: List[float],
     start_date: str,
     end_date: str,
-    outfile: str = 'sentinel.geojson',
-    dataset = "SENTINEL-1",
-    beam_mode = "IW",
-    processing_level = "SLC",
+    outfile: str = "sentinel.geojson",
+    dataset="SENTINEL-1",
+    beam_mode="IW",
+    processing_level="SLC",
     flight_direction: Optional[Literal["ASCENDING", "DESCENDING"]] = None,
     output_type: Literal["geojson", "metalink"] = "geojson",
 ):
@@ -320,14 +337,22 @@ def query_asf(
     end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
 
     # ---- shared state -------------------------------------------------------
-    temp_dir = f'temp_queries_{start_date}_{end_date}'
+    temp_dir = f"temp_queries_{start_date}_{end_date}"
     os.makedirs(temp_dir, exist_ok=True)
     session = create_session()
 
     # ---- helper: run a count query for a given time window and bbox ---------
     def _get_count(s_date: str, e_date: str, bbox_str: str) -> int:
-        q = _build_query(dataset, beam_mode, processing_level,
-                         s_date, e_date, "count", flight_direction, bbox_str)
+        q = _build_query(
+            dataset,
+            beam_mode,
+            processing_level,
+            s_date,
+            e_date,
+            "count",
+            flight_direction,
+            bbox_str,
+        )
         resp = session.get(q)
         resp.raise_for_status()
         return int(resp.text.strip())
@@ -343,11 +368,17 @@ def query_asf(
 
     if total_count < 2000:
         logger.info("Total scene count %d < 2000; querying all at once.", total_count)
-        q = _build_query(dataset, beam_mode, processing_level,
-                         start_date, end_date, output_type,
-                         flight_direction, bbox_full)
-        _do_query(session, q,
-                  os.path.join(temp_dir, f'sentinel_full.{output_type}'))
+        q = _build_query(
+            dataset,
+            beam_mode,
+            processing_level,
+            start_date,
+            end_date,
+            output_type,
+            flight_direction,
+            bbox_full,
+        )
+        _do_query(session, q, os.path.join(temp_dir, f"sentinel_full.{output_type}"))
 
     else:
         # ---- Step 2: split by year ------------------------------------------
@@ -380,37 +411,62 @@ def query_asf(
                 logger.info(
                     "Year %d: %d scenes < 2000; querying full bbox.", year, year_count
                 )
-                q = _build_query(dataset, beam_mode, processing_level,
-                                 y_start, y_end, output_type,
-                                 flight_direction, bbox_full)
-                _do_query(session, q,
-                          os.path.join(temp_dir, f'sentinel_{year}.{output_type}'))
+                q = _build_query(
+                    dataset,
+                    beam_mode,
+                    processing_level,
+                    y_start,
+                    y_end,
+                    output_type,
+                    flight_direction,
+                    bbox_full,
+                )
+                _do_query(
+                    session, q, os.path.join(temp_dir, f"sentinel_{year}.{output_type}")
+                )
 
             else:
                 # ---- Step 3: split bbox into 1x1-degree tiles ----------------
                 logger.warning(
                     "Year %d: %d scenes >= 2000; splitting by 1x1-degree tiles.",
-                    year, year_count,
+                    year,
+                    year_count,
                 )
                 for lat in np.arange(lat_min, lat_max, 1):
                     for lon in np.arange(lon_min, lon_max, 1):
-                        tile_bbox = ",".join(map(str, [
-                            lon, lat,
-                            np.minimum(lon + 1, lon_max),
-                            np.minimum(lat + 1, lat_max),
-                        ]))
-                        q = _build_query(dataset, beam_mode, processing_level,
-                                         y_start, y_end, output_type,
-                                         flight_direction, tile_bbox)
+                        tile_bbox = ",".join(
+                            map(
+                                str,
+                                [
+                                    lon,
+                                    lat,
+                                    np.minimum(lon + 1, lon_max),
+                                    np.minimum(lat + 1, lat_max),
+                                ],
+                            )
+                        )
+                        q = _build_query(
+                            dataset,
+                            beam_mode,
+                            processing_level,
+                            y_start,
+                            y_end,
+                            output_type,
+                            flight_direction,
+                            tile_bbox,
+                        )
                         outfile_tile = os.path.join(
                             temp_dir,
-                            f'sentinel_{year}_{lat:.0f}_{lon:.0f}.{output_type}')
+                            f"sentinel_{year}_{lat:.0f}_{lon:.0f}.{output_type}",
+                        )
                         try:
                             _do_query(session, q, outfile_tile)
                         except requests.RequestException as exc:
                             logger.error(
                                 "Query failed for tile %s in year %d: %s",
-                                tile_bbox, year, exc,
+                                tile_bbox,
+                                year,
+                                exc,
                             )
 
             pbar.update(1)
