@@ -25,6 +25,8 @@ proc:
     max_tbl: 360     # maximum temporal baseline
     min_sbl: 0       # minimum spatial baseline
     max_sbl: 300     # maximum spatial baseline
+    ngpu:            # number of gpus used for parallel interferogram generation
+    task_per_gpu:    # number of tasks running on each GPU
 
 # Wrapped interferogram processing
 # Interferogram filtering, for the moment, only Goldstein filter is implemented

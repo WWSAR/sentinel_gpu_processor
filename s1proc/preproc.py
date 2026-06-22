@@ -262,6 +262,13 @@ def preprocess(config_file="config.yaml"):
     """
     Run the full preprocessing pipeline.
 
+    Parameters
+    ----------
+    config_file : str or Path
+        Path to the YAML configuration file.
+
+    Notes
+    -----
     Reads *config_file* and:
 
     1. Filters the GeoJSON (``roi.geojson``) to retain only scenes
@@ -278,11 +285,6 @@ def preprocess(config_file="config.yaml"):
     6. Downloads precise orbit (EOF) files via *sentineleof*, scanning
        ``io.slc_path`` for Sentinel-1 products and saving orbits to
        ``io.eof_path``.
-
-    Parameters
-    ----------
-    config_file : str or Path
-        Path to the YAML configuration file.
     """
     config_file = Path(config_file)
     root_dir = config_file.parent

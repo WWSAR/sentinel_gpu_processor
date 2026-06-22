@@ -503,6 +503,21 @@ def run_check_integrity(
     return
 
 
+def get_gpu_count():
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "-L"], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+        return len(result.stdout.decode().strip().split("\n"))
+    except FileNotFoundError:
+        logger.error(
+            "Failed to run nvidia-smi to count GPUs. " + "Assume there is only one GPU."
+        )
+        return 1
+
+
 def get_files(input_path: str, extension: str | None = None) -> List[str]:
     """
     Get files from input_path, input_path can either be a single file,

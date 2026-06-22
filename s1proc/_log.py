@@ -8,7 +8,8 @@ def setup_logger(name, level="INFO"):
         "disable_existing_loggers": False,
         "formatters": {
             "standard": {
-                "format": "[%(asctime)s] [%(levelname)s|%(module)s|L%(lineno)d] %(message)s",
+                "format": "[%(asctime)s] [%(levelname)s|%(module)s|L%(lineno)d]"
+                + "%(message)s",
                 "datefmt": "%m/%d %H:%M:%S",
             },
         },

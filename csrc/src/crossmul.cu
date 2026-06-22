@@ -133,13 +133,13 @@ int crossmul(const std::string &input_file, const int rowlook,
     bottom2 = header2[5];
 
     left = left1 < left2 ? left1 : left2;
-    left = (left + collook - 1) / collook * collook;
+    // left = (left + collook - 1) / collook * collook;
     right = right1 > right2 ? right1 : right2;
-    right = right / collook * collook;
+    // right = right / collook * collook;
     top = top1 < top2 ? top1 : top2;
-    top = (top + rowlook - 1) / rowlook * rowlook;
+    // top = (top + rowlook - 1) / rowlook * rowlook;
     bottom = bottom1 > bottom2 ? bottom1 : bottom2;
-    bottom = bottom / rowlook * rowlook;
+    // bottom = bottom / rowlook * rowlook;
 
     max_nrow = std::max(bottom - top, max_nrow);
     max_ncol = std::max(right - left, max_ncol);

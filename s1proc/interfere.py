@@ -146,8 +146,8 @@ def stitch_subswath(burst_ifgs, out_float):
     ifg = CroppedImage(
         subswath.nrow0, subswath.ncol0, left, top, right, bottom, ifg_data
     )
-    # for outfile in outfiles:
-    #    os.remove(outfile)
+    for burst_ifg in burst_ifgs:
+        os.remove(burst_ifg)
     return ifg
 
 
@@ -219,6 +219,50 @@ def parse_fname(fn: str) -> Tuple[str, str]:
     return date, data_id
 
 
+def crossmul_wrapper(
+    burst_pair_file: str,
+    rowlook: int,
+    collook: int,
+    out_float: bool,
+    gpu_device: int | None = None,
+) -> str:
+    """
+    Python wrapper for the CUDA-version crossmul
+
+    Parameters
+    ----------
+    burst_pair_file: str
+        The file containing pairs of bursts to form burst-level
+        burst-level interferograms
+    rowlook: int
+        Number of looks along the row direction
+    collook: int
+        Number of looks along the column direction
+    out_float: bool
+        Only save the interferometric phase (ignoring amplitude)
+    gpu_device: int | None  = None
+        GPU device to run crossmul. If None, let the system to decide
+        which GPU to use
+
+    Returns
+    -------
+    result_identifier: str
+        A message to be shown by the GPU task scheduler
+    """
+    crossmul = get_bin_path("crossmul")
+    cmd = [
+        crossmul,
+        burst_pair_file,
+        str(rowlook),
+        str(collook),
+        "1" if out_float else "0",
+    ]
+    if gpu_device is not None:
+        cmd += ["--gpu", str(gpu_device)]
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    return f"Interferogram generation for {burst_pair_file}"
+
+
 def interfere(
     img_pair_file: str,
     slc_path: str,
@@ -228,7 +272,8 @@ def interfere(
     rowlook: int = 1,
     collook: int = 1,
     out_float: bool = False,
-    verbose: bool = False,
+    ngpu: int | None = None,
+    task_per_gpu: int = 1,
 ):
     """
     Form interferograms from a subswath list
@@ -236,7 +281,7 @@ def interfere(
     Parameters
     ----------
     img_pair_file: str
-        File containing pairs of subswath images
+        File containing pairs of dates to form interferogram
     slc_path: str
         Directory of SLC files
     rscfile: str
@@ -251,18 +296,20 @@ def interfere(
         Number of look in column direction
     out_float: bool
         Output float rather than cpx images
-    verbose: bool
-        Set the logging level to debug
+    ngpu: int
+        Number of GPUs used for interferogram generation. If None, set to
+        the total number of GPUs on current machine
+    task_per_gpu: int
+        Number of tasks running on each GPU in parallel
     """
-    if verbose:
-        set_logging_level(logger, "DEBUG")
+    from s1proc.utils import GpuTaskScheduler, get_gpu_count
+
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook, collook)
     if os.path.dirname(small_rsc_file):
         os.makedirs(os.path.dirname(small_rsc_file), exist_ok=True)
     rsclook.save_as_rsc(small_rsc_file)
-    burst_pair_file = os.path.join(ifg_path, "burst_pair_list.txt")
 
     ref_dates = []
     sec_dates = []
@@ -283,6 +330,7 @@ def interfere(
                 burst_group = BurstGroup(burst_files)
                 date_burst_map[sec_date] = burst_group
 
+    # match all burst pairs
     burst_pairs = []
     burst_pair_map = {}
     for ref_date, sec_date in zip(ref_dates, sec_dates):
@@ -295,47 +343,88 @@ def interfere(
             ref_burst_group, sec_burst_group, ifg_path
         )
         burst_pair_map[outfile] = [b[2] for b in _burst_pairs]
+        # skip a set of bursts if all their associated interferograms already
+        # exist
         if not all([os.path.exists(b[2]) for b in _burst_pairs]):
             burst_pairs.extend(_burst_pairs)
 
+    # Deduce appropriate parameters for GpuTaskScheduler
     n_pair = len(burst_pairs)
     n_ifg = len(burst_pair_map)
-    if n_pair > 0:
-        with open(burst_pair_file, "w") as f:
-            for i in range(n_pair - 1):
-                f.write(" ".join(burst_pairs[i]) + "\n")
-            f.write(" ".join(burst_pairs[-1]))
-    logger.info(f"Find {n_pair} burst pairs in {n_ifg} interferograms")
+    if n_pair == 0:
+        logger.warning("Did not find any burst pairs.")
+        return
+    logger.info(f"Find {n_pair} burst pairs in {n_ifg} interferograms.")
 
+    # Run crossmul to form interferograsm
+    max_ngpu = get_gpu_count()
+    if ngpu is None:
+        ngpu = max_ngpu
+    elif ngpu > max_ngpu:
+        logger.warning(
+            f"User-specified number of GPUs ({ngpu}) exceeds the number of "
+            + f"available GPUs on this machine ({max_ngpu})."
+        )
+        ngpu = max_ngpu
+    if task_per_gpu is None:
+        task_per_gpu = 1
+    if task_per_gpu <= 0:
+        raise ValueError("task_per_gpu must be positive.")
+
+    n_sublist = ngpu * task_per_gpu
+    n_sublist = np.minimum(n_sublist, n_pair)
+    logger.info(f"Divide burst pairs into {n_sublist} groups.")
+    n_pair_per_sublist = int(np.ceil(n_pair / n_sublist))
+    logger.info(f"Each group contains {n_pair_per_sublist} to process")
+    task_items = []
+    for i in range(n_sublist):
+        burst_pair_file = os.path.join(ifg_path, f"burst_pair_list_{i}.txt")
+        with open(burst_pair_file, "w") as f:
+            start_idx = n_pair_per_sublist * i
+            end_idx = int(np.minimum(n_pair_per_sublist * (i + 1), n_pair))
+            for i in range(start_idx, end_idx - 1):
+                f.write(" ".join(burst_pairs[i]) + "\n")
+            f.write(" ".join(burst_pairs[end_idx - 1]))
+        task_item = {
+            "burst_pair_file": burst_pair_file,
+            "rowlook": rowlook,
+            "collook": collook,
+            "out_float": out_float,
+        }
+        task_items.append(task_item)
     del burst_pairs
-    crossmul = get_bin_path("crossmul")
-    cmd = [
-        crossmul,
-        burst_pair_file,
-        str(rowlook),
-        str(collook),
-        "1" if out_float else "0",
-    ]
-    subprocess.run(cmd, check=True)
+
+    gpu_task_scheduler = GpuTaskScheduler(ngpu)
+    gpu_task_scheduler.execute_parallel_tasks(
+        crossmul_wrapper,
+        task_items=task_items,
+        task_per_gpu=task_per_gpu,
+        identifier="burst_pair_file",
+    )
+
     for outfile in tqdm(burst_pair_map, desc="stitching"):
         stitch(burst_pair_map[outfile], outfile, out_float)
     logger.info("All interferograms are generated.")
 
 
 def run_interfere(
-    out_float: bool = False, verbose: bool = False, config: str = "config.yaml"
+    config: str = "config.yaml",
+    verbose: bool = False,
 ):
     """
     Form interferograms from a subswath list
 
     Parameters
     ----------
-    out_float: bool
-        Output float rather than cpx images
+    config: str
+        Configuration file
     verbose: bool
-        Set the logging level to debug
+        Set logging level to 'DEBUG'
     """
     from s1proc._config import load_config
+
+    if verbose:
+        set_logging_level(logger, "DEBUG")
 
     cfg = load_config(config)
     icfg = cfg.io
@@ -348,7 +437,8 @@ def run_interfere(
         ifg_path=icfg.ifg_path,
         rowlook=pcfg.rowlook,
         collook=pcfg.collook,
-        out_float=out_float,
-        verbose=verbose,
+        out_float=False,
+        ngpu=pcfg.ngpu,
+        task_per_gpu=pcfg.task_per_gpu,
     )
     return

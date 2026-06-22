@@ -48,13 +48,15 @@ class IoConfig:
 
 @dataclass
 class ProcessingConfig:
-    rowlook: int = 10
-    collook: int = 20
-    wavelength: float = 0.055465763
-    min_tbl: int = 6  # minimum temporal baseline
-    max_tbl: int = 360  # maximum temporal baseline
-    min_sbl: int = 0  # minimum spatial baseline
-    max_sbl: int = 300  # maximum spatial baseline
+    rowlook: int
+    collook: int
+    wavelength: float
+    min_tbl: int  # minimum temporal baseline
+    max_tbl: int  # maximum temporal baseline
+    min_sbl: int  # minimum spatial baseline
+    max_sbl: int  # maximum spatial baseline
+    ngpu: Optional[int]  # number of GPUs for parallel interferogram processing
+    task_per_gpu: Optional[int]  # number of tasks running on each GPU
 
 
 @dataclass
