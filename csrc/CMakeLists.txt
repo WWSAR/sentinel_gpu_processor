@@ -24,9 +24,7 @@ endif()
 set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
 
 # Find packages (order matters: tries custom paths first, then system)
-find_package(TIFF REQUIRED)
 find_package(SQLite3 REQUIRED)
-#find_package(CUDAToolkit REQUIRED)
 find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
 
 if(DEFINED ENV{BUILD_PREFIX})
@@ -78,7 +76,7 @@ target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIRS})
 
 # Link libraries with platform-specific handling
-target_link_libraries(geo2rdr PRIVATE TIFF::TIFF SQLite3::SQLite3)
+target_link_libraries(geo2rdr SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
