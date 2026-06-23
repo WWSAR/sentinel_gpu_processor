@@ -3,10 +3,9 @@ import os
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -720,94 +719,3 @@ def _detect_gpu_count() -> int:
         "Set CUDA_VISIBLE_DEVICES to override."
     )
     return 1
-
-
-class GpuTaskScheduler:
-    """
-    A generic resource-managed scheduler that prevents GPU over-allocation
-    by dynamically balancing available devices against single-task
-    requirements.
-
-    Each worker receives a ``gpu_device`` key in its keyword arguments,
-    which can be used to set ``CUDA_VISIBLE_DEVICES`` or pass a ``--gpu``
-    flag to a CUDA-compiled executable.
-
-    Parameters
-    ----------
-    total_gpus : int or None
-        Maximum number of GPUs to manage.  When *None* (default), the
-        count is auto-detected via :func:`_detect_gpu_count`.
-    """
-
-    def __init__(self, total_gpus: int | None = None):
-        self.total_gpus = total_gpus if total_gpus is not None else _detect_gpu_count()
-        self.total_gpus = max(1, self.total_gpus)
-        logger.info("GPU scheduler initialized with %d device(s).", self.total_gpus)
-
-    def execute_parallel_tasks(
-        self,
-        worker_function: Callable[..., Any],
-        task_items: List[Dict[str, Any]],
-        task_per_gpu: int,
-        identifier: str,
-    ):
-        """
-        Execute a batch of GPU-accelerated tasks concurrently without
-        overcommitting GPU resources.
-
-        Each task item is augmented with a ``gpu_device`` key containing
-        a zero-based logical GPU index assigned round-robin.  The worker
-        function is responsible for routing work to that device (e.g., by
-        setting ``CUDA_VISIBLE_DEVICES`` in a subprocess environment or
-        passing ``--gpu`` to a CUDA executable).
-
-        Parameters
-        ----------
-        worker_function : Callable
-            The top-level function handling a single task item.  It must
-            accept ``gpu_device`` as a keyword argument.
-        task_items : List[Dict[str, Any]]
-            A list of dictionaries containing arguments for
-            *worker_function*.
-        task_per_gpu : int
-            The number of tasks working on the same GPU devices
-        identifier : str
-            The dictionary key used to identify each task in log messages.
-        """
-        if not task_items:
-            logger.info("Task queue is empty.  No operations performed.")
-            return
-
-        max_workers = self.total_gpus * task_per_gpu
-
-        logger.info("=== GPU Resource Allocation Strategy ===")
-        logger.info("Total available GPU device pool: %d", self.total_gpus)
-        logger.info(
-            "Target footprint allocation: %d worker(s) per GPU",
-            task_per_gpu,
-        )
-        logger.info("=========================================")
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_item: Dict[Any, Dict[str, Any]] = {}
-
-            for idx, item_kwargs in enumerate(task_items):
-                item_kwargs = dict(item_kwargs)
-                item_kwargs.setdefault("gpu_device", idx % self.total_gpus)
-                future = executor.submit(worker_function, **item_kwargs)
-                future_to_item[future] = item_kwargs
-
-            for future in as_completed(future_to_item):
-                item_kwargs = future_to_item[future]
-                target_identity = item_kwargs.get(identifier, "Unknown Target")
-                try:
-                    result_identifier = future.result()
-                    logger.info(
-                        "Success: task for [ %s ] finished on GPU %s.",
-                        result_identifier,
-                        item_kwargs.get("gpu_device", "?"),
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failure: task for [ %s ] crashed.", target_identity
-                    )

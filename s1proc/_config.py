@@ -59,7 +59,8 @@ class ProcessingConfig:
     min_sbl: int  # minimum spatial baseline
     max_sbl: int  # maximum spatial baseline
     ngpu: Optional[int]  # number of GPUs for parallel interferogram processing
-    task_per_gpu: Optional[int]  # number of tasks running on each GPU
+    task_per_gpu: Optional[int]  # number of tasks running on each GPU (legacy)
+    max_slots: Optional[int] = None  # pre-allocated pinned-memory buffer slots
 
 
 @dataclass
