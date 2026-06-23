@@ -1,7 +1,6 @@
 import glob
 import os
 import subprocess
-import threading
 from typing import List, Tuple
 
 import numpy as np
@@ -227,14 +226,14 @@ def _run_crossmul_daemon(
     out_float: bool,
     ngpu: int,
     max_slots: int,
+    streams_per_gpu: int = 4,
 ) -> Tuple[int, int]:
     """
     Launch the ``crossmul_daemon`` long-running GPU processor.
 
-    The daemon is spawned as a subprocess.  Burst-pair paths are
-    written to its **stdin** (one per line); progress and completion
-    status are read from its **stdout** in a background monitor
-    thread.
+    Burst-pair paths are written to a temporary file and passed to the
+    daemon via ``--tasks-file``.  Progress and completion status are
+    read from daemon **stdout** line-by-line.
 
     Parameters
     ----------
@@ -250,6 +249,8 @@ def _run_crossmul_daemon(
         Number of GPU devices to use inside the daemon.
     max_slots : int
         Number of pre-allocated pinned-memory buffer slots.
+    streams_per_gpu : int
+        Number of internal execution lanes per GPU (default 4).
 
     Returns
     -------
@@ -258,7 +259,24 @@ def _run_crossmul_daemon(
     failed : int
         Number of burst pairs that failed.
     """
+    import tempfile
+
     daemon_bin = get_bin_path("crossmul_daemon")
+
+    # -- Write tasks to a temporary file --
+    #    Use delete=False because the daemon process reads the file
+    #    independently.  The file is cleaned up after the subprocess exits.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".txt",
+        prefix="crossmul_tasks_",
+        delete=False,
+    )
+    tasks_path = tmp.name
+    for ref_slc, sec_slc, out_ifg in task_items:
+        tmp.write(f"{ref_slc} {sec_slc} {out_ifg}\n")
+    tmp.close()
+
     cmd = [
         daemon_bin,
         "--rowlook",
@@ -267,41 +285,35 @@ def _run_crossmul_daemon(
         str(collook),
         "--max-slots",
         str(max_slots),
+        "--streams-per-gpu",
+        str(streams_per_gpu),
         "--gpus",
         str(ngpu),
+        "--tasks-file",
+        tasks_path,
     ]
     if out_float:
         cmd.append("--out-float")
 
     logger.info("Starting crossmul_daemon: %s", " ".join(cmd))
     logger.info(
-        "Feeding %d task(s) to daemon (max_slots=%d, ngpu=%d).",
+        "Tasks file: %s (%d tasks, max_slots=%d, ngpu=%d, streams_per_gpu=%d).",
+        tasks_path,
         len(task_items),
         max_slots,
         ngpu,
+        streams_per_gpu,
     )
 
     proc = subprocess.Popen(
         cmd,
-        stdin=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         encoding="utf-8",
         errors="ignore",
         text=True,
     )
-
-    # -- Write task list to daemon's stdin in a background thread --
-    #    (prevents deadlock if daemon's stderr pipe fills while we
-    #     are blocked writing to stdin)
-    def _feed_stdin():
-        assert proc.stdin is not None
-        for ref_slc, sec_slc, out_ifg in task_items:
-            proc.stdin.write(f"{ref_slc} {sec_slc} {out_ifg}\n")
-        proc.stdin.close()
-
-    stdin_thread = threading.Thread(target=_feed_stdin, daemon=True)
-    stdin_thread.start()
 
     # -- Read daemon stdout (progress / completion lines) --
     succeeded = 0
@@ -353,7 +365,6 @@ def _run_crossmul_daemon(
                 )
 
     # -- Drain stderr for diagnostics --
-    stdin_thread.join(timeout=5)
     assert proc.stderr is not None
     stderr_text = proc.stderr.read()
     if stderr_text:
@@ -361,6 +372,13 @@ def _run_crossmul_daemon(
             logger.debug("[daemon|stderr] %s", err_line)
 
     retcode = proc.wait()
+
+    # -- Clean up the temporary tasks file --
+    try:
+        os.unlink(tasks_path)
+    except OSError:
+        pass
+
     if retcode != 0:
         logger.warning("crossmul_daemon exited with code %d.", retcode)
 
@@ -378,6 +396,7 @@ def interfere(
     out_float: bool = False,
     ngpu: int | None = None,
     max_slots: int | None = None,
+    streams_per_gpu: int | None = None,
 ):
     """
     Form interferograms from a subswath list.
@@ -406,6 +425,10 @@ def interfere(
     max_slots : int or None
         Number of pre-allocated pinned-memory buffer slots in the
         daemon.  Defaults to ``ngpu * 2`` when *None*.
+    streams_per_gpu : int
+        Number of internal execution lanes per GPU in the daemon.
+        Higher values improve utilisation when burst-pair images are
+        small relative to GPU memory (default 4).
     """
     from s1proc.utils import _detect_gpu_count
 
@@ -452,9 +475,7 @@ def interfere(
         # already exist
         if not all([os.path.exists(b[2]) for b in _burst_pairs]):
             burst_pairs.extend(_burst_pairs)
-    with open("burst_pairs.txt", "w") as f:
-        for burst_pair in burst_pairs:
-            f.write(" ".join(burst_pair) + "\n")
+
     n_pair = len(burst_pairs)
     n_ifg = len(burst_pair_map)
     if n_pair == 0:
@@ -486,6 +507,11 @@ def interfere(
         )
         max_slots = ngpu
 
+    if streams_per_gpu is None:
+        streams_per_gpu = 4
+    if streams_per_gpu < 1:
+        raise ValueError("streams_per_gpu must be >= 1.")
+
     # -- Filter out already-completed burst pairs --
     task_items: List[Tuple[str, str, str]] = []
     for ref_slc, sec_slc, out_ifg in burst_pairs:
@@ -501,7 +527,7 @@ def interfere(
         logger.info("All interferograms are generated.")
         return
 
-    # -- Launch daemon —
+    # -- Launch daemon --
     succeeded, failed = _run_crossmul_daemon(
         task_items,
         rowlook=rowlook,
@@ -509,6 +535,7 @@ def interfere(
         out_float=out_float,
         ngpu=ngpu,
         max_slots=max_slots,
+        streams_per_gpu=streams_per_gpu,
     )
 
     if failed > 0:
@@ -555,5 +582,6 @@ def run_interfere(
         out_float=False,
         ngpu=pcfg.ngpu,
         max_slots=pcfg.max_slots,
+        streams_per_gpu=pcfg.streams_per_gpu,
     )
     return

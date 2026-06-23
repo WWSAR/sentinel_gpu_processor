@@ -3,22 +3,20 @@
  *
  * Architecture
  * ------------
- * 1.  Reads a burst-pair task list from **stdin** (one
- *     ``<ref_slc> <sec_slc> <out_ifg>`` per line).
+ * 1.  Reads a burst-pair task list from a text file specified via
+ *     ``--tasks-file <path>`` (one ``<ref_slc> <sec_slc> <out_ifg>``
+ *     per line).
  * 2.  **Scan pass** — reads every SLC header to determine the
  *     maximum overlap dimensions across all tasks.
  * 3.  Allocates a pool of **page-locked (pinned) host buffers**
  *     (``max_slots`` slots, each sized to max dimensions).
  * 4.  Spawns a **single I/O producer thread** that reads SLC data
  *     sequentially into free pinned slots, avoiding disk contention.
- * 5.  Spawns **one GPU consumer thread per device**; each pulls
- *     the next ready slot from a bounded queue, performs async
- *     H2D → conj_mul → multi-look → D2H, writes the result, and
- *     returns the slot to the free pool.
- *
- * This design eliminates static work imbalance (cafeteria-style
- * scheduling), prevents I/O thrash (single producer), and enables
- * CUDA-stream overlap between consecutive H2D/D2H transfers.
+ * 5.  Spawns **one GPU consumer thread per device**; each manages
+ *     **multiple internal execution lanes** (``streams_per_gpu``)
+ *     with dedicated CUDA streams and device buffers.  The consumer
+ *     loop uses non-blocking ``cudaStreamQuery`` polling so that
+ *     multiple burst pairs can execute concurrently on the same GPU.
  */
 
 #include "gpu_device.hpp"
@@ -102,7 +100,7 @@ struct Task {
  * One slot in the pre-allocated pinned host buffer pool.
  *
  * The producer fills ``ref_data`` / ``sec_data`` and metadata;
- * a GPU consumer fills ``result_data``, writes it to disk, and
+ * a GPU consumer processes the pair, writes the result to disk, and
  * returns the slot to the free queue.
  */
 struct BufferSlot {
@@ -131,16 +129,25 @@ struct BufferSlot {
 };
 
 /**
- * Per-GPU context: device buffers, CUDA streams, and a pinned
- * staging buffer for D2H results.
+ * One internal execution lane within a GPU.
+ *
+ * Each lane owns a dedicated CUDA stream and its own set of device
+ * buffers + host staging buffers.  This allows multiple burst pairs
+ * to execute concurrently on the same GPU without data races.
  */
-struct GpuContext {
-  int gpu_id;
+struct GpuTaskSlot {
+  int lane_id;
 
-  // CUDA streams for pipeline overlap
-  cudaStream_t stream_compute;
+  // -- Lane state: 0 = IDLE, 1 = BUSY (async work in flight) --
+  int state = 0;
 
-  // Pre-allocated device buffers (sized to max dimensions)
+  // -- Which BufferSlot this lane is currently processing (-1 if IDLE) --
+  int slot_idx = -1;
+
+  // -- Dedicated CUDA stream --
+  cudaStream_t stream;
+
+  // -- Device buffers (sized to max dimensions) --
   Complex *d_slc1;
   Complex *d_slc2;
   Complex *d_ifg;
@@ -148,9 +155,17 @@ struct GpuContext {
   Complex *d_ifglook;
   float *d_phase;
 
-  // Pinned staging for D2H (one buffer per GPU, max looked size)
+  // -- Pinned host staging buffers (private to this lane) --
   Complex *staging_cpx;
   float *staging_float;
+};
+
+/**
+ * Per-GPU context: owns multiple :struct:`GpuTaskSlot` lanes.
+ */
+struct GpuContext {
+  int gpu_id;
+  std::vector<GpuTaskSlot> lanes;
 };
 
 /**
@@ -160,6 +175,7 @@ struct GpuContext {
 struct DaemonContext {
   // -- Configuration --
   int max_slots;
+  int streams_per_gpu;
   int max_nrow; // maximum overlap nrow across all tasks
   int max_ncol;
   int max_nrow_sm; // max_nrow / rowlook
@@ -184,7 +200,7 @@ struct DaemonContext {
   std::mutex free_mutex;
   std::condition_variable free_cv;
 
-  // -- Ready-slot queue (consumers wait here) --
+  // -- Ready-slot queue (consumers pull from here) --
   std::queue<int> ready_queue;
   std::mutex ready_mutex;
   std::condition_variable ready_cv;
@@ -200,14 +216,10 @@ struct DaemonContext {
 };
 
 // -----------------------------------------------------------------------
-// Buffer-pool helpers
+// Buffer-pool helpers (blocking — used by the producer)
 // -----------------------------------------------------------------------
 
-/**
- * Acquire a free slot from the pool.
- * Blocks (with a brief spin) until a slot is released by a consumer.
- * Returns the slot index.
- */
+/** Acquire a free slot from the pool.  Blocks until one is available. */
 static int acquire_free_slot(DaemonContext &ctx) {
   std::unique_lock<std::mutex> lock(ctx.free_mutex);
   ctx.free_cv.wait(lock, [&ctx] { return !ctx.free_queue.empty(); });
@@ -228,23 +240,23 @@ static void push_ready_slot(DaemonContext &ctx, int idx) {
 }
 
 /**
- * Acquire a ready slot from the queue.
- * Blocks until a slot is available, or returns -1 if the producer
- * has finished and the ready queue is empty.
+ * Non-blocking try-pop from the ready queue.
+ * Returns the slot index, or -1 if the queue is empty.
+ * Used by GPU consumer threads polling across multiple lanes.
  */
-static int acquire_ready_slot(DaemonContext &ctx) {
-  std::unique_lock<std::mutex> lock(ctx.ready_mutex);
-  ctx.ready_cv.wait(lock, [&ctx] {
-    return !ctx.ready_queue.empty() || ctx.producer_done.load();
-  });
-  if (ctx.ready_queue.empty()) {
-    // Producer finished and queue drained
+static int try_acquire_ready_slot(DaemonContext &ctx) {
+  std::lock_guard<std::mutex> lock(ctx.ready_mutex);
+  if (ctx.ready_queue.empty())
     return -1;
-  }
   int idx = ctx.ready_queue.front();
   ctx.ready_queue.pop();
   ctx.slots[idx].state.store(3); // PROCESSING
   return idx;
+}
+
+/** Check whether the ready queue is empty (caller must hold ready_mutex). */
+static bool ready_queue_empty_unsafe(const DaemonContext &ctx) {
+  return ctx.ready_queue.empty();
 }
 
 /** Return a slot to the free pool after the consumer is done with it. */
@@ -281,7 +293,7 @@ static void producer_thread(DaemonContext &ctx) {
       read_binary<std::int32_t>(task.ref_slc, NHEADER, header1);
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " — cannot read header: " << task.ref_slc << std::endl;
+                << " - cannot read header: " << task.ref_slc << std::endl;
       slot.state.store(0);
       {
         std::lock_guard<std::mutex> lk(ctx.free_mutex);
@@ -297,7 +309,7 @@ static void producer_thread(DaemonContext &ctx) {
       read_binary<std::int32_t>(task.sec_slc, NHEADER, header2);
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " — cannot read header: " << task.sec_slc << std::endl;
+                << " - cannot read header: " << task.sec_slc << std::endl;
       slot.state.store(0);
       {
         std::lock_guard<std::mutex> lk(ctx.free_mutex);
@@ -309,7 +321,7 @@ static void producer_thread(DaemonContext &ctx) {
       continue;
     }
 
-    // -- Compute overlap dimensions (same logic as crossmul) --
+    // -- Compute overlap dimensions --
     int left1 = header1[2], top1 = header1[3];
     int right1 = header1[4], bottom1 = header1[5];
     int left2 = header2[2], top2 = header2[3];
@@ -329,7 +341,7 @@ static void producer_thread(DaemonContext &ctx) {
 
     if (nrow <= 0 || ncol <= 0) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " — empty overlap region" << std::endl;
+                << " - empty overlap region" << std::endl;
       slot.state.store(0);
       {
         std::lock_guard<std::mutex> lk(ctx.free_mutex);
@@ -358,7 +370,6 @@ static void producer_thread(DaemonContext &ctx) {
     slot.ifg_header[5] = bottom / ctx.rowlook;
 
     // -- Read SLC pixel data into pinned host buffers --
-
     try {
       read_and_resample<Complex>(task.ref_slc, slot.ref_data, left, top, right,
                                  bottom, 0, bottom1 - top1);
@@ -366,7 +377,7 @@ static void producer_thread(DaemonContext &ctx) {
                                  bottom, 0, bottom2 - top2);
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " — I/O error reading SLC data" << std::endl;
+                << " - I/O error reading SLC data" << std::endl;
       slot.state.store(0);
       {
         std::lock_guard<std::mutex> lk(ctx.free_mutex);
@@ -389,13 +400,13 @@ static void producer_thread(DaemonContext &ctx) {
   }
 
   ctx.producer_done.store(true);
-  ctx.ready_cv.notify_all(); // wake consumers so they see producer_done
-  std::cerr << "[crossmul_daemon] Producer finished — all " << ctx.n_total
+  ctx.ready_cv.notify_all();
+  std::cerr << "[crossmul_daemon] Producer finished - all " << ctx.n_total
             << " tasks read." << std::endl;
 }
 
 // -----------------------------------------------------------------------
-// GPU consumer thread
+// GPU consumer thread  (multi-lane, non-blocking polling)
 // -----------------------------------------------------------------------
 
 /** Print a periodic progress line to stdout. */
@@ -407,104 +418,198 @@ static void emit_progress(const DaemonContext &ctx) {
             << std::endl;
 }
 
-/** GPU consumer: pulls ready slots, runs kernels, writes results. */
+/**
+ * Launch the full H2D → kernels → D2H pipeline onto *lane* and
+ * return immediately (no synchronisation).
+ *
+ * The caller must have already set ``lane->slot_idx``.
+ */
+static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
+                                  BufferSlot &slot, const Task &task) {
+  int blockSize = 256;
+  std::size_t elem_bytes = sizeof(Complex) * slot.nrow * slot.ncol;
+
+  // -- Async H2D --
+  CHECK_CUDA(cudaMemcpyAsync(lane.d_slc1, slot.ref_data, elem_bytes,
+                             cudaMemcpyHostToDevice, lane.stream));
+  CHECK_CUDA(cudaMemcpyAsync(lane.d_slc2, slot.sec_data, elem_bytes,
+                             cudaMemcpyHostToDevice, lane.stream));
+
+  // -- conj_mul kernel --
+  int numBlocks = (slot.nrow * slot.ncol + blockSize - 1) / blockSize;
+  conj_mul<<<numBlocks, blockSize, 0, lane.stream>>>(
+      lane.d_slc1, lane.d_slc2, lane.d_ifg, slot.nrow * slot.ncol);
+
+  // Track which pointer holds the current pipeline stage output
+  Complex *current = lane.d_ifg;
+
+  // -- Column multi-look --
+  numBlocks = (slot.nrow * slot.ncol_sm + blockSize - 1) / blockSize;
+  if (ctx.collook > 1) {
+    cpx_col_look<<<numBlocks, blockSize, 0, lane.stream>>>(
+        lane.d_ifg, lane.d_ifg_collook, ctx.collook, slot.ncol,
+        slot.nrow * slot.ncol_sm);
+    current = lane.d_ifg_collook;
+  }
+
+  // -- Row multi-look --
+  numBlocks = (slot.nrow_sm * slot.ncol_sm + blockSize - 1) / blockSize;
+  if (ctx.rowlook > 1) {
+    cpx_row_look<<<numBlocks, blockSize, 0, lane.stream>>>(
+        current, lane.d_ifglook, ctx.rowlook, slot.ncol_sm,
+        slot.nrow_sm * slot.ncol_sm);
+    current = lane.d_ifglook;
+  }
+
+  // -- Phase extraction (float path) --
+  if (ctx.out_float) {
+    point_angle<<<numBlocks, blockSize, 0, lane.stream>>>(
+        current, lane.d_phase, slot.nrow_sm * slot.ncol_sm);
+  }
+
+  // -- Async D2H into the lane's private staging buffer --
+  if (ctx.out_float) {
+    CHECK_CUDA(cudaMemcpyAsync(lane.staging_float, lane.d_phase,
+                               sizeof(float) * slot.nrow_sm * slot.ncol_sm,
+                               cudaMemcpyDeviceToHost, lane.stream));
+  } else {
+    CHECK_CUDA(cudaMemcpyAsync(lane.staging_cpx, current,
+                               sizeof(Complex) * slot.nrow_sm * slot.ncol_sm,
+                               cudaMemcpyDeviceToHost, lane.stream));
+  }
+}
+
+/**
+ * GPU consumer: manages an array of internal :struct:`GpuTaskSlot`
+ * lanes.  Each lane can execute one burst pair at a time.
+ *
+ * The loop polls all lanes non-blockingly via ``cudaStreamQuery``.
+ * When a BUSY lane finishes, the result is saved and the lane
+ * becomes IDLE.  IDLE lanes attempt to pull a new task from the
+ * global ready queue and launch async work.
+ */
 static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
   GpuContext &g = ctx.gpus[gpu_idx];
   set_gpu(g.gpu_id);
 
-  int blockSize = 256;
+  const int n_lanes = static_cast<int>(g.lanes.size());
 
   while (true) {
-    int slot_idx = acquire_ready_slot(ctx);
-    if (slot_idx < 0)
-      break; // producer done + queue drained
+    bool made_progress = false;
 
-    BufferSlot &slot = ctx.slots[slot_idx];
-    const Task &task = slot.task;
+    // -- Phase 1: poll BUSY lanes for completion --
+    for (int li = 0; li < n_lanes; ++li) {
+      GpuTaskSlot &lane = g.lanes[li];
+      if (lane.state != 1)
+        continue; // not BUSY
 
-    std::size_t elem_bytes = sizeof(Complex) * slot.nrow * slot.ncol;
+      cudaError_t err = cudaStreamQuery(lane.stream);
+      if (err == cudaSuccess) {
+        // -- Lane finished; write result to disk --
+        BufferSlot &slot = ctx.slots[lane.slot_idx];
+        const Task &task = slot.task;
 
-    try {
-      CHECK_CUDA(cudaMemcpyAsync(g.d_slc1, slot.ref_data, elem_bytes,
-                                 cudaMemcpyHostToDevice, g.stream_compute));
-      CHECK_CUDA(cudaMemcpyAsync(g.d_slc2, slot.sec_data, elem_bytes,
-                                 cudaMemcpyHostToDevice, g.stream_compute));
-      CHECK_CUDA(cudaStreamSynchronize(g.stream_compute));
+        try {
+          if (ctx.out_float) {
+            save_binary<float>(lane.staging_float, slot.nrow_sm * slot.ncol_sm,
+                               slot.ifg_header, NHEADER, task.out_ifg);
+          } else {
+            save_binary<Complex>(lane.staging_cpx, slot.nrow_sm * slot.ncol_sm,
+                                 slot.ifg_header, NHEADER, task.out_ifg);
+          }
+          std::cout << "OK " << task.out_ifg << std::endl;
+          ctx.completed.fetch_add(1);
+        } catch (const std::exception &e) {
+          std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
+                    << " - write error: " << e.what() << std::endl;
+          ctx.failed.fetch_add(1);
+          ctx.completed.fetch_add(1);
+        }
 
-      Complex *current_d_ifg = g.d_ifg;
+        // Return the host buffer slot to the free pool
+        release_slot(ctx, lane.slot_idx);
 
-      // -- conj_mul kernel --
-      int numBlocks = (slot.nrow * slot.ncol + blockSize - 1) / blockSize;
-      conj_mul<<<numBlocks, blockSize, 0, g.stream_compute>>>(
-          g.d_slc1, g.d_slc2, g.d_ifg, slot.nrow * slot.ncol);
-
-      // -- Column multi-look --
-      numBlocks = (slot.nrow * slot.ncol_sm + blockSize - 1) / blockSize;
-      if (ctx.collook > 1) {
-        cpx_col_look<<<numBlocks, blockSize, 0, g.stream_compute>>>(
-            g.d_ifg, g.d_ifg_collook, ctx.collook, slot.ncol,
-            slot.nrow * slot.ncol_sm);
-        current_d_ifg = g.d_ifg_collook;
+        // Mark lane idle
+        lane.state = 0;
+        lane.slot_idx = -1;
+        made_progress = true;
+      } else if (err != cudaErrorNotReady) {
+        // Real CUDA error on the stream
+        std::cerr << "[crossmul_daemon] FAIL "
+                  << ctx.slots[lane.slot_idx].task.out_ifg
+                  << " - CUDA stream error: " << cudaGetErrorString(err)
+                  << std::endl;
+        ctx.failed.fetch_add(1);
+        ctx.completed.fetch_add(1);
+        release_slot(ctx, lane.slot_idx);
+        lane.state = 0;
+        lane.slot_idx = -1;
+        made_progress = true;
       }
-
-      // -- Row multi-look --
-      numBlocks = (slot.nrow_sm * slot.ncol_sm + blockSize - 1) / blockSize;
-      if (ctx.rowlook > 1) {
-        cpx_row_look<<<numBlocks, blockSize, 0, g.stream_compute>>>(
-            current_d_ifg, g.d_ifglook, ctx.rowlook, slot.ncol_sm,
-            slot.nrow_sm * slot.ncol_sm);
-        current_d_ifg = g.d_ifglook;
-      }
-
-      // -- Phase extraction (float path) --
-      if (ctx.out_float) {
-        point_angle<<<numBlocks, blockSize, 0, g.stream_compute>>>(
-            current_d_ifg, g.d_phase, slot.nrow_sm * slot.ncol_sm);
-      }
-
-      // -- Async D2H on stream_d2h --
-      if (ctx.out_float) {
-        CHECK_CUDA(cudaMemcpyAsync(g.staging_float, g.d_phase,
-                                   sizeof(float) * slot.nrow_sm * slot.ncol_sm,
-                                   cudaMemcpyDeviceToHost, g.stream_compute));
-      } else {
-        CHECK_CUDA(
-            cudaMemcpyAsync(g.staging_cpx, current_d_ifg,
-                            sizeof(Complex) * slot.nrow_sm * slot.ncol_sm,
-                            cudaMemcpyDeviceToHost, g.stream_compute));
-      }
-
-      CHECK_CUDA(cudaStreamSynchronize(g.stream_compute));
-
-      // -- Write output to disk --
-      if (ctx.out_float) {
-        save_binary<float>(g.staging_float, slot.nrow_sm * slot.ncol_sm,
-                           slot.ifg_header, NHEADER, task.out_ifg);
-      } else {
-        save_binary<Complex>(g.staging_cpx, slot.nrow_sm * slot.ncol_sm,
-                             slot.ifg_header, NHEADER, task.out_ifg);
-      }
-
-      // -- Success --
-      std::cout << "OK " << task.out_ifg << std::endl;
-      ctx.completed.fetch_add(1);
-
-    } catch (const std::exception &e) {
-      std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " — GPU error: " << e.what() << std::endl;
-      ctx.failed.fetch_add(1);
-      ctx.completed.fetch_add(1);
     }
 
-    // -- Return slot to free pool --
-    release_slot(ctx, slot_idx);
+    // -- Phase 2: fill IDLE lanes with new work --
+    for (int li = 0; li < n_lanes; ++li) {
+      GpuTaskSlot &lane = g.lanes[li];
+      if (lane.state != 0)
+        continue; // not IDLE
 
-    // Emit progress every few completions (avoid stdout spam)
-    int done = ctx.completed.load();
-    if (done % 10 == 0 || done == ctx.n_total) {
-      emit_progress(ctx);
+      int slot_idx = try_acquire_ready_slot(ctx);
+      if (slot_idx < 0)
+        break; // nothing ready yet
+
+      BufferSlot &slot = ctx.slots[slot_idx];
+      const Task &task = slot.task;
+      lane.slot_idx = slot_idx;
+
+      try {
+        launch_async_pipeline(ctx, lane, slot, task);
+        lane.state = 1; // BUSY
+        made_progress = true;
+      } catch (const std::exception &e) {
+        std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
+                  << " - launch error: " << e.what() << std::endl;
+        ctx.failed.fetch_add(1);
+        ctx.completed.fetch_add(1);
+        release_slot(ctx, slot_idx);
+        lane.slot_idx = -1;
+        lane.state = 0;
+        made_progress = true;
+      }
+    }
+
+    // -- Termination check --
+    if (ctx.producer_done.load()) {
+      // Are all lanes idle AND the ready queue empty?
+      bool all_idle = true;
+      for (int li = 0; li < n_lanes; ++li) {
+        if (g.lanes[li].state != 0) {
+          all_idle = false;
+          break;
+        }
+      }
+
+      bool queue_empty = false;
+      {
+        std::lock_guard<std::mutex> lk(ctx.ready_mutex);
+        queue_empty = ctx.ready_queue.empty();
+      }
+
+      if (all_idle && queue_empty)
+        break;
+    }
+
+    // -- Avoid CPU starvation when nothing progressed --
+    if (!made_progress) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } else {
+      // Yield to let other threads run
+      std::this_thread::yield();
     }
   }
+
+  // Emit final progress
+  emit_progress(ctx);
 
   std::cerr << "[crossmul_daemon] GPU " << g.gpu_id << " consumer exiting."
             << std::endl;
@@ -581,7 +686,6 @@ static void scan_max_dimensions(DaemonContext &ctx) {
 
 /** Allocate the pinned host buffer pool. */
 static void allocate_buffer_pool(DaemonContext &ctx) {
-  // ctx.slots.resize(ctx.max_slots);
   ctx.slots = std::vector<BufferSlot>(ctx.max_slots);
   for (int i = 0; i < ctx.max_slots; ++i) {
     BufferSlot &s = ctx.slots[i];
@@ -598,69 +702,88 @@ static void allocate_buffer_pool(DaemonContext &ctx) {
                                 sizeof(Complex) * ctx.max_elements_sm));
       s.result_float = nullptr;
     }
-    // All slots start in the free queue
     ctx.free_queue.push(i);
   }
   std::cerr << "[crossmul_daemon] Allocated " << ctx.max_slots
             << " pinned buffer slots." << std::endl;
 }
 
-/** Allocate per-GPU device buffers and CUDA streams. */
+/**
+ * Allocate per-GPU execution lanes.
+ *
+ * Each lane gets its own CUDA stream, full set of device buffers,
+ * and pinned host staging buffers — all sized to the maximum
+ * dimensions determined by the scan pass.
+ */
 static void allocate_gpu_contexts(DaemonContext &ctx) {
   ctx.gpus.resize(ctx.ngpus);
   for (int i = 0; i < ctx.ngpus; ++i) {
     GpuContext &g = ctx.gpus[i];
     g.gpu_id = i;
 
-    // Select GPU before allocating
     int orig_dev;
     cudaGetDevice(&orig_dev);
     cudaSetDevice(i);
 
-    // CUDA streams
-    cudaStreamCreate(&g.stream_compute);
+    g.lanes.resize(ctx.streams_per_gpu);
 
-    // Device buffers
-    CHECK_CUDA(
-        cudaMalloc((void **)&g.d_slc1, sizeof(Complex) * ctx.max_elements));
-    CHECK_CUDA(
-        cudaMalloc((void **)&g.d_slc2, sizeof(Complex) * ctx.max_elements));
-    CHECK_CUDA(
-        cudaMalloc((void **)&g.d_ifg, sizeof(Complex) * ctx.max_elements));
+    std::size_t dev_mb_per_lane =
+        (sizeof(Complex) * ctx.max_elements * 3 +
+         sizeof(Complex) * ctx.max_nrow * ctx.max_ncol_sm +
+         sizeof(Complex) * ctx.max_nrow_sm * ctx.max_ncol_sm) /
+        (1024 * 1024);
 
-    if (ctx.collook > 1) {
-      CHECK_CUDA(cudaMalloc((void **)&g.d_ifg_collook,
-                            sizeof(Complex) * ctx.max_nrow * ctx.max_ncol_sm));
-    } else {
-      g.d_ifg_collook = nullptr;
-    }
+    for (int li = 0; li < ctx.streams_per_gpu; ++li) {
+      GpuTaskSlot &lane = g.lanes[li];
+      lane.lane_id = li;
+      lane.state = 0;
+      lane.slot_idx = -1;
 
-    if (ctx.rowlook > 1) {
+      cudaStreamCreate(&lane.stream);
+
+      // Device buffers
+      CHECK_CUDA(cudaMalloc((void **)&lane.d_slc1,
+                            sizeof(Complex) * ctx.max_elements));
+      CHECK_CUDA(cudaMalloc((void **)&lane.d_slc2,
+                            sizeof(Complex) * ctx.max_elements));
       CHECK_CUDA(
-          cudaMalloc((void **)&g.d_ifglook,
-                     sizeof(Complex) * ctx.max_nrow_sm * ctx.max_ncol_sm));
-    } else {
-      g.d_ifglook = nullptr;
-    }
+          cudaMalloc((void **)&lane.d_ifg, sizeof(Complex) * ctx.max_elements));
+      if (ctx.collook > 1) {
+        CHECK_CUDA(
+            cudaMalloc((void **)&lane.d_ifg_collook,
+                       sizeof(Complex) * ctx.max_nrow * ctx.max_ncol_sm));
+      } else {
+        lane.d_ifg_collook = nullptr;
+      }
+      if (ctx.rowlook > 1) {
+        CHECK_CUDA(
+            cudaMalloc((void **)&lane.d_ifglook,
+                       sizeof(Complex) * ctx.max_nrow_sm * ctx.max_ncol_sm));
+      } else {
+        lane.d_ifglook = nullptr;
+      }
 
-    if (ctx.out_float) {
-      CHECK_CUDA(
-          cudaMalloc((void **)&g.d_phase, sizeof(float) * ctx.max_elements_sm));
-      CHECK_CUDA(cudaMallocHost((void **)&g.staging_float,
-                                sizeof(float) * ctx.max_elements_sm));
-      g.staging_cpx = nullptr;
-    } else {
-      g.d_phase = nullptr;
-      CHECK_CUDA(cudaMallocHost((void **)&g.staging_cpx,
-                                sizeof(Complex) * ctx.max_elements_sm));
-      g.staging_float = nullptr;
+      // Staging buffers (pinned host memory, per-lane for isolation)
+      if (ctx.out_float) {
+        CHECK_CUDA(cudaMalloc((void **)&lane.d_phase,
+                              sizeof(float) * ctx.max_elements_sm));
+        CHECK_CUDA(cudaMallocHost((void **)&lane.staging_float,
+                                  sizeof(float) * ctx.max_elements_sm));
+        lane.staging_cpx = nullptr;
+      } else {
+        lane.d_phase = nullptr;
+        CHECK_CUDA(cudaMallocHost((void **)&lane.staging_cpx,
+                                  sizeof(Complex) * ctx.max_elements_sm));
+        lane.staging_float = nullptr;
+      }
     }
 
     cudaSetDevice(orig_dev);
 
-    std::cerr << "[crossmul_daemon] GPU " << i << " device buffers allocated ("
-              << (ctx.max_elements * sizeof(Complex) * 3 / (1024 * 1024))
-              << " MB)." << std::endl;
+    std::cerr << "[crossmul_daemon] GPU " << i << ": " << ctx.streams_per_gpu
+              << " lane(s), ~" << dev_mb_per_lane << " MB device memory/lane ("
+              << (dev_mb_per_lane * ctx.streams_per_gpu) << " MB total/GPU)."
+              << std::endl;
   }
 }
 
@@ -683,45 +806,54 @@ static void free_buffer_pool(DaemonContext &ctx) {
 static void free_gpu_contexts(DaemonContext &ctx) {
   for (auto &g : ctx.gpus) {
     cudaSetDevice(g.gpu_id);
-    if (g.d_slc1)
-      cudaFree(g.d_slc1);
-    if (g.d_slc2)
-      cudaFree(g.d_slc2);
-    if (g.d_ifg)
-      cudaFree(g.d_ifg);
-    if (g.d_ifg_collook)
-      cudaFree(g.d_ifg_collook);
-    if (g.d_ifglook)
-      cudaFree(g.d_ifglook);
-    if (g.d_phase)
-      cudaFree(g.d_phase);
-    if (g.staging_cpx)
-      cudaFreeHost(g.staging_cpx);
-    if (g.staging_float)
-      cudaFreeHost(g.staging_float);
-    cudaStreamDestroy(g.stream_compute);
+    for (auto &lane : g.lanes) {
+      if (lane.d_slc1)
+        cudaFree(lane.d_slc1);
+      if (lane.d_slc2)
+        cudaFree(lane.d_slc2);
+      if (lane.d_ifg)
+        cudaFree(lane.d_ifg);
+      if (lane.d_ifg_collook)
+        cudaFree(lane.d_ifg_collook);
+      if (lane.d_ifglook)
+        cudaFree(lane.d_ifglook);
+      if (lane.d_phase)
+        cudaFree(lane.d_phase);
+      if (lane.staging_cpx)
+        cudaFreeHost(lane.staging_cpx);
+      if (lane.staging_float)
+        cudaFreeHost(lane.staging_float);
+      cudaStreamDestroy(lane.stream);
+    }
+    g.lanes.clear();
   }
   ctx.gpus.clear();
 }
 
-/** Read all task lines from stdin.  Lines are ``ref_slc sec_slc out_ifg``. */
-static std::vector<Task> read_tasks_from_stdin() {
+/** Read all task lines from a file.  One ``ref_slc sec_slc out_ifg`` per line.
+ */
+static std::vector<Task> read_tasks_from_file(const std::string &path) {
   std::vector<Task> tasks;
+  std::ifstream fin(path);
+  if (!fin.is_open()) {
+    std::cerr << "[crossmul_daemon] ERROR: cannot open tasks file: " << path
+              << std::endl;
+    return tasks;
+  }
   std::string line;
-  while (std::getline(std::cin, line)) {
+  while (std::getline(fin, line)) {
     if (line.empty())
       continue;
     std::istringstream iss(line);
     Task t;
     if (iss >> t.ref_slc >> t.sec_slc >> t.out_ifg) {
       tasks.push_back(t);
-      std::cout << t.ref_slc << " " << t.sec_slc << " " << t.out_ifg
-                << std::endl;
     } else {
       std::cerr << "[crossmul_daemon] WARNING: skipping malformed "
                 << "task line: " << line << std::endl;
     }
   }
+  fin.close();
   return tasks;
 }
 
@@ -736,6 +868,8 @@ int main(int argc, char *argv[]) {
   ctx.rowlook = std::stoi(get_arg(argc, argv, "--rowlook", "1"));
   ctx.collook = std::stoi(get_arg(argc, argv, "--collook", "1"));
   ctx.max_slots = std::stoi(get_arg(argc, argv, "--max-slots", "8"));
+  ctx.streams_per_gpu =
+      std::stoi(get_arg(argc, argv, "--streams-per-gpu", "4"));
   ctx.out_float = has_flag(argc, argv, "--out-float");
   ctx.verbose = has_flag(argc, argv, "--verbose");
 
@@ -763,30 +897,47 @@ int main(int argc, char *argv[]) {
     ctx.max_slots = ctx.ngpus;
   }
 
-  std::cerr << "[crossmul_daemon] Configuration:" << std::endl;
-  std::cerr << "  rowlook   = " << ctx.rowlook << std::endl;
-  std::cerr << "  collook   = " << ctx.collook << std::endl;
-  std::cerr << "  out_float = " << (ctx.out_float ? "yes" : "no") << std::endl;
-  std::cerr << "  max_slots = " << ctx.max_slots << std::endl;
-  std::cerr << "  ngpus     = " << ctx.ngpus << std::endl;
+  // -- Read task list from file --
+  std::string tasks_file = get_arg(argc, argv, "--tasks-file", "");
+  if (tasks_file.empty()) {
+    std::cerr << "[crossmul_daemon] ERROR: --tasks-file <path> is required."
+              << std::endl;
+    return 1;
+  }
 
-  // -- Read task list from stdin --
-  ctx.tasks = read_tasks_from_stdin();
+  std::cerr << "[crossmul_daemon] Configuration:" << std::endl;
+  std::cerr << "  rowlook        = " << ctx.rowlook << std::endl;
+  std::cerr << "  collook        = " << ctx.collook << std::endl;
+  std::cerr << "  out_float      = " << (ctx.out_float ? "yes" : "no")
+            << std::endl;
+  std::cerr << "  max_slots      = " << ctx.max_slots << std::endl;
+  std::cerr << "  streams_per_gpu= " << ctx.streams_per_gpu << std::endl;
+  std::cerr << "  ngpus          = " << ctx.ngpus << std::endl;
+  std::cerr << "  tasks_file     = " << tasks_file << std::endl;
+
+  ctx.tasks = read_tasks_from_file(tasks_file);
   ctx.n_total = static_cast<int>(ctx.tasks.size());
 
   if (ctx.n_total == 0) {
-    std::cerr << "[crossmul_daemon] No tasks received.  Exiting." << std::endl;
+    std::cerr << "[crossmul_daemon] No tasks found in file.  Exiting."
+              << std::endl;
     return 0;
   }
-  std::cerr << "[crossmul_daemon] Received " << ctx.n_total << " tasks."
+  std::cerr << "[crossmul_daemon] Loaded " << ctx.n_total << " tasks."
             << std::endl;
 
   // -- Scan pass: determine max dimensions --
-  scan_max_dimensions(ctx);
+  {
+    ScopedTimer t("Scan max dimensions");
+    scan_max_dimensions(ctx);
+  }
 
   // -- Allocate resources --
-  allocate_buffer_pool(ctx);
-  allocate_gpu_contexts(ctx);
+  {
+    ScopedTimer t("Allocate buffers");
+    allocate_buffer_pool(ctx);
+    allocate_gpu_contexts(ctx);
+  }
 
   // -- Launch producer + GPU consumer threads --
   ctx.t_start = std::chrono::steady_clock::now();

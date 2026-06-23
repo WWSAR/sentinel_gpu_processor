@@ -31,6 +31,7 @@ proc:
     ngpu:            # number of gpus used for parallel interferogram generation
     task_per_gpu:    # number of tasks running on each GPU
     max_slots:       # pre-allocated pinned-memory buffer slots (ngpu * 2 recommended)
+    streams_per_gpu: # internal CUDA execution lanes per GPU (default: 4)
 
 # Wrapped interferogram processing
 # Interferogram filtering, for the moment, only Goldstein filter is implemented

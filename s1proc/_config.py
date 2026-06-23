@@ -61,6 +61,7 @@ class ProcessingConfig:
     ngpu: Optional[int]  # number of GPUs for parallel interferogram processing
     task_per_gpu: Optional[int]  # number of tasks running on each GPU (legacy)
     max_slots: Optional[int] = None  # pre-allocated pinned-memory buffer slots
+    streams_per_gpu: Optional[int] = None  # internal CUDA execution lanes per GPU
 
 
 @dataclass
