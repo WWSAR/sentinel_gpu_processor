@@ -9,6 +9,7 @@ import zipfile
 from typing import List, Sequence
 
 import numpy as np
+from osgeo import gdal
 
 from s1proc import get_bin_path, sql_mod
 from s1proc._log import setup_logger
@@ -160,6 +161,51 @@ def footprint_bounds(orbfname: str, dbfname: str, hmin=0, hmax=10000):
     return np.array(list(zip(lons1, lats1))), np.array(list(zip(lons2, lats2)))
 
 
+def _stream_tiff_from_zip(
+    zip_path: str,
+    tiff_name: str,
+    proc: subprocess.Popen,
+    nrange: int,
+    lines_per_burst: int,
+    nbursts: int,
+) -> None:
+    """
+    Read Sentinel-1 SLC TIFF directly from zip via GDAL /vsizip/ and stream
+    raw complex64 (float32 interleaved) burst data to *proc*'s stdin.
+
+    Data is read and written one burst at a time to keep peak memory low.
+    """
+    vsizip_path = f"/vsizip/{zip_path.replace(os.sep, '/')}/{tiff_name}"
+    ds = gdal.Open(vsizip_path)
+    if ds is None:
+        raise RuntimeError(f"GDAL cannot open {vsizip_path}")
+
+    w = ds.RasterXSize
+    h = ds.RasterYSize
+    expected_h = lines_per_burst * nbursts
+    if w != nrange or h != expected_h:
+        raise RuntimeError(
+            f"TIFF dimensions ({w}x{h}) do not match DB metadata "
+            f"(nrange={nrange}, lines_per_burst={lines_per_burst}, "
+            f"nbursts={nbursts}, expected_h={expected_h})"
+        )
+
+    for burst_idx in range(nbursts):
+        start_line = burst_idx * lines_per_burst
+        data = ds.ReadAsArray(0, start_line, w, lines_per_burst)
+
+        try:
+            proc.stdin.write(data.flatten().tobytes())
+        except BrokenPipeError:
+            raise RuntimeError(
+                "deramp_burst process closed stdin prematurely "
+                "(possibly due to an error in the executable)"
+            )
+
+    proc.stdin.close()
+    ds = None  # close GDAL dataset
+
+
 def sentinel_scene(
     zip_file: str,
     demfile: str,
@@ -215,7 +261,6 @@ def sentinel_scene(
     logger.info(f"Processing: {zip_file} to a geocoded SLC")
     logger.debug(f"input orbit file: {orbfile}")
 
-    readgeotiff = get_bin_path("readgeotiff")
     deramp_burst = get_bin_path("deramp_burst")
     geo2rdr_reramp = get_bin_path("geo2rdr_reramp")
 
@@ -228,9 +273,12 @@ def sentinel_scene(
     os.makedirs(slc_dir, exist_ok=True)
 
     if not os.path.exists(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
         with zipfile.ZipFile(zip_file, "r") as zip_ref:
-            zip_ref.extractall(proc_dir)
-    logger.debug("Contents extracted to current folder")
+            for member in zip_ref.namelist():
+                if "/annotation/" in member and member.endswith(".xml"):
+                    zip_ref.extract(member, proc_dir)
+    logger.debug("Annotation metadata extracted from zip")
 
     # read image size
     rsc = GeoCoordinates(rscfile)
@@ -240,7 +288,7 @@ def sentinel_scene(
     #   2.  Create a db file for each subswath and each orbit
     #   3.  Create orbtiming file with orbit state vectors
     #   4.  Rename and save the ancillary files needed for deramping the slc
-    #   5.  Unpack the geotiff product into floating point slc
+    #   5.  Stream TIFF data directly from zip into deramp_burst
 
     if orbfile is not None:
         logger.debug("*** Using precise orbit ***")
@@ -250,14 +298,23 @@ def sentinel_scene(
 
     swathfiles = []
     xmlfiles = []
+    with zipfile.ZipFile(zip_file, "r") as zf:
+        zip_members = zf.namelist()
     for subswath in sorted(subswath_list):
-        swathfiles.append(
-            glob.glob(
-                os.path.join(
-                    data_dir, "measurement", f"*iw{subswath}*{polarization}*.tiff"
-                )
-            )[0]
-        )
+        tiff_members = [
+            m
+            for m in zip_members
+            if f"iw{subswath}" in m
+            and polarization.lower() in m.lower()
+            and m.endswith(".tiff")
+            and "/measurement/" in m
+        ]
+        if not tiff_members:
+            raise FileNotFoundError(
+                f"No TIFF found in zip for iw{subswath}/{polarization}"
+            )
+        # swathfiles are actually tiff images
+        swathfiles.append(tiff_members[0])
         xmlfiles.append(
             glob.glob(
                 os.path.join(
@@ -268,11 +325,7 @@ def sentinel_scene(
 
     #  loop over subswaths
     bounds_list = []
-    for ifile, fn in enumerate(swathfiles):
-        #    for itemp in range(1):  # remove to go back to usual
-        #        file=swathfiles[ifile-1] # remove to go back to usual
-        # create the orbtiming file, roi.db.X file with metadata, file table for each
-        # subswath
+    for ifile, tiff_path in enumerate(swathfiles):
         subswath = subswath_list[ifile]
         dbfname = os.path.join(
             proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.db"
@@ -287,18 +340,16 @@ def sentinel_scene(
             proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.fmrateinfo"
         )
         create_db(
-            data_dir, subswath, xmlfiles[ifile], dbfname, orbfname, dcfname, fmratefname
+            tiff_path,
+            xmlfiles[ifile],
+            dbfname,
+            orbfname,
+            dcfname,
+            fmratefname,
         )
         con = sqlite3.connect(dbfname)
-
-        # create a cursor
         c = con.cursor()
         swathfile = "file"
-        #  Reversing lines or pixels?
-        lineTimeOrdering = sql_mod.valuec(c, swathfile, "lineTimeOrdering")
-        pixelTimeOrdering = sql_mod.valuec(c, swathfile, "pixelTimeOrdering")
-        lineTimeOrdering = "Increasing"
-        pixelTimeOrdering = "Increasing"
 
         # add ancillary data file names to database
         sql_mod.add_param(c, swathfile, "orbinfo")
@@ -329,37 +380,9 @@ def sentinel_scene(
         if bounds is None:
             continue
 
-        deramp_phase_file = os.path.join(
-            proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.phase"
-        )
-        if not os.path.exists(deramp_phase_file):
-            # extract geotiff file, reversing lines and pixels if necessary
-            linereverse = "n"
-            pixelreverse = "n"
-            if lineTimeOrdering == "Decreasing":
-                linereverse = "y"
-
-            if pixelTimeOrdering == "Decreasing":
-                pixelreverse = "y"
-            basename = os.path.basename(fn)
-            output_slc_file = os.path.join(data_dir, basename.replace("tiff", "rawslc"))
-            command = (
-                readgeotiff
-                + " "
-                + fn.rstrip()
-                + " "
-                + output_slc_file
-                + " "
-                + linereverse
-                + " "
-                + pixelreverse
-            )
-            logger.info(command)
-            subprocess.check_call(command, shell=True)
-
     # Now, process each subswath to a geocoded slc
     slc_files = []
-    for ifile, fn in enumerate(swathfiles):
+    for ifile, _fn in enumerate(swathfiles):
         bounds = bounds_list[ifile]
         if bounds is None:
             continue
@@ -370,57 +393,74 @@ def sentinel_scene(
         deramp_phase_file = os.path.join(
             proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.phase"
         )
-        # remove ramp, resample to lat lon, reinsert ramp
-        #  save parameters in database file
+
+        # save dem/rsc parameters and update slc_file for geo2rdr_reramp
         con = sqlite3.connect(slavedb.strip())
-        # create a cursor
-        c = con.cursor()  # update slc entry in database
+        c = con.cursor()
         sql_mod.add_param(c, "file", "demfile")
         sql_mod.add_param(c, "file", "rscfile")
         sql_mod.edit_param(c, "file", "demfile", demfile, "-", "char", "DEM file")
-        sql_mod.edit_param(c, "file", "rscfile", rscfile, "-", "char", "DEM file")
-        sql_mod.add_param(c, "file", "raw_slc_file")
-        origslcfile = sql_mod.valuec(c, "file", "slc_file")
-        sql_mod.edit_param(
-            c, "file", "raw_slc_file", origslcfile, "-", "char", "raw, nonderamped slc"
+        sql_mod.edit_param(c, "file", "rscfile", rscfile, "-", "char", "RSC file")
+
+        deramp_output_prefix = os.path.join(
+            proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}"
         )
-        derampedslcfile = origslcfile.replace("rawslc", "rawslc.deramp")
+        derampedslcfile = deramp_output_prefix + ".deramp"
         sql_mod.edit_param(
             c, "file", "slc_file", derampedslcfile, "-", "char", "deramped slc"
         )
         sql_mod.edit_param(c, "file", "hmin", hmin, "m", "real*8", "Minimum elevation")
-        sql_mod.edit_param(c, "file", "hmax", hmin, "m", "real*8", "Maximum elevation")
-        rawslcfile = sql_mod.valuec(c, "file", "raw_slc_file")
+        sql_mod.edit_param(c, "file", "hmax", hmax, "m", "real*8", "Maximum elevation")
+
+        # read burst dimensions needed for stdin streaming
+        nrange = sql_mod.valuei(c, "file", "samplesPerBurst")
+        lines_per_burst = sql_mod.valuei(c, "file", "linesPerBurst")
+        azimuth_bursts = sql_mod.valuei(c, "file", "azimuthBursts")
         con.commit()
         c.close()
         con.close()
 
         if not os.path.exists(deramp_phase_file):
-            # deramp the slave file
-            command = (
-                deramp_burst
-                + " "
-                + slavedb.strip()
-                + " "
-                + rawslcfile
-                + " "
-                + deramp_phase_file
-            )
-            logger.info(command)
-            subprocess.check_call(command, shell=True)
+            # deramp: stream TIFF data from zip directly into deramp_burst via stdin
+            cmd = [
+                deramp_burst,
+                slavedb.strip(),
+                deramp_output_prefix,
+                deramp_phase_file,
+                "--stdin",
+            ]
+            logger.info(" ".join(cmd))
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+            try:
+                _stream_tiff_from_zip(
+                    zip_file,
+                    swathfiles[ifile],
+                    proc,
+                    nrange,
+                    lines_per_burst,
+                    azimuth_bursts,
+                )
+            except Exception:
+                proc.kill()
+                proc.wait()
+                raise
+            proc.wait()
+            if proc.returncode != 0:
+                raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-        # and geocode/reramp the slave
+        # geocode and reramp
         slc_file = os.path.join(
             slc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}"
         )
-        command = f"{geo2rdr_reramp} {slavedb} {deramp_phase_file} " + f"{slc_file}"
+        command = f"{geo2rdr_reramp} {slavedb} {deramp_phase_file} {slc_file}"
         logger.info(command)
         subprocess.check_call(command, shell=True)
-        if os.path.exists(origslcfile):
-            os.remove(origslcfile)
+
         if rm_rawslc:
-            os.remove(derampedslcfile)
-            os.remove(deramp_phase_file)
+            if os.path.exists(derampedslcfile):
+                os.remove(derampedslcfile)
+            if os.path.exists(deramp_phase_file):
+                os.remove(deramp_phase_file)
         slc_files.extend(glob.glob(slc_file + "*.gslc"))
     # Clean up zip files to lessen disk space requirements
     if rm_zipfile:

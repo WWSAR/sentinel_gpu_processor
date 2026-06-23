@@ -12,6 +12,11 @@
 #include <sqlite3.h>
 #include <string>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -27,6 +32,33 @@ int closest_sample(const double *t, const double t0, const int n) {
     }
   }
   return idx;
+}
+
+/**
+ * Set stdin to binary mode on Windows to avoid text-mode translation of
+ * bytes (e.g. \\r\\n handling) that would corrupt binary burst data.
+ */
+void set_stdin_binary() {
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+#endif
+}
+
+/**
+ * Read `n` elements of type T from stdin.
+ *
+ * The data must have been written in the exact binary layout of T with no
+ * framing or headers.  Exits with an error message if fewer bytes are
+ * available than expected.
+ */
+template <typename T> void read_binary_stdin(const std::size_t n, T *img) {
+  size_t bytes_to_read = sizeof(T) * n;
+  size_t bytes_read = fread(img, 1, bytes_to_read, stdin);
+  if (bytes_read != bytes_to_read) {
+    std::cerr << "Error: expected " << bytes_to_read
+              << " bytes from stdin, got " << bytes_read << std::endl;
+    exit(1);
+  }
 }
 
 __global__ void deramp_burst(double *kt, double *eta, double *etaref,
@@ -53,7 +85,7 @@ __global__ void deramp_burst(double *kt, double *eta, double *etaref,
 }
 
 int deramp(const std::string &dbname, const std::string &burstfile,
-           const std::string &deramp_phase_file) {
+           const std::string &deramp_phase_file, const bool use_stdin) {
   sqlite3 *db; // database that stores relevant paramters
 
   // open the database
@@ -205,8 +237,12 @@ int deramp(const std::string &dbname, const std::string &burstfile,
       etac[i] = -fnc[i] / ka[i];
       etaref[i] = etac[i] - etac[0];
     }
-    read_binary<Complex>(burstfile, iburst * nrange * lines_per_burst,
-                         nrange * lines_per_burst, burst);
+    if (use_stdin) {
+      read_binary_stdin<Complex>(nrange * lines_per_burst, burst);
+    } else {
+      read_binary<Complex>(burstfile, iburst * nrange * lines_per_burst,
+                           nrange * lines_per_burst, burst);
+    }
     cudaMemcpy(d_burst, burst, sizeof(Complex) * nrange * lines_per_burst,
                cudaMemcpyHostToDevice);
     cudaMemcpy(d_kt, kt, sizeof(double) * nrange, cudaMemcpyHostToDevice);
@@ -268,15 +304,27 @@ int deramp(const std::string &dbname, const std::string &burstfile,
 }
 
 int main(int argc, char *argv[]) {
+  set_stdin_binary();
   set_gpu(parse_gpu_arg(argc, argv));
+
+  // scan for --stdin flag before positional argument parsing
+  bool use_stdin = false;
+  for (int i = 1; i < argc; ++i) {
+    if (std::string(argv[i]) == "--stdin") {
+      use_stdin = true;
+    }
+  }
+
   if (argc < 4) {
     std::cout << "Usage: deramp_burst dbname burstfile deramp_phase_file"
-              << " [--gpu DEVICE_ID]" << std::endl;
+              << " [--stdin] [--gpu DEVICE_ID]" << std::endl;
+    std::cout << "  --stdin  Read burst data from stdin instead of burstfile"
+              << std::endl;
     return 0;
   }
   const std::string dbname = std::string(argv[1]);
   const std::string burstfile = std::string(argv[2]);
   const std::string deramp_phase_file = std::string(argv[3]);
-  deramp(dbname, burstfile, deramp_phase_file);
+  deramp(dbname, burstfile, deramp_phase_file, use_stdin);
   return 0;
 }

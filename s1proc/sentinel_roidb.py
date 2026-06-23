@@ -27,8 +27,7 @@ def timeinseconds(timestring):
 
 
 def create_db(
-    data_dir: str,
-    subswath: int,
+    tiff_path: str,
     xmlfname: str,
     dbfname: str,
     orbfname: str,
@@ -58,9 +57,7 @@ def create_db(
     # start loading some parameters to table
 
     sql_mod.add_param(c, swathfile, "slc_file")
-    basename = os.path.basename(xmlfname)
-    slcfile = os.path.join(data_dir, basename.replace("xml", "rawslc"))
-    sql_mod.edit_param(c, swathfile, "slc_file", slcfile, "-", "CHAR", "raw slc file")
+    sql_mod.edit_param(c, swathfile, "slc_file", tiff_path, "-", "CHAR", "raw slc file")
     sql_mod.add_param(c, swathfile, "roi_debug")
     sql_mod.edit_param(
         c, swathfile, "roi_debug", 0, "-", "INT*4", "roi debug parameter"

@@ -342,13 +342,13 @@ def preprocess(config_file="config.yaml"):
     gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16)
 
     # Download SLC data
-    slc_path = Path(cfg.io.slc_path)
-    slc_path.mkdir(parents=True, exist_ok=True)
-    download_metalink(str(metalink_file), output_dir=str(slc_path))
+    data_path = Path(cfg.io.data_path)
+    data_path.mkdir(parents=True, exist_ok=True)
+    download_metalink(str(metalink_file), output_dir=str(data_path))
 
     # Download precise orbit files
     from eof import download as eof_download
 
     eof_path = Path(cfg.io.eof_path)
     eof_path.mkdir(parents=True, exist_ok=True)
-    eof_download.main(search_path=str(slc_path), save_dir=str(eof_path))
+    eof_download.main(search_path=str(data_path), save_dir=str(eof_path))
