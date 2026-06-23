@@ -63,30 +63,26 @@ endif()
 
 # Add source files
 
-add_executable(deramp_burst src/deramp_burst.cu src/sql_mod.cpp
-               src/orbit.cu src/sario.cu)
-add_executable(geo2rdr_reramp src/geo2rdr_reramp.cu src/sql_mod.cpp
+add_executable(geo2rdr src/geo2rdr.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu src/bounds.cu)
 add_executable(crossmul src/crossmul.cu src/sario.cu)
 add_executable(phase_similarity src/phase_similarity.cu)
 add_executable(goldstein src/goldstein.cu)
 
-set_target_properties(geo2rdr_reramp PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+set_target_properties(geo2rdr PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 
 # Add include directories for all targets
-target_include_directories(deramp_burst PRIVATE "include")
-target_include_directories(geo2rdr_reramp PRIVATE "include")
+target_include_directories(geo2rdr PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIRS})
 
 # Link libraries with platform-specific handling
-target_link_libraries(deramp_burst PRIVATE TIFF::TIFF SQLite3::SQLite3)
-target_link_libraries(geo2rdr_reramp PRIVATE TIFF::TIFF SQLite3::SQLite3)
+target_link_libraries(geo2rdr PRIVATE TIFF::TIFF SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein
+install(TARGETS geo2rdr crossmul phase_similarity goldstein
         RUNTIME DESTINATION bin
 )
 #install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein

@@ -198,7 +198,7 @@ def _stream_tiff_from_zip(
             proc.stdin.write(data.flatten().tobytes())
         except BrokenPipeError:
             raise RuntimeError(
-                "deramp_burst process closed stdin prematurely "
+                "geo2rdr process closed stdin prematurely "
                 "(possibly due to an error in the executable)"
             )
 
@@ -242,8 +242,6 @@ def sentinel_scene(
         Directory to store temporary files
     slc_dir: str
         Directory to store geocoded SLC files
-    rm_rawslc: bool
-        Remove the deramped SLC and deramped pahse after image processing
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
@@ -261,8 +259,7 @@ def sentinel_scene(
     logger.info(f"Processing: {zip_file} to a geocoded SLC")
     logger.debug(f"input orbit file: {orbfile}")
 
-    deramp_burst = get_bin_path("deramp_burst")
-    geo2rdr_reramp = get_bin_path("geo2rdr_reramp")
+    geo2rdr = get_bin_path("geo2rdr")
 
     sent = sentinel_parser(zip_file)
     mission_id = sent["mission_id"]
@@ -288,7 +285,7 @@ def sentinel_scene(
     #   2.  Create a db file for each subswath and each orbit
     #   3.  Create orbtiming file with orbit state vectors
     #   4.  Rename and save the ancillary files needed for deramping the slc
-    #   5.  Stream TIFF data directly from zip into deramp_burst
+    #   5.  Stream TIFF data directly from zip into geo2rdr
 
     if orbfile is not None:
         logger.debug("*** Using precise orbit ***")
@@ -390,25 +387,13 @@ def sentinel_scene(
         slavedb = os.path.join(
             proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.db"
         )
-        deramp_phase_file = os.path.join(
-            proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}.phase"
-        )
-
-        # save dem/rsc parameters and update slc_file for geo2rdr_reramp
+        # save dem/rsc parameters for geo2rdr
         con = sqlite3.connect(slavedb.strip())
         c = con.cursor()
         sql_mod.add_param(c, "file", "demfile")
         sql_mod.add_param(c, "file", "rscfile")
         sql_mod.edit_param(c, "file", "demfile", demfile, "-", "char", "DEM file")
         sql_mod.edit_param(c, "file", "rscfile", rscfile, "-", "char", "RSC file")
-
-        deramp_output_prefix = os.path.join(
-            proc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}"
-        )
-        derampedslcfile = deramp_output_prefix + ".deramp"
-        sql_mod.edit_param(
-            c, "file", "slc_file", derampedslcfile, "-", "char", "deramped slc"
-        )
         sql_mod.edit_param(c, "file", "hmin", hmin, "m", "real*8", "Minimum elevation")
         sql_mod.edit_param(c, "file", "hmax", hmax, "m", "real*8", "Maximum elevation")
 
@@ -420,47 +405,30 @@ def sentinel_scene(
         c.close()
         con.close()
 
-        if not os.path.exists(deramp_phase_file):
-            # deramp: stream TIFF data from zip directly into deramp_burst via stdin
-            cmd = [
-                deramp_burst,
-                slavedb.strip(),
-                deramp_output_prefix,
-                deramp_phase_file,
-                "--stdin",
-            ]
-            logger.info(" ".join(cmd))
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            try:
-                _stream_tiff_from_zip(
-                    zip_file,
-                    swathfiles[ifile],
-                    proc,
-                    nrange,
-                    lines_per_burst,
-                    azimuth_bursts,
-                )
-            except Exception:
-                proc.kill()
-                proc.wait()
-                raise
-            proc.wait()
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode, cmd)
-
-        # geocode and reramp
         slc_file = os.path.join(
             slc_dir, f"{acq_date}_{mission_id}_{unique_id}_iw{subswath}"
         )
-        command = f"{geo2rdr_reramp} {slavedb} {deramp_phase_file} {slc_file}"
-        logger.info(command)
-        subprocess.check_call(command, shell=True)
+        # unified deramp + geocode + reramp: stream TIFF from zip via stdin
+        cmd = [geo2rdr, slavedb.strip(), slc_file, "--stdin"]
+        logger.info(" ".join(cmd))
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        try:
+            _stream_tiff_from_zip(
+                zip_file,
+                swathfiles[ifile],
+                proc,
+                nrange,
+                lines_per_burst,
+                azimuth_bursts,
+            )
+        except Exception:
+            proc.kill()
+            proc.wait()
+            raise
+        proc.wait()
+        if proc.returncode != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
 
-        if rm_rawslc:
-            if os.path.exists(derampedslcfile):
-                os.remove(derampedslcfile)
-            if os.path.exists(deramp_phase_file):
-                os.remove(deramp_phase_file)
         slc_files.extend(glob.glob(slc_file + "*.gslc"))
     # Clean up zip files to lessen disk space requirements
     if rm_zipfile:
