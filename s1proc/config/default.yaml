@@ -18,6 +18,9 @@ io:
 
 # SLC and interferogram generation parameters
 proc:
+    download_dem: true  # automatic DEM downloading
+    download_data: true # automatic Sentinel-1 data downloading
+    download_eof: true # automatic precise orbit data downloading
     rowlook: 10
     collook: 20
     wavelength: 0.055465763

@@ -48,6 +48,9 @@ class IoConfig:
 
 @dataclass
 class ProcessingConfig:
+    download_dem: bool
+    download_data: bool
+    download_eof: bool
     rowlook: int
     collook: int
     wavelength: float

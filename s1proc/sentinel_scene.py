@@ -215,7 +215,6 @@ def sentinel_scene(
     subswath_list: Sequence[int] = [1, 2, 3],
     proc_dir: str = "stack",
     slc_dir: str = "slc",
-    rm_rawslc: bool = True,
     rm_zipfile: bool = False,
     rm_folder: bool = False,
     hmin=0,

@@ -54,7 +54,6 @@ def stack(
     rscfile: str = "elevation.dem.rsc",
     polarization: Literal["hh", "hv", "vh", "vv"] = "vv",
     subswath_list: Sequence[int] = [1, 2, 3],
-    rm_rawslc: bool = True,
     rm_zipfile: bool = False,
     rm_folder: bool = False,
     reprocess: bool = False,
@@ -81,8 +80,6 @@ def stack(
         Polarization to process
     subswath_list: Sequence[int]
         Subswaths to process
-    rm_rawslc: bool
-        Remove raw SLC files after image processing is done
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
@@ -139,7 +136,6 @@ def stack(
             subswath_list,
             proc_dir,
             slc_dir,
-            rm_rawslc,
             rm_zipfile,
             rm_folder,
             hmin,
@@ -152,7 +148,6 @@ def stack(
 def run_stack(
     polarization: Literal["hh", "hv", "vh", "vv"] = "vv",
     subswath_list: Sequence[int] = [1, 2, 3],
-    rm_rawslc: bool = True,
     rm_zipfile: bool = False,
     rm_folder: bool = False,
     reprocess: bool = False,
@@ -168,8 +163,6 @@ def run_stack(
         Polarization to process
     subswath_list: Sequence[int]
         Subswaths to process
-    rm_rawslc: bool
-        Remove raw SLC files after image processing is done
     rm_zipfile: bool
         Remove the zipfile after image processing is done
     rm_folder: bool
@@ -194,7 +187,6 @@ def run_stack(
         rscfile=icfg.rsc_file,
         polarization=polarization,
         subswath_list=subswath_list,
-        rm_rawslc=rm_rawslc,
         rm_zipfile=rm_zipfile,
         rm_folder=rm_folder,
         reprocess=reprocess,

@@ -293,62 +293,83 @@ def preprocess(config_file="config.yaml"):
     bbox = cfg.area.bbox
     frame_list = cfg.area.frame_list
     if bbox is None:
-        raise ValueError("area.bbox must be set in the config file")
-
-    # Filter GeoJSON by frame list
-    geojson_file = root_dir / "roi.geojson"
-    if not geojson_file.is_file():
-        raise FileNotFoundError(f"Cannot find {geojson_file}")
-
-    with open(geojson_file, "r", encoding="utf-8") as f:
-        s1_data = json.load(f)
-
-    if frame_list is None or len(frame_list) == 0:
-        logger.warning(
-            "frame list is empty or not set, frame filter " + "will not be applied"
-        )
+        logger.warning("area.bbox must be set to download DEM and radar data.")
     else:
-        s1_data = _filter_by_frame(s1_data, frame_list)
-    metalink_file = root_dir / "roi.metalink"
-    _geojson_to_metalink(s1_data, metalink_file)
-    logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
+        # Filter GeoJSON by frame list
+        geojson_file = root_dir / "roi.geojson"
+        if not geojson_file.is_file():
+            raise FileNotFoundError(f"Cannot find {geojson_file}")
 
-    # Compute study area bounds
-    frames_bbox = _compute_frames_bbox(s1_data["features"])
-    if frames_bbox is None:
-        raise RuntimeError("No frame footprints found — cannot determine study area")
+        with open(geojson_file, "r", encoding="utf-8") as f:
+            s1_data = json.load(f)
 
-    logger.info("Frames bounding box: %s", frames_bbox)
+        if frame_list is None or len(frame_list) == 0:
+            logger.warning(
+                "frame list is empty or not set, frame filter " + "will not be applied"
+            )
+        else:
+            s1_data = _filter_by_frame(s1_data, frame_list)
+        metalink_file = root_dir / "roi.metalink"
+        _geojson_to_metalink(s1_data, metalink_file)
+        logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
 
-    bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
-    study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
-    if study_bbox is None:
-        raise RuntimeError(
-            f"Frame footprints {frames_bbox} do not overlap with area.bbox {bbox_tuple}"
-        )
-    logger.info("Study area (intersection): %s", study_bbox)
+        # Compute study area bounds
+        frames_bbox = _compute_frames_bbox(s1_data["features"])
+        if frames_bbox is None:
+            raise RuntimeError(
+                "No frame footprints found — cannot determine study area"
+            )
 
-    # Download COP DEM
-    # check if cop_global.vrt is cahced
-    cache_dir = get_cache_dir()
-    vrt_file = cache_dir / "cop_global.vrt"
-    # download the vrt file if it does not exist
-    if not vrt_file.exists():
-        download_vrt_file()
-    tif_file = root_dir / "roi_dem.tif"
-    if tif_file.exists():
-        os.remove(tif_file)
-    _download_dem(tif_file, bbox, vrt_file, 6, 3, "GTiff", "int16")
-    gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16)
+        logger.info("Frames bounding box: %s", frames_bbox)
 
-    # Download SLC data
-    data_path = Path(cfg.io.data_path)
-    data_path.mkdir(parents=True, exist_ok=True)
-    download_metalink(str(metalink_file), output_dir=str(data_path))
+        bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
+        study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
+        if study_bbox is None:
+            raise RuntimeError(
+                f"Frame footprints {frames_bbox} do not overlap with area.bbox "
+                + f" {bbox_tuple}"
+            )
+        logger.info("Study area (intersection): %s", study_bbox)
+
+        # Download COP DEM
+        # check if cop_global.vrt is cahced
+        if cfg.proc.download_dem:
+            cache_dir = get_cache_dir()
+            vrt_file = cache_dir / "cop_global.vrt"
+            # download the vrt file if it does not exist
+            if not vrt_file.exists():
+                download_vrt_file()
+            tif_file = root_dir / "roi_dem.tif"
+            if tif_file.exists():
+                os.remove(tif_file)
+            _download_dem(tif_file, bbox, vrt_file, 6, 3, "GTiff", "int16")
+            gtiff2roipac(tif_file, cfg.io.dem_file, cfg.io.rsc_file, np.int16)
+        else:
+            logger.warning(
+                "DEM will not be downloaded automatically because "
+                + "proc.download_dem is set to False."
+            )
+
+        # Download SLC data
+        if cfg.proc.download_data:
+            data_path = Path(cfg.io.data_path)
+            data_path.mkdir(parents=True, exist_ok=True)
+            download_metalink(str(metalink_file), output_dir=str(data_path))
+        else:
+            logger.warning(
+                "Sentinel-1 data will not be downloaded automatcially"
+                + " because proc.download_data is set to False."
+            )
 
     # Download precise orbit files
-    from eof import download as eof_download
+    if cfg.proc.download_eof:
+        from eof import download as eof_download
 
-    eof_path = Path(cfg.io.eof_path)
-    eof_path.mkdir(parents=True, exist_ok=True)
-    eof_download.main(search_path=str(data_path), save_dir=str(eof_path))
+        eof_path = Path(cfg.io.eof_path)
+        eof_path.mkdir(parents=True, exist_ok=True)
+        eof_download.main(search_path=str(data_path), save_dir=str(eof_path))
+    else:
+        logger.warning(
+            "Precise orbit data will not be downloaded automatically"
+            + " because proc.download_eof is set to False."
+        )
