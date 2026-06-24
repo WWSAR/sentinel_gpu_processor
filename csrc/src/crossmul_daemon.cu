@@ -1,29 +1,41 @@
 /**
  * crossmul_daemon — long-running GPU interferogram processor.
  *
- * Architecture
- * ------------
+ * Architecture (4-stage decoupled pipeline with double-buffering)
+ * ---------------------------------------------------------------
  * 1.  Reads a burst-pair task list from a text file specified via
  *     ``--tasks-file <path>`` (one ``<ref_slc> <sec_slc> <out_ifg>``
  *     per line).
  * 2.  **Scan pass** — reads every SLC header to determine the
- *     maximum overlap dimensions across all tasks.
- * 3.  Allocates a pool of **page-locked (pinned) host buffers**
- *     (``max_slots`` slots, each sized to max dimensions).
- * 4.  Spawns a **single I/O producer thread** that reads SLC data
- *     sequentially into free pinned slots, avoiding disk contention.
- * 5.  Spawns **one GPU consumer thread per device**; each manages
- *     **multiple internal execution lanes** (``streams_per_gpu``)
- *     with dedicated CUDA streams and device buffers.  The consumer
- *     loop uses non-blocking ``cudaStreamQuery`` polling so that
- *     multiple burst pairs can execute concurrently on the same GPU.
+ *     maximum overlap dimensions AND maximum raw read size across
+ *     all tasks.
+ * 3.  Allocates two pools of **page-locked (pinned) host buffers**:
+ *     - ``RawBuffer`` pool (Stage 1 uncropped I/O buffers).
+ *     - ``TaskSlot`` pool (Stage 2+ cropped buffers + result staging).
+ * 4.  **Stage 1** — Single-threaded I/O producer: reads headers,
+ *     computes overlap, performs pure sequential disk reads into
+ *     RawBuffers (NO cropping).
+ * 5.  **Stage 2** — CPU worker thread pool (4-8 threads): pops
+ *     RawBuffers, crops them into TaskSlots via ``crop_memory_buffer``,
+ *     releases the RawBuffer back to its free pool.
+ * 6.  **Stage 3** — One GPU consumer thread per device: each manages
+ *     multiple internal execution lanes with dedicated CUDA streams.
+ *     Uses non-blocking ``cudaStreamQuery`` polling.  On completion,
+ *     pushes a ``DiskWriteItem`` to the disk-write queue and
+ *     immediately resets the lane to IDLE (NO synchronous disk I/O).
+ * 7.  **Stage 4** — Single-threaded async disk writer: pops
+ *     ``DiskWriteItem`` entries, calls ``save_binary``, releases the
+ *     underlying TaskSlot back to the free pool.
+ *
+ * All memory is allocated once at startup via ``cudaMallocHost``.
+ * No inner-loop heap allocations (``new``/``delete``, ``malloc``/
+ * ``free``) are performed on any hot path.
  */
 
 #include "gpu_device.hpp"
 #include "sario.hpp"
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -96,21 +108,79 @@ struct Task {
   std::string out_ifg;
 };
 
+// -----------------------------------------------------------------------
+// Stage 1 → Stage 2: RawBuffer (uncropped I/O buffer)
+// -----------------------------------------------------------------------
+
 /**
- * One slot in the pre-allocated pinned host buffer pool.
+ * Holds raw (uncropped) SLC blocks read directly from disk by Stage 1.
  *
- * The producer fills ``ref_data`` / ``sec_data`` and metadata;
- * a GPU consumer processes the pair, writes the result to disk, and
- * returns the slot to the free queue.
+ * Sized to ``max_raw_elements`` — the maximum ``src_w * copy_h`` product
+ * across all tasks.  Stage 2 crops from this buffer into a :struct:`TaskSlot`.
  */
-struct BufferSlot {
+struct RawBuffer {
   int id;
 
-  // -- Pinned host buffers (pre-allocated, sized to max elements) --
-  Complex *ref_data;   // max_elements
-  Complex *sec_data;   // max_elements
-  Complex *result_buf; // max_elements_sm  (complex output path)
-  float *result_float; // max_elements_sm  (float output path)
+  // -- Pinned host buffers (pre-allocated, sized to max_raw_elements) --
+  Complex *ref_data;
+  Complex *sec_data;
+
+  // -- Task identity --
+  Task task;
+
+  // -- Crop parameters for Stage 2 (set by Stage 1) --
+  // Source widths (full image widths)
+  int src_w_ref;
+  int src_w_sec;
+  // Height of the raw block read for each image
+  int copy_h_ref;
+  int copy_h_sec;
+  // Horizontal crop parameters (same for both images — shared overlap)
+  int copy_w;
+  // Column offsets within source (per image)
+  int src_col0_ref;
+  int src_col0_sec;
+  // Column offsets within destination (same for both)
+  int dst_col0;
+  // Row offsets within destination (per image)
+  int dst_row0_ref;
+  int dst_row0_sec;
+
+  // -- Overlap / output dimensions --
+  int nrow;
+  int ncol;
+  int nrow_sm;
+  int ncol_sm;
+
+  // -- Pre-computed output header --
+  std::int32_t ifg_header[NHEADER];
+
+  // -- Lifecycle: 0 = free, 1 = filling (Stage 1), 2 = cpu_ready --
+  std::atomic<int> state{0};
+};
+
+// -----------------------------------------------------------------------
+// Stage 2 → Stage 4: TaskSlot (cropped data + result staging)
+// -----------------------------------------------------------------------
+
+/**
+ * Holds cropped overlap data ready for GPU processing (Stage 2 output).
+ *
+ * Also owns the **result staging buffers** where Stage 3's D2H transfers
+ * land.  This allows the GPU lane to be released immediately after the
+ * stream completes — the staging buffer ownership stays with the slot
+ * until Stage 4 finishes writing it to disk.
+ */
+struct TaskSlot {
+  int id;
+
+  // -- Pinned host buffers (pre-allocated, sized to max_elements) --
+  Complex *ref_data;
+  Complex *sec_data;
+
+  // -- Pinned host result staging (D2H target, sized to max_elements_sm) --
+  Complex *result_cpx;
+  float *result_float;
 
   // -- Task identity --
   Task task;
@@ -124,16 +194,39 @@ struct BufferSlot {
   // -- Pre-computed output header --
   std::int32_t ifg_header[NHEADER];
 
-  // -- Slot lifecycle: 0 = free, 1 = filling, 2 = ready, 3 = processing --
+  // -- Lifecycle: 0 = free, 1 = gpu_ready, 2 = processing --
   std::atomic<int> state{0};
 };
+
+// -----------------------------------------------------------------------
+// Stage 3 → Stage 4: DiskWriteItem
+// -----------------------------------------------------------------------
+
+/**
+ * Lightweight wrapper pushed by Stage 3 when a GPU lane completes.
+ *
+ * Carries a pointer into the owning :struct:`TaskSlot`'s staging buffer.
+ * Stage 4 writes the data to disk, then releases the slot.
+ */
+struct DiskWriteItem {
+  int slot_idx; // TaskSlot to release after write
+  void *data;   // pointer to TaskSlot::result_cpx or result_float
+  int n_elements;
+  std::int32_t header[NHEADER];
+  std::string out_ifg;
+  bool is_float;
+};
+
+// -----------------------------------------------------------------------
+// GPU execution lane (per-stream resources)
+// -----------------------------------------------------------------------
 
 /**
  * One internal execution lane within a GPU.
  *
  * Each lane owns a dedicated CUDA stream and its own set of device
- * buffers + host staging buffers.  This allows multiple burst pairs
- * to execute concurrently on the same GPU without data races.
+ * buffers.  Staging buffers have been moved to :struct:`TaskSlot` so
+ * that the lane can be freed immediately when the stream completes.
  */
 struct GpuTaskSlot {
   int lane_id;
@@ -141,7 +234,7 @@ struct GpuTaskSlot {
   // -- Lane state: 0 = IDLE, 1 = BUSY (async work in flight) --
   int state = 0;
 
-  // -- Which BufferSlot this lane is currently processing (-1 if IDLE) --
+  // -- Which TaskSlot this lane is currently processing (-1 if IDLE) --
   int slot_idx = -1;
 
   // -- Dedicated CUDA stream --
@@ -154,34 +247,39 @@ struct GpuTaskSlot {
   Complex *d_ifg_collook;
   Complex *d_ifglook;
   float *d_phase;
-
-  // -- Pinned host staging buffers (private to this lane) --
-  Complex *staging_cpx;
-  float *staging_float;
 };
 
-/**
- * Per-GPU context: owns multiple :struct:`GpuTaskSlot` lanes.
- */
+// -----------------------------------------------------------------------
+// Per-GPU context
+// -----------------------------------------------------------------------
+
+/** Per-GPU context: owns multiple :struct:`GpuTaskSlot` lanes. */
 struct GpuContext {
   int gpu_id;
   std::vector<GpuTaskSlot> lanes;
 };
 
+// -----------------------------------------------------------------------
+// Top-level daemon context
+// -----------------------------------------------------------------------
+
 /**
- * Top-level daemon context — owns the buffer pool, task list,
+ * Top-level daemon context — owns the buffer pools, task list,
  * GPU contexts, synchronisation primitives, and progress counters.
  */
 struct DaemonContext {
   // -- Configuration --
-  int max_slots;
+  int raw_slots;        // number of RawBuffers (= max_slots)
+  int task_slots_count; // number of TaskSlots (= max_slots)
   int streams_per_gpu;
+  int cpu_workers;
   int max_nrow; // maximum overlap nrow across all tasks
   int max_ncol;
   int max_nrow_sm; // max_nrow / rowlook
   int max_ncol_sm; // max_ncol / collook
   std::size_t max_elements;
   std::size_t max_elements_sm;
+  std::size_t max_raw_elements; // max src_w * copy_h across all tasks
   int rowlook;
   int collook;
   bool out_float;
@@ -192,100 +290,256 @@ struct DaemonContext {
   std::vector<Task> tasks;
   int n_total;
 
-  // -- Buffer pool --
-  std::vector<BufferSlot> slots;
+  // -- RawBuffer pool (Stage 1 → Stage 2) --
+  std::vector<RawBuffer> raw_buffers;
+  std::queue<int> raw_free_queue;
+  std::mutex raw_free_mutex;
+  std::condition_variable raw_free_cv;
 
-  // -- Free-slot queue (producer waits here) --
-  std::queue<int> free_queue;
-  std::mutex free_mutex;
-  std::condition_variable free_cv;
+  // -- CPU work queue (RawBuffer indices ready for cropping) --
+  std::queue<int> cpu_work_queue;
+  std::mutex cpu_work_mutex;
+  std::condition_variable cpu_work_cv;
 
-  // -- Ready-slot queue (consumers pull from here) --
-  std::queue<int> ready_queue;
-  std::mutex ready_mutex;
-  std::condition_variable ready_cv;
+  // -- TaskSlot pool (Stage 2 → Stage 4) --
+  std::vector<TaskSlot> task_slots;
+  std::queue<int> task_free_queue;
+  std::mutex task_free_mutex;
+  std::condition_variable task_free_cv;
+
+  // -- GPU-ready queue (TaskSlot indices ready for H2D) --
+  std::queue<int> gpu_ready_queue;
+  std::mutex gpu_ready_mutex;
+  std::condition_variable gpu_ready_cv;
+
+  // -- Disk-write queue (completed results from GPU lanes) --
+  std::queue<DiskWriteItem> disk_write_queue;
+  std::mutex disk_write_mutex;
+  std::condition_variable disk_write_cv;
 
   // -- GPU workers --
   std::vector<GpuContext> gpus;
 
-  // -- Progress --
+  // -- Progress & termination --
   std::atomic<int> completed{0};
   std::atomic<int> failed{0};
   std::atomic<bool> producer_done{false};
+  std::atomic<int> cpu_active{0}; // count of running CPU workers
+  std::atomic<int> gpu_active{0}; // count of running GPU consumers
   std::chrono::steady_clock::time_point t_start;
 };
 
-// -----------------------------------------------------------------------
-// Buffer-pool helpers (blocking — used by the producer)
-// -----------------------------------------------------------------------
+// =======================================================================
+// RawBuffer pool helpers
+// =======================================================================
 
-/** Acquire a free slot from the pool.  Blocks until one is available. */
-static int acquire_free_slot(DaemonContext &ctx) {
-  std::unique_lock<std::mutex> lock(ctx.free_mutex);
-  ctx.free_cv.wait(lock, [&ctx] { return !ctx.free_queue.empty(); });
-  int idx = ctx.free_queue.front();
-  ctx.free_queue.pop();
-  ctx.slots[idx].state.store(1); // FILLING
+/** Acquire a free RawBuffer.  Blocks until one is available. */
+static int acquire_raw_buffer(DaemonContext &ctx) {
+  std::unique_lock<std::mutex> lock(ctx.raw_free_mutex);
+  ctx.raw_free_cv.wait(lock, [&ctx] { return !ctx.raw_free_queue.empty(); });
+  int idx = ctx.raw_free_queue.front();
+  ctx.raw_free_queue.pop();
+  ctx.raw_buffers[idx].state.store(1); // filling
   return idx;
 }
 
-/** Push a slot that has been filled by the producer to the ready queue. */
-static void push_ready_slot(DaemonContext &ctx, int idx) {
-  ctx.slots[idx].state.store(2); // READY
+/** Push a filled RawBuffer to the CPU work queue. */
+static void push_cpu_work(DaemonContext &ctx, int idx) {
+  ctx.raw_buffers[idx].state.store(2); // cpu_ready
   {
-    std::lock_guard<std::mutex> lock(ctx.ready_mutex);
-    ctx.ready_queue.push(idx);
+    std::lock_guard<std::mutex> lock(ctx.cpu_work_mutex);
+    ctx.cpu_work_queue.push(idx);
   }
-  ctx.ready_cv.notify_one();
+  ctx.cpu_work_cv.notify_one();
+}
+
+/** Return a RawBuffer to its free pool (called by Stage 2). */
+static void release_raw_buffer(DaemonContext &ctx, int idx) {
+  ctx.raw_buffers[idx].state.store(0); // free
+  {
+    std::lock_guard<std::mutex> lock(ctx.raw_free_mutex);
+    ctx.raw_free_queue.push(idx);
+  }
+  ctx.raw_free_cv.notify_one();
+}
+
+// =======================================================================
+// TaskSlot pool helpers
+// =======================================================================
+
+/** Acquire a free TaskSlot.  Blocks until one is available. */
+static int acquire_task_slot(DaemonContext &ctx) {
+  std::unique_lock<std::mutex> lock(ctx.task_free_mutex);
+  ctx.task_free_cv.wait(lock, [&ctx] { return !ctx.task_free_queue.empty(); });
+  int idx = ctx.task_free_queue.front();
+  ctx.task_free_queue.pop();
+  ctx.task_slots[idx].state.store(1); // gpu_ready
+  return idx;
+}
+
+/** Push a populated TaskSlot to the GPU-ready queue. */
+static void push_gpu_ready(DaemonContext &ctx, int idx) {
+  ctx.task_slots[idx].state.store(1); // gpu_ready
+  {
+    std::lock_guard<std::mutex> lock(ctx.gpu_ready_mutex);
+    ctx.gpu_ready_queue.push(idx);
+  }
+  ctx.gpu_ready_cv.notify_one();
 }
 
 /**
- * Non-blocking try-pop from the ready queue.
+ * Non-blocking try-pop from the GPU-ready queue.
  * Returns the slot index, or -1 if the queue is empty.
- * Used by GPU consumer threads polling across multiple lanes.
  */
-static int try_acquire_ready_slot(DaemonContext &ctx) {
-  std::lock_guard<std::mutex> lock(ctx.ready_mutex);
-  if (ctx.ready_queue.empty())
+static int try_acquire_gpu_ready(DaemonContext &ctx) {
+  std::lock_guard<std::mutex> lock(ctx.gpu_ready_mutex);
+  if (ctx.gpu_ready_queue.empty())
     return -1;
-  int idx = ctx.ready_queue.front();
-  ctx.ready_queue.pop();
-  ctx.slots[idx].state.store(3); // PROCESSING
+  int idx = ctx.gpu_ready_queue.front();
+  ctx.gpu_ready_queue.pop();
+  ctx.task_slots[idx].state.store(2); // processing
   return idx;
 }
 
-/** Check whether the ready queue is empty (caller must hold ready_mutex). */
-static bool ready_queue_empty_unsafe(const DaemonContext &ctx) {
-  return ctx.ready_queue.empty();
-}
-
-/** Return a slot to the free pool after the consumer is done with it. */
-static void release_slot(DaemonContext &ctx, int idx) {
-  ctx.slots[idx].state.store(0); // FREE
+/** Return a TaskSlot to the free pool (called by Stage 4). */
+static void release_task_slot(DaemonContext &ctx, int idx) {
+  ctx.task_slots[idx].state.store(0); // free
   {
-    std::lock_guard<std::mutex> lock(ctx.free_mutex);
-    ctx.free_queue.push(idx);
+    std::lock_guard<std::mutex> lock(ctx.task_free_mutex);
+    ctx.task_free_queue.push(idx);
   }
-  ctx.free_cv.notify_one();
+  ctx.task_free_cv.notify_one();
 }
 
-// -----------------------------------------------------------------------
-// Producer thread
-// -----------------------------------------------------------------------
+// =======================================================================
+// Disk-write queue helpers
+// =======================================================================
+
+/** Push a completed result to the disk-write queue. */
+static void push_disk_write(DaemonContext &ctx, DiskWriteItem item) {
+  {
+    std::lock_guard<std::mutex> lock(ctx.disk_write_mutex);
+    ctx.disk_write_queue.push(std::move(item));
+  }
+  ctx.disk_write_cv.notify_one();
+}
+
+// =======================================================================
+// Core I/O primitives (Stage 1 & Stage 2)
+// =======================================================================
 
 /**
- * Single I/O producer: sequentially reads SLC data for each task
- * into the next available pinned buffer slot, then pushes the filled
- * slot to the ready queue.
+ * Pure sequential disk read — NO cropping, NO allocation.
+ *
+ * Reads ``src_w * copy_h * type_size`` bytes from *filename* starting
+ * at ``header_bytes + src_row0 * src_w * type_size`` directly into
+ * *raw_buffer* (which must be pre-allocated pinned host memory).
+ *
+ * Parameters
+ * ----------
+ * filename : str
+ *     Path to the binary SLC file.
+ * raw_buffer : char*
+ *     Pre-allocated destination buffer (pinned host memory).
+ * src_w : size_t
+ *     Full width of the source image in elements.
+ * src_row0 : size_t
+ *     First row to read (in source image coordinates, relative to the
+ *     first data row in the file).
+ * copy_h : size_t
+ *     Number of contiguous rows to read.
+ * type_size : size_t
+ *     ``sizeof(element_type)``.
+ */
+static void read_file_rows(const std::string &filename, char *raw_buffer,
+                           std::size_t src_w, std::size_t src_row0,
+                           std::size_t copy_h, std::size_t type_size) {
+  std::ifstream fin(filename, std::ios::binary);
+  if (!fin)
+    throw std::runtime_error("Cannot open file in read_file_rows");
+
+  const std::size_t header_bytes = 64 * sizeof(std::int32_t);
+  std::size_t offset = header_bytes + src_row0 * src_w * type_size;
+
+  fin.seekg(offset, std::ios::beg);
+  fin.read(raw_buffer, src_w * copy_h * type_size);
+
+  if (!fin)
+    throw std::runtime_error("Failed to read data from file");
+}
+
+/**
+ * Pure memory crop — copies the overlapping region from an uncropped
+ * source buffer into a destination buffer.  NO allocation.
+ *
+ * Parameters
+ * ----------
+ * src : const Complex*
+ *     Uncropped source rows (raw disk read result).
+ * dst : Complex*
+ *     Destination buffer (TaskSlot cropped region).
+ * src_w : int
+ *     Full width of the source image (in elements).
+ * dst_w : int
+ *     Width of the destination (overlap) image.
+ * copy_w : int
+ *     Number of columns to copy per row.
+ * copy_h : int
+ *     Number of rows to copy.
+ * src_col0 : int
+ *     Starting column offset within the source row.
+ * dst_col0 : int
+ *     Starting column offset within the destination row.
+ * dst_row0 : int
+ *     Starting row offset within the destination buffer.
+ */
+static void crop_memory_buffer(const Complex *src, Complex *dst, int src_w,
+                               int dst_w, int copy_w, int copy_h, int src_col0,
+                               int dst_col0, int dst_row0) {
+  for (int r = 0; r < copy_h; ++r) {
+    const Complex *src_row =
+        src + static_cast<std::size_t>(r) * src_w + src_col0;
+    Complex *dst_row =
+        dst + static_cast<std::size_t>(dst_row0 + r) * dst_w + dst_col0;
+    std::memcpy(dst_row, src_row, copy_w * sizeof(Complex));
+  }
+}
+
+// -----------------------------------------------------------------------
+// Progress reporting
+// -----------------------------------------------------------------------
+
+/** Print a periodic progress line to stdout. */
+static void emit_progress(const DaemonContext &ctx) {
+  auto now = std::chrono::steady_clock::now();
+  double elapsed = std::chrono::duration<double>(now - ctx.t_start).count();
+  std::cout << "PROGRESS " << ctx.completed.load() << " " << ctx.failed.load()
+            << " " << ctx.n_total << " " << static_cast<long long>(elapsed)
+            << std::endl;
+}
+
+// =======================================================================
+// Stage 1: Single-Threaded I/O Producer
+// =======================================================================
+
+/**
+ * Stage 1 — Pure I/O producer.
+ *
+ * Sequentially iterates over the task list.  For each task:
+ * 1. Reads ref + sec headers, computes overlap dimensions.
+ * 2. Acquires a free RawBuffer.
+ * 3. Calls ``read_file_rows`` for ref and sec — NO cropping.
+ * 4. Stores crop metadata in the RawBuffer.
+ * 5. Pushes the RawBuffer index to the CPU work queue.
  */
 static void producer_thread(DaemonContext &ctx) {
   for (int t = 0; t < ctx.n_total; ++t) {
     const Task &task = ctx.tasks[t];
 
-    // -- Acquire a free slot (blocks if pool is exhausted) --
-    int slot_idx = acquire_free_slot(ctx);
-    BufferSlot &slot = ctx.slots[slot_idx];
-    slot.task = task;
+    // -- Acquire a free RawBuffer --
+    int raw_idx = acquire_raw_buffer(ctx);
+    RawBuffer &raw = ctx.raw_buffers[raw_idx];
+    raw.task = task;
 
     // -- Read headers --
     std::int32_t header1[NHEADER], header2[NHEADER];
@@ -294,12 +548,7 @@ static void producer_thread(DaemonContext &ctx) {
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
                 << " - cannot read header: " << task.ref_slc << std::endl;
-      slot.state.store(0);
-      {
-        std::lock_guard<std::mutex> lk(ctx.free_mutex);
-        ctx.free_queue.push(slot_idx);
-      }
-      ctx.free_cv.notify_one();
+      release_raw_buffer(ctx, raw_idx);
       ctx.failed.fetch_add(1);
       ctx.completed.fetch_add(1);
       continue;
@@ -310,23 +559,19 @@ static void producer_thread(DaemonContext &ctx) {
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
                 << " - cannot read header: " << task.sec_slc << std::endl;
-      slot.state.store(0);
-      {
-        std::lock_guard<std::mutex> lk(ctx.free_mutex);
-        ctx.free_queue.push(slot_idx);
-      }
-      ctx.free_cv.notify_one();
+      release_raw_buffer(ctx, raw_idx);
       ctx.failed.fetch_add(1);
       ctx.completed.fetch_add(1);
       continue;
     }
 
-    // -- Compute overlap dimensions --
+    // -- Source bounds --
     int left1 = header1[2], top1 = header1[3];
     int right1 = header1[4], bottom1 = header1[5];
     int left2 = header2[2], top2 = header2[3];
     int right2 = header2[4], bottom2 = header2[5];
 
+    // -- Compute output overlap region (aligned) --
     int left = (left1 < left2 ? left1 : left2);
     left = (left + ctx.collook - 1) / ctx.collook * ctx.collook;
     int right = (right1 > right2 ? right1 : right2);
@@ -342,12 +587,7 @@ static void producer_thread(DaemonContext &ctx) {
     if (nrow <= 0 || ncol <= 0) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
                 << " - empty overlap region" << std::endl;
-      slot.state.store(0);
-      {
-        std::lock_guard<std::mutex> lk(ctx.free_mutex);
-        ctx.free_queue.push(slot_idx);
-      }
-      ctx.free_cv.notify_one();
+      release_raw_buffer(ctx, raw_idx);
       ctx.failed.fetch_add(1);
       ctx.completed.fetch_add(1);
       continue;
@@ -356,80 +596,214 @@ static void producer_thread(DaemonContext &ctx) {
     int nrow_sm = nrow / ctx.rowlook;
     int ncol_sm = ncol / ctx.collook;
 
-    slot.nrow = nrow;
-    slot.ncol = ncol;
-    slot.nrow_sm = nrow_sm;
-    slot.ncol_sm = ncol_sm;
+    // -- Compute raw-read and crop parameters for ref image --
+    int src_w_ref = right1 - left1;
+    int overlap_left_ref = std::max(left, left1);
+    int overlap_right_ref = std::min(right, right1);
+    int overlap_top_ref = std::max(top, top1);
+    int overlap_bottom_ref = std::min(top + (bottom1 - top1), bottom1);
+    int copy_w_ref = overlap_right_ref - overlap_left_ref;
+    int copy_h_ref = overlap_bottom_ref - overlap_top_ref;
+    int src_col0_ref = overlap_left_ref - left1;
+    int src_row0_ref = overlap_top_ref - top1;
+    int dst_col0_ref = overlap_left_ref - left;
+    int dst_row0_ref = overlap_top_ref - top;
 
-    // Fill output header
-    slot.ifg_header[0] = header1[0] / ctx.rowlook;
-    slot.ifg_header[1] = header1[1] / ctx.collook;
-    slot.ifg_header[2] = left / ctx.collook;
-    slot.ifg_header[3] = top / ctx.rowlook;
-    slot.ifg_header[4] = right / ctx.collook;
-    slot.ifg_header[5] = bottom / ctx.rowlook;
+    // -- Compute raw-read and crop parameters for sec image --
+    int src_w_sec = right2 - left2;
+    int overlap_left_sec = std::max(left, left2);
+    int overlap_right_sec = std::min(right, right2);
+    int overlap_top_sec = std::max(top, top2);
+    int overlap_bottom_sec = std::min(top + (bottom2 - top2), bottom2);
+    int copy_h_sec = overlap_bottom_sec - overlap_top_sec;
+    int src_col0_sec = overlap_left_sec - left2;
+    int src_row0_sec = overlap_top_sec - top2;
+    int dst_row0_sec = overlap_top_sec - top;
 
-    // -- Read SLC pixel data into pinned host buffers --
-    try {
-      read_and_resample<Complex>(task.ref_slc, slot.ref_data, left, top, right,
-                                 bottom, 0, bottom1 - top1);
-      read_and_resample<Complex>(task.sec_slc, slot.sec_data, left, top, right,
-                                 bottom, 0, bottom2 - top2);
-    } catch (const std::exception &e) {
+    // The horizontal overlap is the same for both images
+    int copy_w = copy_w_ref;
+    // dst_col0 is also identical: overlap_left - left
+    (void)overlap_left_sec; // used only for consistency validation
+
+    if (copy_w <= 0 || copy_h_ref <= 0 || copy_h_sec <= 0) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " - I/O error reading SLC data" << std::endl;
-      slot.state.store(0);
-      {
-        std::lock_guard<std::mutex> lk(ctx.free_mutex);
-        ctx.free_queue.push(slot_idx);
-      }
-      ctx.free_cv.notify_one();
+                << " - no overlapping region after alignment" << std::endl;
+      release_raw_buffer(ctx, raw_idx);
       ctx.failed.fetch_add(1);
       ctx.completed.fetch_add(1);
       continue;
     }
 
-    // -- Push to ready queue --
-    push_ready_slot(ctx, slot_idx);
+    // -- Store crop metadata in RawBuffer --
+    raw.src_w_ref = src_w_ref;
+    raw.src_w_sec = src_w_sec;
+    raw.copy_h_ref = copy_h_ref;
+    raw.copy_h_sec = copy_h_sec;
+    raw.copy_w = copy_w;
+    raw.src_col0_ref = src_col0_ref;
+    raw.src_col0_sec = src_col0_sec;
+    raw.dst_col0 = dst_col0_ref; // same as dst_col0_sec
+    raw.dst_row0_ref = dst_row0_ref;
+    raw.dst_row0_sec = dst_row0_sec;
+    raw.nrow = nrow;
+    raw.ncol = ncol;
+    raw.nrow_sm = nrow_sm;
+    raw.ncol_sm = ncol_sm;
+
+    // -- Fill output header --
+    raw.ifg_header[0] = header1[0] / ctx.rowlook;
+    raw.ifg_header[1] = header1[1] / ctx.collook;
+    raw.ifg_header[2] = left / ctx.collook;
+    raw.ifg_header[3] = top / ctx.rowlook;
+    raw.ifg_header[4] = right / ctx.collook;
+    raw.ifg_header[5] = bottom / ctx.rowlook;
+
+    // -- Pure I/O: read raw SLC blocks into RawBuffer --
+    try {
+      read_file_rows(task.ref_slc, reinterpret_cast<char *>(raw.ref_data),
+                     static_cast<std::size_t>(src_w_ref),
+                     static_cast<std::size_t>(src_row0_ref),
+                     static_cast<std::size_t>(copy_h_ref), sizeof(Complex));
+
+      read_file_rows(task.sec_slc, reinterpret_cast<char *>(raw.sec_data),
+                     static_cast<std::size_t>(src_w_sec),
+                     static_cast<std::size_t>(src_row0_sec),
+                     static_cast<std::size_t>(copy_h_sec), sizeof(Complex));
+    } catch (const std::exception &e) {
+      std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
+                << " - I/O error: " << e.what() << std::endl;
+      release_raw_buffer(ctx, raw_idx);
+      ctx.failed.fetch_add(1);
+      ctx.completed.fetch_add(1);
+      continue;
+    }
+
+    // -- Push to CPU work queue --
+    push_cpu_work(ctx, raw_idx);
 
     if (ctx.verbose) {
-      std::cerr << "[crossmul_daemon|producer] slot " << slot_idx
-                << " ready: " << task.out_ifg << " (" << nrow << "x" << ncol
-                << " -> " << nrow_sm << "x" << ncol_sm << ")" << std::endl;
+      std::cerr << "[crossmul_daemon|producer] raw[" << raw_idx
+                << "] -> cpu_work: " << task.out_ifg
+                << " (raw ref: " << src_w_ref << "x" << copy_h_ref
+                << " sec: " << src_w_sec << "x" << copy_h_sec
+                << " -> crop: " << nrow << "x" << ncol << ")" << std::endl;
     }
   }
 
   ctx.producer_done.store(true);
-  ctx.ready_cv.notify_all();
-  std::cerr << "[crossmul_daemon] Producer finished - all " << ctx.n_total
-            << " tasks read." << std::endl;
+  ctx.cpu_work_cv.notify_all();
+  std::cerr << "[crossmul_daemon] Producer (Stage 1) finished - all "
+            << ctx.n_total << " tasks read." << std::endl;
 }
 
-// -----------------------------------------------------------------------
-// GPU consumer thread  (multi-lane, non-blocking polling)
-// -----------------------------------------------------------------------
+// =======================================================================
+// Stage 2: CPU Worker Thread Pool
+// =======================================================================
 
-/** Print a periodic progress line to stdout. */
-static void emit_progress(const DaemonContext &ctx) {
-  auto now = std::chrono::steady_clock::now();
-  double elapsed = std::chrono::duration<double>(now - ctx.t_start).count();
-  std::cout << "PROGRESS " << ctx.completed.load() << " " << ctx.failed.load()
-            << " " << ctx.n_total << " " << static_cast<long long>(elapsed)
-            << std::endl;
+/**
+ * Stage 2 — CPU crop worker.
+ *
+ * Continuously pops RawBuffer indices from the CPU work queue, acquires
+ * a free TaskSlot, calls ``crop_memory_buffer`` for both ref and sec
+ * images, releases the RawBuffer, and pushes the populated TaskSlot to
+ * the GPU-ready queue.
+ *
+ * Exits when the producer is done AND the CPU work queue is empty.
+ */
+static void cpu_worker_thread(DaemonContext &ctx, int worker_id) {
+  if (ctx.verbose) {
+    std::cerr << "[crossmul_daemon] CPU worker " << worker_id << " started."
+              << std::endl;
+  }
+
+  while (true) {
+    // -- Pop next RawBuffer from CPU work queue --
+    int raw_idx = -1;
+    {
+      std::unique_lock<std::mutex> lock(ctx.cpu_work_mutex);
+      ctx.cpu_work_cv.wait(lock, [&ctx] {
+        return !ctx.cpu_work_queue.empty() || ctx.producer_done.load();
+      });
+
+      if (!ctx.cpu_work_queue.empty()) {
+        raw_idx = ctx.cpu_work_queue.front();
+        ctx.cpu_work_queue.pop();
+      } else if (ctx.producer_done.load()) {
+        break; // no more work will arrive
+      }
+    }
+
+    if (raw_idx < 0)
+      continue;
+
+    RawBuffer &raw = ctx.raw_buffers[raw_idx];
+
+    // -- Acquire a free TaskSlot --
+    int slot_idx = acquire_task_slot(ctx);
+    TaskSlot &slot = ctx.task_slots[slot_idx];
+
+    // -- Copy task identity and metadata --
+    slot.task = raw.task;
+    slot.nrow = raw.nrow;
+    slot.ncol = raw.ncol;
+    slot.nrow_sm = raw.nrow_sm;
+    slot.ncol_sm = raw.ncol_sm;
+    std::memcpy(slot.ifg_header, raw.ifg_header,
+                NHEADER * sizeof(std::int32_t));
+
+    // -- Crop ref image: RawBuffer.ref_data → TaskSlot.ref_data --
+    crop_memory_buffer(raw.ref_data, slot.ref_data, raw.src_w_ref, raw.ncol,
+                       raw.copy_w, raw.copy_h_ref, raw.src_col0_ref,
+                       raw.dst_col0, raw.dst_row0_ref);
+
+    // -- Crop sec image: RawBuffer.sec_data → TaskSlot.sec_data --
+    crop_memory_buffer(raw.sec_data, slot.sec_data, raw.src_w_sec, raw.ncol,
+                       raw.copy_w, raw.copy_h_sec, raw.src_col0_sec,
+                       raw.dst_col0, raw.dst_row0_sec);
+
+    // -- Release RawBuffer back to free pool --
+    release_raw_buffer(ctx, raw_idx);
+
+    // -- Push populated TaskSlot to GPU-ready queue --
+    push_gpu_ready(ctx, slot_idx);
+
+    if (ctx.verbose) {
+      std::cerr << "[crossmul_daemon|cpu:" << worker_id << "] raw[" << raw_idx
+                << "] cropped -> task[" << slot_idx
+                << "]: " << slot.task.out_ifg << " (" << slot.nrow << "x"
+                << slot.ncol << ")" << std::endl;
+    }
+  }
+
+  // -- Last CPU worker to exit signals GPU consumers --
+  int remaining = --ctx.cpu_active;
+  if (remaining == 0) {
+    ctx.gpu_ready_cv.notify_all();
+  }
+
+  if (ctx.verbose) {
+    std::cerr << "[crossmul_daemon] CPU worker " << worker_id << " exiting."
+              << std::endl;
+  }
 }
+
+// =======================================================================
+// Stage 3: GPU Consumer Thread
+// =======================================================================
 
 /**
  * Launch the full H2D → kernels → D2H pipeline onto *lane* and
  * return immediately (no synchronisation).
  *
- * The caller must have already set ``lane->slot_idx``.
+ * D2H now targets ``slot.result_cpx`` / ``slot.result_float`` so that
+ * the lane does not own the staging buffer — the TaskSlot does.
  */
 static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
-                                  BufferSlot &slot, const Task &task) {
+                                  TaskSlot &slot) {
   int blockSize = 256;
   std::size_t elem_bytes = sizeof(Complex) * slot.nrow * slot.ncol;
 
-  // -- Async H2D --
+  // -- Async H2D from TaskSlot --
   CHECK_CUDA(cudaMemcpyAsync(lane.d_slc1, slot.ref_data, elem_bytes,
                              cudaMemcpyHostToDevice, lane.stream));
   CHECK_CUDA(cudaMemcpyAsync(lane.d_slc2, slot.sec_data, elem_bytes,
@@ -440,12 +814,12 @@ static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
   conj_mul<<<numBlocks, blockSize, 0, lane.stream>>>(
       lane.d_slc1, lane.d_slc2, lane.d_ifg, slot.nrow * slot.ncol);
 
-  // Track which pointer holds the current pipeline stage output
+  // Track which device pointer holds the current pipeline stage output
   Complex *current = lane.d_ifg;
 
   // -- Column multi-look --
-  numBlocks = (slot.nrow * slot.ncol_sm + blockSize - 1) / blockSize;
   if (ctx.collook > 1) {
+    numBlocks = (slot.nrow * slot.ncol_sm + blockSize - 1) / blockSize;
     cpx_col_look<<<numBlocks, blockSize, 0, lane.stream>>>(
         lane.d_ifg, lane.d_ifg_collook, ctx.collook, slot.ncol,
         slot.nrow * slot.ncol_sm);
@@ -453,8 +827,8 @@ static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
   }
 
   // -- Row multi-look --
-  numBlocks = (slot.nrow_sm * slot.ncol_sm + blockSize - 1) / blockSize;
   if (ctx.rowlook > 1) {
+    numBlocks = (slot.nrow_sm * slot.ncol_sm + blockSize - 1) / blockSize;
     cpx_row_look<<<numBlocks, blockSize, 0, lane.stream>>>(
         current, lane.d_ifglook, ctx.rowlook, slot.ncol_sm,
         slot.nrow_sm * slot.ncol_sm);
@@ -463,30 +837,35 @@ static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
 
   // -- Phase extraction (float path) --
   if (ctx.out_float) {
+    numBlocks = (slot.nrow_sm * slot.ncol_sm + blockSize - 1) / blockSize;
     point_angle<<<numBlocks, blockSize, 0, lane.stream>>>(
         current, lane.d_phase, slot.nrow_sm * slot.ncol_sm);
   }
 
-  // -- Async D2H into the lane's private staging buffer --
+  // -- Async D2H into TaskSlot's staging buffer (not the lane's) --
   if (ctx.out_float) {
-    CHECK_CUDA(cudaMemcpyAsync(lane.staging_float, lane.d_phase,
+    CHECK_CUDA(cudaMemcpyAsync(slot.result_float, lane.d_phase,
                                sizeof(float) * slot.nrow_sm * slot.ncol_sm,
                                cudaMemcpyDeviceToHost, lane.stream));
   } else {
-    CHECK_CUDA(cudaMemcpyAsync(lane.staging_cpx, current,
+    CHECK_CUDA(cudaMemcpyAsync(slot.result_cpx, current,
                                sizeof(Complex) * slot.nrow_sm * slot.ncol_sm,
                                cudaMemcpyDeviceToHost, lane.stream));
   }
 }
 
 /**
- * GPU consumer: manages an array of internal :struct:`GpuTaskSlot`
- * lanes.  Each lane can execute one burst pair at a time.
+ * Stage 3 — GPU consumer.
  *
- * The loop polls all lanes non-blockingly via ``cudaStreamQuery``.
- * When a BUSY lane finishes, the result is saved and the lane
- * becomes IDLE.  IDLE lanes attempt to pull a new task from the
- * global ready queue and launch async work.
+ * Manages an array of internal :struct:`GpuTaskSlot` lanes.  Each lane
+ * can execute one burst pair at a time.  Uses non-blocking
+ * ``cudaStreamQuery`` polling to overlap multiple burst pairs on the
+ * same GPU.
+ *
+ * When a BUSY lane completes, the result is wrapped into a
+ * :struct:`DiskWriteItem` and pushed to the disk-write queue —
+ * **no synchronous disk I/O is performed here**.  The lane is
+ * immediately reset to IDLE.
  */
 static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
   GpuContext &g = ctx.gpus[gpu_idx];
@@ -505,43 +884,37 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
 
       cudaError_t err = cudaStreamQuery(lane.stream);
       if (err == cudaSuccess) {
-        // -- Lane finished; write result to disk --
-        BufferSlot &slot = ctx.slots[lane.slot_idx];
-        const Task &task = slot.task;
+        // -- Lane finished: wrap result and push to disk-write queue --
+        TaskSlot &slot = ctx.task_slots[lane.slot_idx];
 
-        try {
-          if (ctx.out_float) {
-            save_binary<float>(lane.staging_float, slot.nrow_sm * slot.ncol_sm,
-                               slot.ifg_header, NHEADER, task.out_ifg);
-          } else {
-            save_binary<Complex>(lane.staging_cpx, slot.nrow_sm * slot.ncol_sm,
-                                 slot.ifg_header, NHEADER, task.out_ifg);
-          }
-          std::cout << "OK " << task.out_ifg << std::endl;
-          ctx.completed.fetch_add(1);
-        } catch (const std::exception &e) {
-          std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                    << " - write error: " << e.what() << std::endl;
-          ctx.failed.fetch_add(1);
-          ctx.completed.fetch_add(1);
+        DiskWriteItem item;
+        item.slot_idx = lane.slot_idx;
+        item.n_elements = slot.nrow_sm * slot.ncol_sm;
+        std::memcpy(item.header, slot.ifg_header,
+                    NHEADER * sizeof(std::int32_t));
+        item.out_ifg = slot.task.out_ifg;
+        item.is_float = ctx.out_float;
+        if (ctx.out_float) {
+          item.data = static_cast<void *>(slot.result_float);
+        } else {
+          item.data = static_cast<void *>(slot.result_cpx);
         }
 
-        // Return the host buffer slot to the free pool
-        release_slot(ctx, lane.slot_idx);
+        push_disk_write(ctx, std::move(item));
 
-        // Mark lane idle
+        // Reset lane to IDLE immediately (do NOT wait for disk I/O)
         lane.state = 0;
         lane.slot_idx = -1;
         made_progress = true;
       } else if (err != cudaErrorNotReady) {
         // Real CUDA error on the stream
-        std::cerr << "[crossmul_daemon] FAIL "
-                  << ctx.slots[lane.slot_idx].task.out_ifg
+        TaskSlot &slot = ctx.task_slots[lane.slot_idx];
+        std::cerr << "[crossmul_daemon] FAIL " << slot.task.out_ifg
                   << " - CUDA stream error: " << cudaGetErrorString(err)
                   << std::endl;
         ctx.failed.fetch_add(1);
         ctx.completed.fetch_add(1);
-        release_slot(ctx, lane.slot_idx);
+        release_task_slot(ctx, lane.slot_idx);
         lane.state = 0;
         lane.slot_idx = -1;
         made_progress = true;
@@ -554,24 +927,23 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
       if (lane.state != 0)
         continue; // not IDLE
 
-      int slot_idx = try_acquire_ready_slot(ctx);
+      int slot_idx = try_acquire_gpu_ready(ctx);
       if (slot_idx < 0)
         break; // nothing ready yet
 
-      BufferSlot &slot = ctx.slots[slot_idx];
-      const Task &task = slot.task;
+      TaskSlot &slot = ctx.task_slots[slot_idx];
       lane.slot_idx = slot_idx;
 
       try {
-        launch_async_pipeline(ctx, lane, slot, task);
+        launch_async_pipeline(ctx, lane, slot);
         lane.state = 1; // BUSY
         made_progress = true;
       } catch (const std::exception &e) {
-        std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
+        std::cerr << "[crossmul_daemon] FAIL " << slot.task.out_ifg
                   << " - launch error: " << e.what() << std::endl;
         ctx.failed.fetch_add(1);
         ctx.completed.fetch_add(1);
-        release_slot(ctx, slot_idx);
+        release_task_slot(ctx, slot_idx);
         lane.slot_idx = -1;
         lane.state = 0;
         made_progress = true;
@@ -579,8 +951,9 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
     }
 
     // -- Termination check --
-    if (ctx.producer_done.load()) {
-      // Are all lanes idle AND the ready queue empty?
+    bool cpu_done = (ctx.cpu_active.load() == 0);
+    if (cpu_done) {
+      // Are all lanes idle AND the GPU-ready queue empty?
       bool all_idle = true;
       for (int li = 0; li < n_lanes; ++li) {
         if (g.lanes[li].state != 0) {
@@ -591,8 +964,8 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
 
       bool queue_empty = false;
       {
-        std::lock_guard<std::mutex> lk(ctx.ready_mutex);
-        queue_empty = ctx.ready_queue.empty();
+        std::lock_guard<std::mutex> lk(ctx.gpu_ready_mutex);
+        queue_empty = ctx.gpu_ready_queue.empty();
       }
 
       if (all_idle && queue_empty)
@@ -603,21 +976,100 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
     if (!made_progress) {
       std::this_thread::sleep_for(std::chrono::milliseconds(1));
     } else {
-      // Yield to let other threads run
       std::this_thread::yield();
     }
   }
 
-  // Emit final progress
+  // -- Last GPU consumer to exit signals the disk writer --
+  int remaining = --ctx.gpu_active;
+  if (remaining == 0) {
+    ctx.disk_write_cv.notify_all();
+  }
+
   emit_progress(ctx);
 
-  std::cerr << "[crossmul_daemon] GPU " << g.gpu_id << " consumer exiting."
-            << std::endl;
+  std::cerr << "[crossmul_daemon] GPU " << g.gpu_id << " consumer (Stage 3)"
+            << " exiting." << std::endl;
 }
 
-// -----------------------------------------------------------------------
+// =======================================================================
+// Stage 4: Dedicated Async Disk Writer
+// =======================================================================
+
+/**
+ * Stage 4 — Single-threaded async disk writer.
+ *
+ * Sequentially pops :struct:`DiskWriteItem` entries from the disk-write
+ * queue and calls ``save_binary`` to stream interferogram outputs to
+ * disk.  Only after the write completes does it release the underlying
+ * TaskSlot back to the free pool.
+ *
+ * Exits when all GPU consumers have terminated AND the disk-write queue
+ * is empty.
+ */
+static void disk_writer_thread(DaemonContext &ctx) {
+  if (ctx.verbose) {
+    std::cerr << "[crossmul_daemon] Disk writer (Stage 4) started."
+              << std::endl;
+  }
+
+  while (true) {
+    DiskWriteItem item;
+    bool has_item = false;
+    {
+      std::unique_lock<std::mutex> lock(ctx.disk_write_mutex);
+      ctx.disk_write_cv.wait(lock, [&ctx] {
+        return !ctx.disk_write_queue.empty() || ctx.gpu_active.load() == 0;
+      });
+
+      if (!ctx.disk_write_queue.empty()) {
+        item = std::move(ctx.disk_write_queue.front());
+        ctx.disk_write_queue.pop();
+        has_item = true;
+      } else if (ctx.gpu_active.load() == 0) {
+        // All GPU consumers done and queue is empty — we're finished.
+        break;
+      }
+    }
+
+    if (!has_item)
+      continue;
+
+    // -- Write to disk --
+    try {
+      if (item.is_float) {
+        save_binary<float>(static_cast<float *>(item.data), item.n_elements,
+                           item.header, NHEADER, item.out_ifg);
+      } else {
+        save_binary<Complex>(static_cast<Complex *>(item.data), item.n_elements,
+                             item.header, NHEADER, item.out_ifg);
+      }
+      std::cout << "OK " << item.out_ifg << std::endl;
+      ctx.completed.fetch_add(1);
+    } catch (const std::exception &e) {
+      std::cerr << "[crossmul_daemon] FAIL " << item.out_ifg
+                << " - write error: " << e.what() << std::endl;
+      ctx.failed.fetch_add(1);
+      ctx.completed.fetch_add(1);
+    }
+
+    // -- Release TaskSlot back to free pool --
+    release_task_slot(ctx, item.slot_idx);
+
+    if (ctx.verbose) {
+      std::cerr << "[crossmul_daemon|disk] wrote task[" << item.slot_idx
+                << "]: " << item.out_ifg << std::endl;
+    }
+  }
+
+  emit_progress(ctx);
+
+  std::cerr << "[crossmul_daemon] Disk writer (Stage 4) exiting." << std::endl;
+}
+
+// =======================================================================
 // Initialisation helpers
-// -----------------------------------------------------------------------
+// =======================================================================
 
 /** Parse simple ``--key value`` arguments. */
 static std::string get_arg(int argc, char *argv[], const std::string &key,
@@ -638,12 +1090,16 @@ static bool has_flag(int argc, char *argv[], const std::string &flag) {
 }
 
 /**
- * Scan all SLC headers across every task to determine the maximum
- * overlap dimensions.  This mirrors the first pass in the legacy
- * ``crossmul()`` batch function.
+ * Scan all SLC headers across every task to determine:
+ * - Maximum overlap dimensions (for TaskSlot sizing).
+ * - Maximum raw read element count (for RawBuffer sizing).
+ *
+ * This mirrors the header-scan pass in the legacy ``crossmul()`` batch
+ * function but additionally computes ``max_raw_elements``.
  */
 static void scan_max_dimensions(DaemonContext &ctx) {
   int max_nrow = 0, max_ncol = 0;
+  std::size_t max_raw_elements = 0;
 
   for (const auto &task : ctx.tasks) {
     std::int32_t header1[NHEADER], header2[NHEADER];
@@ -656,16 +1112,48 @@ static void scan_max_dimensions(DaemonContext &ctx) {
     int left2 = header2[2], top2 = header2[3];
     int right2 = header2[4], bottom2 = header2[5];
 
+    // Track maximum source dimensions
     max_nrow = std::max(bottom1 - top1, max_nrow);
     max_ncol = std::max(right1 - left1, max_ncol);
+    max_nrow = std::max(bottom2 - top2, max_nrow);
+    max_ncol = std::max(right2 - left2, max_ncol);
 
+    // Compute output overlap region (aligned)
     int left = (left1 < left2 ? left1 : left2);
+    left = (left + ctx.collook - 1) / ctx.collook * ctx.collook;
     int right = (right1 > right2 ? right1 : right2);
+    right = right / ctx.collook * ctx.collook;
     int top = (top1 < top2 ? top1 : top2);
+    top = (top + ctx.rowlook - 1) / ctx.rowlook * ctx.rowlook;
     int bottom = (bottom1 > bottom2 ? bottom1 : bottom2);
+    bottom = bottom / ctx.rowlook * ctx.rowlook;
 
     max_nrow = std::max(bottom - top, max_nrow);
     max_ncol = std::max(right - left, max_ncol);
+
+    // --- Compute raw read size for ref image ---
+    {
+      int src_w1 = right1 - left1;
+      int overlap_top1 = std::max(top, top1);
+      int overlap_bottom1 = std::min(top + (bottom1 - top1), bottom1);
+      int copy_h1 = overlap_bottom1 - overlap_top1;
+      if (copy_h1 > 0) {
+        max_raw_elements = std::max(max_raw_elements,
+                                    static_cast<std::size_t>(src_w1) * copy_h1);
+      }
+    }
+
+    // --- Compute raw read size for sec image ---
+    {
+      int src_w2 = right2 - left2;
+      int overlap_top2 = std::max(top, top2);
+      int overlap_bottom2 = std::min(top + (bottom2 - top2), bottom2);
+      int copy_h2 = overlap_bottom2 - overlap_top2;
+      if (copy_h2 > 0) {
+        max_raw_elements = std::max(max_raw_elements,
+                                    static_cast<std::size_t>(src_w2) * copy_h2);
+      }
+    }
   }
 
   ctx.max_nrow = max_nrow;
@@ -675,45 +1163,79 @@ static void scan_max_dimensions(DaemonContext &ctx) {
   ctx.max_elements = static_cast<std::size_t>(max_nrow) * max_ncol;
   ctx.max_elements_sm =
       static_cast<std::size_t>(ctx.max_nrow_sm) * ctx.max_ncol_sm;
+  ctx.max_raw_elements = max_raw_elements;
 
   std::cerr << "[crossmul_daemon] Max overlap dimensions: " << max_nrow << " x "
             << max_ncol << "  (looked: " << ctx.max_nrow_sm << " x "
             << ctx.max_ncol_sm << ")" << std::endl;
-  std::cerr << "[crossmul_daemon] Buffer size per slot: "
+  std::cerr << "[crossmul_daemon] TaskSlot size per slot: "
             << (ctx.max_elements * sizeof(Complex) * 2 / (1024 * 1024))
             << " MB (ref+sec)" << std::endl;
+  std::cerr << "[crossmul_daemon] Max raw read: " << max_raw_elements
+            << " elements ("
+            << (max_raw_elements * sizeof(Complex) / (1024 * 1024))
+            << " MB per image)" << std::endl;
 }
 
-/** Allocate the pinned host buffer pool. */
-static void allocate_buffer_pool(DaemonContext &ctx) {
-  ctx.slots = std::vector<BufferSlot>(ctx.max_slots);
-  for (int i = 0; i < ctx.max_slots; ++i) {
-    BufferSlot &s = ctx.slots[i];
-    s.id = i;
-    CHECK_CUDA(cudaMallocHost((void **)&s.ref_data,
+// -----------------------------------------------------------------------
+// Memory allocation (all pinned host, one-time at startup)
+// -----------------------------------------------------------------------
+
+/** Allocate the RawBuffer pool (Stage 1 uncropped I/O buffers). */
+static void allocate_raw_buffers(DaemonContext &ctx) {
+  ctx.raw_buffers = std::vector<RawBuffer>(ctx.raw_slots);
+  for (int i = 0; i < ctx.raw_slots; ++i) {
+    RawBuffer &rb = ctx.raw_buffers[i];
+    rb.id = i;
+    CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&rb.ref_data),
+                              sizeof(Complex) * ctx.max_raw_elements));
+    CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&rb.sec_data),
+                              sizeof(Complex) * ctx.max_raw_elements));
+    ctx.raw_free_queue.push(i);
+  }
+  std::cerr << "[crossmul_daemon] Allocated " << ctx.raw_slots
+            << " RawBuffers ("
+            << (ctx.max_raw_elements * sizeof(Complex) * 2 / (1024 * 1024))
+            << " MB each)." << std::endl;
+}
+
+/** Allocate the TaskSlot pool (Stage 2+ cropped buffers + result staging). */
+static void allocate_task_slots(DaemonContext &ctx) {
+  ctx.task_slots = std::vector<TaskSlot>(ctx.task_slots_count);
+  for (int i = 0; i < ctx.task_slots_count; ++i) {
+    TaskSlot &ts = ctx.task_slots[i];
+    ts.id = i;
+    CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.ref_data),
                               sizeof(Complex) * ctx.max_elements));
-    CHECK_CUDA(cudaMallocHost((void **)&s.sec_data,
+    CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.sec_data),
                               sizeof(Complex) * ctx.max_elements));
     if (ctx.out_float) {
-      s.result_float = nullptr;
-      s.result_buf = nullptr;
+      CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.result_float),
+                                sizeof(float) * ctx.max_elements_sm));
+      ts.result_cpx = nullptr;
     } else {
-      CHECK_CUDA(cudaMallocHost((void **)&s.result_buf,
+      CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.result_cpx),
                                 sizeof(Complex) * ctx.max_elements_sm));
-      s.result_float = nullptr;
+      ts.result_float = nullptr;
     }
-    ctx.free_queue.push(i);
+    ctx.task_free_queue.push(i);
   }
-  std::cerr << "[crossmul_daemon] Allocated " << ctx.max_slots
-            << " pinned buffer slots." << std::endl;
+  std::cerr << "[crossmul_daemon] Allocated " << ctx.task_slots_count
+            << " TaskSlots ("
+            << (ctx.max_elements * sizeof(Complex) * 2 / (1024 * 1024))
+            << " MB data + "
+            << (ctx.max_elements_sm *
+                (ctx.out_float ? sizeof(float) : sizeof(Complex)) /
+                (1024 * 1024))
+            << " MB staging each)." << std::endl;
 }
 
 /**
  * Allocate per-GPU execution lanes.
  *
- * Each lane gets its own CUDA stream, full set of device buffers,
- * and pinned host staging buffers — all sized to the maximum
- * dimensions determined by the scan pass.
+ * Each lane gets its own CUDA stream and full set of device buffers.
+ * Staging buffers are NO LONGER allocated per-lane — they live in
+ * :struct:`TaskSlot` so that D2H targets survive lane reuse.
  */
 static void allocate_gpu_contexts(DaemonContext &ctx) {
   ctx.gpus.resize(ctx.ngpus);
@@ -742,39 +1264,34 @@ static void allocate_gpu_contexts(DaemonContext &ctx) {
       cudaStreamCreate(&lane.stream);
 
       // Device buffers
-      CHECK_CUDA(cudaMalloc((void **)&lane.d_slc1,
+      CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_slc1),
                             sizeof(Complex) * ctx.max_elements));
-      CHECK_CUDA(cudaMalloc((void **)&lane.d_slc2,
+      CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_slc2),
                             sizeof(Complex) * ctx.max_elements));
-      CHECK_CUDA(
-          cudaMalloc((void **)&lane.d_ifg, sizeof(Complex) * ctx.max_elements));
+      CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_ifg),
+                            sizeof(Complex) * ctx.max_elements));
       if (ctx.collook > 1) {
         CHECK_CUDA(
-            cudaMalloc((void **)&lane.d_ifg_collook,
+            cudaMalloc(reinterpret_cast<void **>(&lane.d_ifg_collook),
                        sizeof(Complex) * ctx.max_nrow * ctx.max_ncol_sm));
       } else {
         lane.d_ifg_collook = nullptr;
       }
       if (ctx.rowlook > 1) {
         CHECK_CUDA(
-            cudaMalloc((void **)&lane.d_ifglook,
+            cudaMalloc(reinterpret_cast<void **>(&lane.d_ifglook),
                        sizeof(Complex) * ctx.max_nrow_sm * ctx.max_ncol_sm));
       } else {
         lane.d_ifglook = nullptr;
       }
 
-      // Staging buffers (pinned host memory, per-lane for isolation)
+      // Staging buffers are now in TaskSlot — lane only needs device-side
+      // phase buffer for the float output path
       if (ctx.out_float) {
-        CHECK_CUDA(cudaMalloc((void **)&lane.d_phase,
+        CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_phase),
                               sizeof(float) * ctx.max_elements_sm));
-        CHECK_CUDA(cudaMallocHost((void **)&lane.staging_float,
-                                  sizeof(float) * ctx.max_elements_sm));
-        lane.staging_cpx = nullptr;
       } else {
         lane.d_phase = nullptr;
-        CHECK_CUDA(cudaMallocHost((void **)&lane.staging_cpx,
-                                  sizeof(Complex) * ctx.max_elements_sm));
-        lane.staging_float = nullptr;
       }
     }
 
@@ -787,19 +1304,34 @@ static void allocate_gpu_contexts(DaemonContext &ctx) {
   }
 }
 
-/** Free the buffer pool. */
-static void free_buffer_pool(DaemonContext &ctx) {
-  for (auto &s : ctx.slots) {
-    if (s.ref_data)
-      cudaFreeHost(s.ref_data);
-    if (s.sec_data)
-      cudaFreeHost(s.sec_data);
-    if (s.result_buf)
-      cudaFreeHost(s.result_buf);
-    if (s.result_float)
-      cudaFreeHost(s.result_float);
+// -----------------------------------------------------------------------
+// Cleanup
+// -----------------------------------------------------------------------
+
+/** Free the RawBuffer pool. */
+static void free_raw_buffers(DaemonContext &ctx) {
+  for (auto &rb : ctx.raw_buffers) {
+    if (rb.ref_data)
+      cudaFreeHost(rb.ref_data);
+    if (rb.sec_data)
+      cudaFreeHost(rb.sec_data);
   }
-  ctx.slots.clear();
+  ctx.raw_buffers.clear();
+}
+
+/** Free the TaskSlot pool. */
+static void free_task_slots(DaemonContext &ctx) {
+  for (auto &ts : ctx.task_slots) {
+    if (ts.ref_data)
+      cudaFreeHost(ts.ref_data);
+    if (ts.sec_data)
+      cudaFreeHost(ts.sec_data);
+    if (ts.result_cpx)
+      cudaFreeHost(ts.result_cpx);
+    if (ts.result_float)
+      cudaFreeHost(ts.result_float);
+  }
+  ctx.task_slots.clear();
 }
 
 /** Free per-GPU resources. */
@@ -819,10 +1351,6 @@ static void free_gpu_contexts(DaemonContext &ctx) {
         cudaFree(lane.d_ifglook);
       if (lane.d_phase)
         cudaFree(lane.d_phase);
-      if (lane.staging_cpx)
-        cudaFreeHost(lane.staging_cpx);
-      if (lane.staging_float)
-        cudaFreeHost(lane.staging_float);
       cudaStreamDestroy(lane.stream);
     }
     g.lanes.clear();
@@ -857,9 +1385,9 @@ static std::vector<Task> read_tasks_from_file(const std::string &path) {
   return tasks;
 }
 
-// -----------------------------------------------------------------------
+// =======================================================================
 // main
-// -----------------------------------------------------------------------
+// =======================================================================
 
 int main(int argc, char *argv[]) {
   // -- Parse arguments --
@@ -867,9 +1395,11 @@ int main(int argc, char *argv[]) {
 
   ctx.rowlook = std::stoi(get_arg(argc, argv, "--rowlook", "1"));
   ctx.collook = std::stoi(get_arg(argc, argv, "--collook", "1"));
-  ctx.max_slots = std::stoi(get_arg(argc, argv, "--max-slots", "8"));
+  ctx.raw_slots = std::stoi(get_arg(argc, argv, "--max-slots", "8"));
+  ctx.task_slots_count = ctx.raw_slots; // same count for both pools
   ctx.streams_per_gpu =
       std::stoi(get_arg(argc, argv, "--streams-per-gpu", "4"));
+  ctx.cpu_workers = std::stoi(get_arg(argc, argv, "--cpu-workers", "4"));
   ctx.out_float = has_flag(argc, argv, "--out-float");
   ctx.verbose = has_flag(argc, argv, "--verbose");
 
@@ -890,12 +1420,16 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  if (ctx.max_slots < ctx.ngpus) {
-    std::cerr << "[crossmul_daemon] WARNING: max_slots (" << ctx.max_slots
+  if (ctx.raw_slots < ctx.ngpus) {
+    std::cerr << "[crossmul_daemon] WARNING: max_slots (" << ctx.raw_slots
               << ") < ngpus (" << ctx.ngpus
               << "); increasing max_slots to ngpus." << std::endl;
-    ctx.max_slots = ctx.ngpus;
+    ctx.raw_slots = ctx.ngpus;
+    ctx.task_slots_count = ctx.raw_slots;
   }
+
+  if (ctx.cpu_workers < 1)
+    ctx.cpu_workers = 1;
 
   // -- Read task list from file --
   std::string tasks_file = get_arg(argc, argv, "--tasks-file", "");
@@ -906,14 +1440,15 @@ int main(int argc, char *argv[]) {
   }
 
   std::cerr << "[crossmul_daemon] Configuration:" << std::endl;
-  std::cerr << "  rowlook        = " << ctx.rowlook << std::endl;
-  std::cerr << "  collook        = " << ctx.collook << std::endl;
-  std::cerr << "  out_float      = " << (ctx.out_float ? "yes" : "no")
+  std::cerr << "  rowlook         = " << ctx.rowlook << std::endl;
+  std::cerr << "  collook         = " << ctx.collook << std::endl;
+  std::cerr << "  out_float       = " << (ctx.out_float ? "yes" : "no")
             << std::endl;
-  std::cerr << "  max_slots      = " << ctx.max_slots << std::endl;
-  std::cerr << "  streams_per_gpu= " << ctx.streams_per_gpu << std::endl;
-  std::cerr << "  ngpus          = " << ctx.ngpus << std::endl;
-  std::cerr << "  tasks_file     = " << tasks_file << std::endl;
+  std::cerr << "  max_slots       = " << ctx.raw_slots << std::endl;
+  std::cerr << "  streams_per_gpu = " << ctx.streams_per_gpu << std::endl;
+  std::cerr << "  cpu_workers     = " << ctx.cpu_workers << std::endl;
+  std::cerr << "  ngpus           = " << ctx.ngpus << std::endl;
+  std::cerr << "  tasks_file      = " << tasks_file << std::endl;
 
   ctx.tasks = read_tasks_from_file(tasks_file);
   ctx.n_total = static_cast<int>(ctx.tasks.size());
@@ -932,28 +1467,55 @@ int main(int argc, char *argv[]) {
     scan_max_dimensions(ctx);
   }
 
+  // Guard against zero raw elements (should not happen with valid data)
+  if (ctx.max_raw_elements == 0) {
+    std::cerr << "[crossmul_daemon] ERROR: max_raw_elements is 0 — "
+              << "no valid overlap regions found.  Exiting." << std::endl;
+    return 1;
+  }
+
   // -- Allocate resources --
   {
     ScopedTimer t("Allocate buffers");
-    allocate_buffer_pool(ctx);
+    allocate_raw_buffers(ctx);
+    allocate_task_slots(ctx);
     allocate_gpu_contexts(ctx);
   }
 
-  // -- Launch producer + GPU consumer threads --
+  // -- Initialise active worker counts for termination signalling --
+  ctx.cpu_active.store(ctx.cpu_workers);
+  ctx.gpu_active.store(ctx.ngpus);
+
+  // -- Launch threads --
   ctx.t_start = std::chrono::steady_clock::now();
 
+  // Stage 1: single I/O producer
   std::thread producer(producer_thread, std::ref(ctx));
 
-  std::vector<std::thread> consumers;
-  consumers.reserve(ctx.ngpus);
-  for (int i = 0; i < ctx.ngpus; ++i) {
-    consumers.emplace_back(gpu_consumer_thread, std::ref(ctx), i);
+  // Stage 2: CPU worker thread pool
+  std::vector<std::thread> cpu_workers;
+  cpu_workers.reserve(ctx.cpu_workers);
+  for (int i = 0; i < ctx.cpu_workers; ++i) {
+    cpu_workers.emplace_back(cpu_worker_thread, std::ref(ctx), i);
   }
 
-  // -- Wait for completion --
+  // Stage 3: one GPU consumer per device
+  std::vector<std::thread> gpu_consumers;
+  gpu_consumers.reserve(ctx.ngpus);
+  for (int i = 0; i < ctx.ngpus; ++i) {
+    gpu_consumers.emplace_back(gpu_consumer_thread, std::ref(ctx), i);
+  }
+
+  // Stage 4: single async disk writer
+  std::thread disk_writer(disk_writer_thread, std::ref(ctx));
+
+  // -- Wait for completion (in pipeline order: producer → CPU → GPU → disk) --
   producer.join();
-  for (auto &t : consumers)
+  for (auto &t : cpu_workers)
     t.join();
+  for (auto &t : gpu_consumers)
+    t.join();
+  disk_writer.join();
 
   // -- Summary --
   double elapsed = std::chrono::duration<double>(
@@ -970,7 +1532,8 @@ int main(int argc, char *argv[]) {
 
   // -- Cleanup --
   free_gpu_contexts(ctx);
-  free_buffer_pool(ctx);
+  free_task_slots(ctx);
+  free_raw_buffers(ctx);
 
   return (ctx.failed.load() > 0) ? 1 : 0;
 }
