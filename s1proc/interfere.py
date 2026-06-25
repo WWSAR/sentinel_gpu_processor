@@ -42,7 +42,6 @@ def match_bursts(
         idx_diff = np.abs(sec_tops - ref_top) + np.abs(sec_bottoms - ref_bottom)
         best_match = np.argmin(idx_diff)
         burst_pairs.append((ref_burst.data, sec_subswath.bursts[best_match].data))
-        logger.debug(burst_pairs[-1])
     return burst_pairs
 
 
@@ -345,6 +344,7 @@ def _run_crossmul_daemon(
     gpu_workers: int,
     streams_per_gpu: int,
     max_slots: int,
+    verbose: bool,
 ) -> Tuple[int, int]:
     """
     Launch the ``crossmul_daemon`` long-running GPU processor.
@@ -377,6 +377,8 @@ def _run_crossmul_daemon(
     streams_per_gpu : int
         Number of internal CUDA execution lanes per GPU.
         Pass ``-1`` for auto-tune.
+    verbose: bool
+        Print more debug messages
 
     Returns
     -------
@@ -434,6 +436,8 @@ def _run_crossmul_daemon(
     ]
     if out_float:
         cmd.append("--out-float")
+    if verbose:
+        cmd.append("--verbose")
 
     logger.info("Starting crossmul_daemon: %s", " ".join(cmd))
     logger.info(
@@ -543,6 +547,7 @@ def interfere(
     gpu_workers: int = -1,
     streams_per_gpu: int = -1,
     max_slots: int = -1,
+    verbose: bool = False,
 ):
     """
     Form interferograms from a subswath list.
@@ -583,6 +588,8 @@ def interfere(
         Number of pre-allocated pinned-memory buffer slots in the
         daemon.  Set to ``-1`` (default) for automatic tuning from
         GPU count and streams-per-GPU.
+    verbose: bool
+        Print more debug information
     """
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
@@ -685,6 +692,7 @@ def interfere(
         gpu_workers=gpu_workers,
         streams_per_gpu=streams_per_gpu,
         max_slots=max_slots,
+        verbose=verbose,
     )
 
     if failed > 0:
@@ -736,5 +744,6 @@ def run_interfere(
             pcfg.streams_per_gpu if pcfg.streams_per_gpu is not None else -1
         ),
         max_slots=pcfg.max_slots if pcfg.max_slots is not None else -1,
+        verbose=verbose,
     )
     return

@@ -567,7 +567,10 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
       break;
     }
     const Task &task = ctx.tasks[task_idx];
-
+    Task *next_task = nullptr;
+    if (task_idx < ctx.n_total - 1) {
+      next_task = &ctx.tasks[task_idx + 1];
+    }
     // -- Acquire a free RawBuffer --
     int raw_idx = acquire_raw_buffer(ctx);
     RawBuffer &raw = ctx.raw_buffers[raw_idx];
@@ -660,7 +663,7 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     raw.ifg_header[5] = bottom / ctx.rowlook;
 
     // -- Read SLC blocks into RawBuffer (first try cache) --
-    bool ref_cache_hit, sec_cache_hit;
+    bool ref_cache_hit = false, sec_cache_hit = false;
     try {
       // --- Reference image: thread-safe cache interception ---
       {
@@ -668,24 +671,47 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
         ref_cache_hit = (ctx.cached_path == task.ref_slc);
         sec_cache_hit = (ctx.cached_path == task.sec_slc);
 
-        if (!ref_cache_hit & !sec_cache_hit) {
+        if (!ref_cache_hit && !sec_cache_hit) {
           // Case 1: neither reference or secondary image hits the cache
-          // Cache miss: read the full reference image into global buffer
-          int src_w = right1 - left1;
-          int src_h = bottom1 - top1;
-          read_file_rows(task.ref_slc,
-                         reinterpret_cast<char *>(ctx.global_buffer),
-                         static_cast<std::size_t>(src_w),
-                         0, // start from row 0 of the source image
-                         static_cast<std::size_t>(src_h), sizeof(Complex));
-          ctx.cached_path = task.ref_slc;
-          // now set ref_cache_hit to true because we just loaded the reference
-          // image to cache
-          ref_cache_hit = true;
-          if (ctx.verbose) {
-            std::cerr << "[I/O Cache] Image loaded: " << task.ref_slc << " ("
-                      << (right1 - left1) << " x " << (bottom1 - top1) << ")"
-                      << std::endl;
+          if (next_task != nullptr && (task.sec_slc == next_task->sec_slc ||
+                                       task.sec_slc == next_task->ref_slc)) {
+            // Case 1.1: sec_slc is the current seed
+            int src_w = right2 - left2;
+            int src_h = bottom2 - top2;
+            read_file_rows(task.sec_slc,
+                           reinterpret_cast<char *>(ctx.global_buffer),
+                           static_cast<std::size_t>(src_w),
+                           0, // start from row 0 of the source image
+                           static_cast<std::size_t>(src_h), sizeof(Complex));
+            ctx.cached_path = task.sec_slc;
+            // now set sec_cache_hit to true because we just loaded the
+            // reference image to cache
+            sec_cache_hit = true;
+            if (ctx.verbose) {
+              std::cerr << "[I/O Cache] Image loaded: " << task.sec_slc << " ("
+                        << (right1 - left1) << " x " << (bottom1 - top1) << ")"
+                        << std::endl;
+            }
+          } else {
+            // Case 1.2: ref_slc is the current seed
+            // Case 1.3: next task is also a cold start
+            // Case 1.4: we are processing the last task
+            int src_w = right1 - left1;
+            int src_h = bottom1 - top1;
+            read_file_rows(task.ref_slc,
+                           reinterpret_cast<char *>(ctx.global_buffer),
+                           static_cast<std::size_t>(src_w),
+                           0, // start from row 0 of the source image
+                           static_cast<std::size_t>(src_h), sizeof(Complex));
+            ctx.cached_path = task.ref_slc;
+            // now set ref_cache_hit to true because we just loaded the
+            // reference image to cache
+            ref_cache_hit = true;
+            if (ctx.verbose) {
+              std::cerr << "[I/O Cache] Image loaded: " << task.ref_slc << " ("
+                        << (right1 - left1) << " x " << (bottom1 - top1) << ")"
+                        << std::endl;
+            }
           }
         } else if (ctx.verbose) {
           std::cerr << "[I/O Cache] Cache Hit for task " << task.out_ifg
@@ -693,12 +719,9 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
         }
 
         if (ref_cache_hit) {
-          // Case 1: neither reference nor secondary image hits the cache, we
-          // just reset the globl cached image, OR Case 2: reference image hits
-          // the cache Copy the overlap subset from global_buffer into
-          // raw.ref_data. The global buffer holds the full reference image
-          // row-major. We extract rows (top - top1) through (top - top1) +
-          // (bottom - top).
+          // Case 1.2-1.4: neither reference nor secondary image hits the cache,
+          // we just reset the globl cached image, and we just cached the
+          // reference image, OR Case 2: reference image hits the cache.
           int src_w = right1 - left1;
           std::size_t row_offset = static_cast<std::size_t>(top - top1) * src_w;
           std::size_t copy_elems =
@@ -706,19 +729,11 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
           std::memcpy(raw.ref_data, ctx.global_buffer + row_offset,
                       copy_elems * sizeof(Complex));
         }
-      }
-      // --- Lock released — secondary I/O proceeds independently ---
-
-      // -- Secondary image: if not hit cache, read from disk --
-      {
-        std::lock_guard<std::mutex> lock(ctx.cache_mutex);
-        sec_cache_hit = (ctx.cached_path == task.sec_slc);
 
         if (sec_cache_hit) {
-          // Case 3, the secondary image hits the cache
-          // Copy the overlap subset from global_buffer into raw.sec_data.
-          // The global buffer holds the full secondary image row-major.
-          // We extract rows (top - top2) through (top - top2) + (bottom - top).
+          // Case 1.1: neither reference nor secondary image hits the cache, we
+          // just reset the globl cached image, and we just cached the secondary
+          // image, OR Case 3: secondary image hits the cache.
           int src_w = right2 - left2;
           std::size_t row_offset = static_cast<std::size_t>(top - top2) * src_w;
           std::size_t copy_elems =
@@ -727,6 +742,7 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
                       copy_elems * sizeof(Complex));
         }
       }
+      // --- Lock released — secondary I/O proceeds independently ---
 
       if (!ref_cache_hit) {
         // Case 3, the secondary image hits the cache, so we need to read the
