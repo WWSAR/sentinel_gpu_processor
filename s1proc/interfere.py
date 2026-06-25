@@ -248,15 +248,19 @@ def _run_crossmul_daemon(
     out_float : bool
         Write phase-only (float) output.
     io_workers: int
-        Number of threads to read SLC data
-    cpu_works : int
-        Number of CPU devices to use inside the daemon.
+        Number of threads to read SLC data.  Pass ``-1`` for auto-tune.
+    cpu_workers : int
+        Number of CPU crop worker threads inside the daemon.
+        Pass ``-1`` for auto-tune.
     gpu_workers : int
         Number of GPU devices to use inside the daemon.
+        Pass ``-1`` for auto-detect.
     max_slots : int
         Number of pre-allocated pinned-memory buffer slots.
+        Pass ``-1`` for auto-tune.
     streams_per_gpu : int
-        Number of internal execution lanes per GPU (default 4).
+        Number of internal CUDA execution lanes per GPU.
+        Pass ``-1`` for auto-tune.
 
     Returns
     -------
@@ -408,11 +412,11 @@ def interfere(
     rowlook: int = 1,
     collook: int = 1,
     out_float: bool = False,
-    io_workers: int | None = None,
-    cpu_workers: int | None = None,
-    gpu_workers: int | None = None,
-    streams_per_gpu: int | None = None,
-    max_slots: int | None = None,
+    io_workers: int = -1,
+    cpu_workers: int = -1,
+    gpu_workers: int = -1,
+    streams_per_gpu: int = -1,
+    max_slots: int = -1,
 ):
     """
     Form interferograms from a subswath list.
@@ -435,24 +439,25 @@ def interfere(
         Number of looks in column direction.
     out_float : bool
         Output float rather than cpx images.
-    io_workers : int or None
+    io_workers : int
         Number of threads used for concurrent image reading.
-    cpu_workers : int or None
-        Number of CPUs used for interferogram generation.  If None,
-        auto-determined based no memory limit and number of CPU cores.
-    gpu_workers : int or None
-        Number of GPUs used for interferogram generation.  If None,
-        auto-detected via nvidia-smi.
+        Set to ``-1`` (default) to let the daemon auto-tune this value
+        based on available hardware and task dimensions.
+    cpu_workers : int
+        Number of CPU threads for burst cropping (Stage 2).
+        Set to ``-1`` (default) for hardware-aware automatic tuning.
+    gpu_workers : int
+        Number of GPUs to use for interferogram generation.
+        Set to ``-1`` (default) for automatic detection via CUDA.
     streams_per_gpu : int
-        Number of internal execution lanes per GPU in the daemon.
-        Higher values improve utilisation when burst-pair images are
-        small relative to GPU memory (default 1).
-    max_slots : int or None
+        Number of internal CUDA execution lanes per GPU in the daemon.
+        Set to ``-1`` (default) for automatic tuning based on VRAM
+        headroom and burst-pair dimensions.
+    max_slots : int
         Number of pre-allocated pinned-memory buffer slots in the
-        daemon.  Defaults to ``ngpu * streams_per_gpu + 1`` when *None*.
+        daemon.  Set to ``-1`` (default) for automatic tuning from
+        GPU count and streams-per-GPU.
     """
-    from s1proc.utils import _detect_gpu_count
-
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook, collook)
@@ -504,47 +509,29 @@ def interfere(
         return
     logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
-    # -- io_workers / cpu_workers validation --
-    if io_workers is None:
-        io_workers = 1
-    elif io_workers < 1:
-        raise ValueError("io_workers must be >= 1.")
+    # -- Validate all-or-nothing tuning parameter contract --
+    tuning_params = {
+        "io_workers": io_workers,
+        "cpu_workers": cpu_workers,
+        "gpu_workers": gpu_workers,
+        "streams_per_gpu": streams_per_gpu,
+        "max_slots": max_slots,
+    }
+    auto_tune = all(v == -1 for v in tuning_params.values())
+    manual = all(isinstance(v, int) and v > 0 for v in tuning_params.values())
 
-    if cpu_workers is None:
-        cpu_workers = 1
-    elif cpu_workers < 1:
-        raise ValueError("cpu_workers must be >= 1.")
+    if not (auto_tune or manual):
+        import sys
 
-    # -- GPU / slot validation --
-    max_gpu_workers = _detect_gpu_count()
-    if gpu_workers is None:
-        gpu_workers = max_gpu_workers
-    elif gpu_workers < 1:
-        raise ValueError("gpu_workers must be >= 1.")
-    elif gpu_workers > max_gpu_workers:
-        logger.warning(
-            "User-specified GPUs (%d) > available (%d); clamping to %d.",
-            gpu_workers,
-            max_gpu_workers,
-            max_gpu_workers,
+        print(
+            "[FATAL] Invalid parameter configuration. Please either omit all "
+            "tuning arguments for hardware-managed auto-tuning, or provide the "
+            "complete set of parameters (--io-workers, --cpu-workers, "
+            "--streams-per-gpu, --gpu-workers, --max-slots). "
+            "Partial overrides are not allowed.",
+            file=sys.stderr,
         )
-        gpu_workers = max_gpu_workers
-
-    if streams_per_gpu is None:
-        streams_per_gpu = 1
-    if streams_per_gpu < 1:
-        raise ValueError("streams_per_gpu must be >= 1.")
-
-    if max_slots is None:
-        max_slots = int(np.ceil(gpu_workers * streams_per_gpu * 1.25))
-    if max_slots < gpu_workers:
-        logger.warning(
-            "max_slots (%d) < number of streams (%d); raising to %d.",
-            max_slots,
-            gpu_workers * streams_per_gpu,
-            gpu_workers * streams_per_gpu,
-        )
-        max_slots = gpu_workers * streams_per_gpu
+        raise SystemExit(1)
 
     # -- Filter out already-completed burst pairs --
     task_items: List[Tuple[str, str, str]] = []
@@ -616,10 +603,12 @@ def run_interfere(
         rowlook=pcfg.rowlook,
         collook=pcfg.collook,
         out_float=False,
-        io_workers=pcfg.io_workers,
-        cpu_workers=pcfg.cpu_workers,
-        gpu_workers=pcfg.gpu_workers,
-        streams_per_gpu=pcfg.streams_per_gpu,
-        max_slots=pcfg.max_slots,
+        io_workers=pcfg.io_workers if pcfg.io_workers is not None else -1,
+        cpu_workers=pcfg.cpu_workers if pcfg.cpu_workers is not None else -1,
+        gpu_workers=pcfg.gpu_workers if pcfg.gpu_workers is not None else -1,
+        streams_per_gpu=(
+            pcfg.streams_per_gpu if pcfg.streams_per_gpu is not None else -1
+        ),
+        max_slots=pcfg.max_slots if pcfg.max_slots is not None else -1,
     )
     return

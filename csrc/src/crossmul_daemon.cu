@@ -12,7 +12,7 @@
  * 3.  Allocates two pools of **page-locked (pinned) host buffers**:
  *     - ``RawBuffer`` pool (Stage 1 uncropped I/O buffers).
  *     - ``TaskSlot`` pool (Stage 2+ cropped buffers + result staging).
- * 4.  **Stage 1** — Single-threaded I/O producer: reads headers,
+ * 4.  **Stage 1** — Multi-threaded I/O producer(s): reads headers,
  *     computes overlap, performs pure sequential disk reads into
  *     RawBuffers (NO cropping).
  * 5.  **Stage 2** — CPU worker thread pool (4-8 threads): pops
@@ -52,6 +52,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -132,19 +136,24 @@ struct RawBuffer {
   // Source widths (full image widths)
   int src_w_ref;
   int src_w_sec;
-  // Height of the raw block read for each image
-  int copy_h_ref;
-  int copy_h_sec;
-  // Horizontal crop parameters (same for both images — shared overlap)
-  int copy_w;
-  // Column offsets within source (per image)
-  int src_col0_ref;
-  int src_col0_sec;
-  // Column offsets within destination (same for both)
-  int dst_col0;
-  // Row offsets within destination (per image)
-  int dst_row0_ref;
-  int dst_row0_sec;
+
+  // Bounds of the reference image
+  int left_ref;
+  int top_ref;
+  int right_ref;
+  int bottom_ref;
+
+  // Bounds of the secondary image
+  int left_sec;
+  int top_sec;
+  int right_sec;
+  int bottom_sec;
+
+  // Bounds of the cropped image
+  int left_dst;
+  int top_dst;
+  int right_dst;
+  int bottom_dst;
 
   // -- Overlap / output dimensions --
   int nrow;
@@ -274,7 +283,9 @@ struct DaemonContext {
   int streams_per_gpu;
   int cpu_workers;
   int producer_workers;
-  int max_nrow; // maximum overlap nrow across all tasks
+  int max_src_nrow; // maximum source nrow across all tasks
+  int max_src_ncol; // maximum source ncol across all tasks
+  int max_nrow;     // maximum overlap nrow across all tasks
   int max_ncol;
   int max_nrow_sm; // max_nrow / rowlook
   int max_ncol_sm; // max_ncol / collook
@@ -488,27 +499,19 @@ static void read_file_rows(const std::string &filename, char *raw_buffer,
  * src_w : int
  *     Full width of the source image (in elements).
  * dst_w : int
- *     Width of the destination (overlap) image.
- * copy_w : int
- *     Number of columns to copy per row.
- * copy_h : int
+ *     Width of the destination (overlap) image in elements.
+ * dst_h : int
  *     Number of rows to copy.
  * src_col0 : int
  *     Starting column offset within the source row.
- * dst_col0 : int
- *     Starting column offset within the destination row.
- * dst_row0 : int
- *     Starting row offset within the destination buffer.
  */
 static void crop_memory_buffer(const Complex *src, Complex *dst, int src_w,
-                               int dst_w, int copy_w, int copy_h, int src_col0,
-                               int dst_col0, int dst_row0) {
-  for (int r = 0; r < copy_h; ++r) {
+                               int dst_w, int dst_h, int src_col0) {
+  for (int r = 0; r < dst_h; ++r) {
     const Complex *src_row =
         src + static_cast<std::size_t>(r) * src_w + src_col0;
-    Complex *dst_row =
-        dst + static_cast<std::size_t>(dst_row0 + r) * dst_w + dst_col0;
-    std::memcpy(dst_row, src_row, copy_w * sizeof(Complex));
+    Complex *dst_row = dst + static_cast<std::size_t>(r) * dst_w;
+    std::memcpy(dst_row, src_row, dst_w * sizeof(Complex));
   }
 }
 
@@ -536,8 +539,9 @@ static void emit_progress(DaemonContext &ctx) {
  * Sequentially iterates over the task list.  For each task:
  * 1. Reads ref + sec headers, computes overlap dimensions.
  * 2. Acquires a free RawBuffer.
- * 3. Calls ``read_file_rows`` for ref and sec — NO cropping.
- * 4. Stores crop metadata in the RawBuffer.
+ * 3. Stores full image bounds (ref, sec, destination) in the RawBuffer.
+ * 4. Calls ``read_file_rows`` for ref and sec reading complete rows from
+ *    the overlap top to bottom — NO per-element cropping.
  * 5. Pushes the RawBuffer index to the CPU work queue.
  */
 static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
@@ -608,55 +612,24 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     int nrow_sm = nrow / ctx.rowlook;
     int ncol_sm = ncol / ctx.collook;
 
-    // -- Compute raw-read and crop parameters for ref image --
-    int src_w_ref = right1 - left1;
-    int overlap_left_ref = std::max(left, left1);
-    int overlap_right_ref = std::min(right, right1);
-    int overlap_top_ref = std::max(top, top1);
-    int overlap_bottom_ref = std::min(top + (bottom1 - top1), bottom1);
-    int copy_w_ref = overlap_right_ref - overlap_left_ref;
-    int copy_h_ref = overlap_bottom_ref - overlap_top_ref;
-    int src_col0_ref = overlap_left_ref - left1;
-    int src_row0_ref = overlap_top_ref - top1;
-    int dst_col0_ref = overlap_left_ref - left;
-    int dst_row0_ref = overlap_top_ref - top;
-
-    // -- Compute raw-read and crop parameters for sec image --
-    int src_w_sec = right2 - left2;
-    int overlap_left_sec = std::max(left, left2);
-    int overlap_right_sec = std::min(right, right2);
-    int overlap_top_sec = std::max(top, top2);
-    int overlap_bottom_sec = std::min(top + (bottom2 - top2), bottom2);
-    int copy_h_sec = overlap_bottom_sec - overlap_top_sec;
-    int src_col0_sec = overlap_left_sec - left2;
-    int src_row0_sec = overlap_top_sec - top2;
-    int dst_row0_sec = overlap_top_sec - top;
-
-    // The horizontal overlap is the same for both images
-    int copy_w = copy_w_ref;
-    // dst_col0 is also identical: overlap_left - left
-    (void)overlap_left_sec; // used only for consistency validation
-
-    if (copy_w <= 0 || copy_h_ref <= 0 || copy_h_sec <= 0) {
-      std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
-                << " - no overlapping region after alignment" << std::endl;
-      release_raw_buffer(ctx, raw_idx);
-      ctx.failed.fetch_add(1);
-      ctx.completed.fetch_add(1);
-      continue;
-    }
-
     // -- Store crop metadata in RawBuffer --
-    raw.src_w_ref = src_w_ref;
-    raw.src_w_sec = src_w_sec;
-    raw.copy_h_ref = copy_h_ref;
-    raw.copy_h_sec = copy_h_sec;
-    raw.copy_w = copy_w;
-    raw.src_col0_ref = src_col0_ref;
-    raw.src_col0_sec = src_col0_sec;
-    raw.dst_col0 = dst_col0_ref; // same as dst_col0_sec
-    raw.dst_row0_ref = dst_row0_ref;
-    raw.dst_row0_sec = dst_row0_sec;
+    raw.left_ref = left1;
+    raw.top_ref = top1;
+    raw.right_ref = right1;
+    raw.bottom_ref = bottom1;
+    raw.src_w_ref = right1 - left1;
+
+    raw.left_sec = left2;
+    raw.top_sec = top2;
+    raw.right_sec = right2;
+    raw.bottom_sec = bottom2;
+    raw.src_w_sec = right2 - left2;
+
+    raw.left_dst = left;
+    raw.top_dst = top;
+    raw.right_dst = right;
+    raw.bottom_dst = bottom;
+
     raw.nrow = nrow;
     raw.ncol = ncol;
     raw.nrow_sm = nrow_sm;
@@ -673,14 +646,14 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     // -- Pure I/O: read raw SLC blocks into RawBuffer --
     try {
       read_file_rows(task.ref_slc, reinterpret_cast<char *>(raw.ref_data),
-                     static_cast<std::size_t>(src_w_ref),
-                     static_cast<std::size_t>(src_row0_ref),
-                     static_cast<std::size_t>(copy_h_ref), sizeof(Complex));
+                     static_cast<std::size_t>(right1 - left1),
+                     static_cast<std::size_t>(top - top1),
+                     static_cast<std::size_t>(bottom - top), sizeof(Complex));
 
       read_file_rows(task.sec_slc, reinterpret_cast<char *>(raw.sec_data),
-                     static_cast<std::size_t>(src_w_sec),
-                     static_cast<std::size_t>(src_row0_sec),
-                     static_cast<std::size_t>(copy_h_sec), sizeof(Complex));
+                     static_cast<std::size_t>(right2 - left2),
+                     static_cast<std::size_t>(top - top2),
+                     static_cast<std::size_t>(bottom - top), sizeof(Complex));
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
                 << " - I/O error: " << e.what() << std::endl;
@@ -696,8 +669,8 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     if (ctx.verbose) {
       std::cerr << "[crossmul_daemon|producer] raw[" << raw_idx
                 << "] -> cpu_work: " << task.out_ifg
-                << " (raw ref: " << src_w_ref << "x" << copy_h_ref
-                << " sec: " << src_w_sec << "x" << copy_h_sec
+                << " (raw ref: " << (right1 - left1) << "x" << (bottom1 - top1)
+                << " sec: " << (right2 - left2) << "x" << (bottom2 - top2)
                 << " -> crop: " << nrow << "x" << ncol << ")" << std::endl;
     }
   }
@@ -768,13 +741,11 @@ static void cpu_worker_thread(DaemonContext &ctx, int worker_id) {
 
     // -- Crop ref image: RawBuffer.ref_data → TaskSlot.ref_data --
     crop_memory_buffer(raw.ref_data, slot.ref_data, raw.src_w_ref, raw.ncol,
-                       raw.copy_w, raw.copy_h_ref, raw.src_col0_ref,
-                       raw.dst_col0, raw.dst_row0_ref);
+                       raw.nrow, raw.left_dst - raw.left_ref);
 
     // -- Crop sec image: RawBuffer.sec_data → TaskSlot.sec_data --
     crop_memory_buffer(raw.sec_data, slot.sec_data, raw.src_w_sec, raw.ncol,
-                       raw.copy_w, raw.copy_h_sec, raw.src_col0_sec,
-                       raw.dst_col0, raw.dst_row0_sec);
+                       raw.nrow, raw.left_dst - raw.left_sec);
 
     // -- Release RawBuffer back to free pool --
     release_raw_buffer(ctx, raw_idx);
@@ -1114,13 +1085,15 @@ static bool has_flag(int argc, char *argv[], const std::string &flag) {
 
 /**
  * Scan all SLC headers across every task to determine:
- * - Maximum overlap dimensions (for TaskSlot sizing).
+ * - Maximum source frame dimensions (for RawBuffer / OOM prediction).
  * - Maximum raw read element count (for RawBuffer sizing).
  *
- * This mirrors the header-scan pass in the legacy ``crossmul()`` batch
- * function but additionally computes ``max_raw_elements``.
+ * Source dimensions are used as a conservative upper bound for the
+ * cropped overlap region (``max_nrow`` / ``max_ncol``) since the
+ * actual per-burst-pair overlap is always a subset of the source.
  */
 static void scan_max_dimensions(DaemonContext &ctx) {
+  int max_src_nrow = 0, max_src_ncol = 0;
   int max_nrow = 0, max_ncol = 0;
   std::size_t max_raw_elements = 0;
 
@@ -1135,50 +1108,32 @@ static void scan_max_dimensions(DaemonContext &ctx) {
     int left2 = header2[2], top2 = header2[3];
     int right2 = header2[4], bottom2 = header2[5];
 
-    // Track maximum source dimensions
-    max_nrow = std::max(bottom1 - top1, max_nrow);
-    max_ncol = std::max(right1 - left1, max_ncol);
-    max_nrow = std::max(bottom2 - top2, max_nrow);
-    max_ncol = std::max(right2 - left2, max_ncol);
+    // Track maximum source dimensions (for OOM predictions)
+    max_src_nrow = std::max(bottom1 - top1, max_src_nrow);
+    max_src_ncol = std::max(right1 - left1, max_src_ncol);
+    max_src_nrow = std::max(bottom2 - top2, max_src_nrow);
+    max_src_ncol = std::max(right2 - left2, max_src_ncol);
 
     // Compute output overlap region (aligned)
-    int left = (left1 < left2 ? left1 : left2);
-    left = (left + ctx.collook - 1) / ctx.collook * ctx.collook;
-    int right = (right1 > right2 ? right1 : right2);
-    right = right / ctx.collook * ctx.collook;
-    int top = (top1 < top2 ? top1 : top2);
-    top = (top + ctx.rowlook - 1) / ctx.rowlook * ctx.rowlook;
-    int bottom = (bottom1 > bottom2 ? bottom1 : bottom2);
-    bottom = bottom / ctx.rowlook * ctx.rowlook;
+    // int left = (left1 < left2 ? left1 : left2);
+    // left = (left + ctx.collook - 1) / ctx.collook * ctx.collook;
+    // int right = (right1 > right2 ? right1 : right2);
+    // right = right / ctx.collook * ctx.collook;
+    // int top = (top1 < top2 ? top1 : top2);
+    // top = (top + ctx.rowlook - 1) / ctx.rowlook * ctx.rowlook;
+    // int bottom = (bottom1 > bottom2 ? bottom1 : bottom2);
+    // bottom = bottom / ctx.rowlook * ctx.rowlook;
 
-    max_nrow = std::max(bottom - top, max_nrow);
-    max_ncol = std::max(right - left, max_ncol);
+    // Track maximum overlap dimensions
+    max_nrow = max_src_nrow;
+    max_ncol = max_src_ncol;
 
     // --- Compute raw read size for ref image ---
-    {
-      int src_w1 = right1 - left1;
-      int overlap_top1 = std::max(top, top1);
-      int overlap_bottom1 = std::min(top + (bottom1 - top1), bottom1);
-      int copy_h1 = overlap_bottom1 - overlap_top1;
-      if (copy_h1 > 0) {
-        max_raw_elements = std::max(max_raw_elements,
-                                    static_cast<std::size_t>(src_w1) * copy_h1);
-      }
-    }
-
-    // --- Compute raw read size for sec image ---
-    {
-      int src_w2 = right2 - left2;
-      int overlap_top2 = std::max(top, top2);
-      int overlap_bottom2 = std::min(top + (bottom2 - top2), bottom2);
-      int copy_h2 = overlap_bottom2 - overlap_top2;
-      if (copy_h2 > 0) {
-        max_raw_elements = std::max(max_raw_elements,
-                                    static_cast<std::size_t>(src_w2) * copy_h2);
-      }
-    }
+    max_raw_elements = static_cast<std::size_t>(max_nrow) * max_ncol;
   }
 
+  ctx.max_src_nrow = max_src_nrow;
+  ctx.max_src_ncol = max_src_ncol;
   ctx.max_nrow = max_nrow;
   ctx.max_ncol = max_ncol;
   ctx.max_nrow_sm = max_nrow / ctx.rowlook;
@@ -1188,6 +1143,8 @@ static void scan_max_dimensions(DaemonContext &ctx) {
       static_cast<std::size_t>(ctx.max_nrow_sm) * ctx.max_ncol_sm;
   ctx.max_raw_elements = max_raw_elements;
 
+  std::cerr << "[crossmul_daemon] Max source dimensions: " << max_src_nrow
+            << " x " << max_src_ncol << std::endl;
   std::cerr << "[crossmul_daemon] Max overlap dimensions: " << max_nrow << " x "
             << max_ncol << "  (looked: " << ctx.max_nrow_sm << " x "
             << ctx.max_ncol_sm << ")" << std::endl;
@@ -1409,6 +1366,209 @@ static std::vector<Task> read_tasks_from_file(const std::string &path) {
 }
 
 // =======================================================================
+// Hardware-aware auto-tuning
+// =======================================================================
+
+/**
+ * Query available system RAM in bytes.
+ *
+ * On Linux reads ``/proc/meminfo`` for ``MemAvailable``; on Windows calls
+ * ``GlobalMemoryStatusEx``.  Falls back to 8 GiB when the query fails.
+ */
+static std::size_t query_system_ram() {
+#ifdef _WIN32
+  MEMORYSTATUSEX mem_info;
+  mem_info.dwLength = sizeof(MEMORYSTATUSEX);
+  if (GlobalMemoryStatusEx(&mem_info))
+    return static_cast<std::size_t>(mem_info.ullAvailPhys);
+#else
+  std::ifstream meminfo("/proc/meminfo");
+  if (meminfo.is_open()) {
+    std::string line;
+    while (std::getline(meminfo, line)) {
+      if (line.find("MemAvailable:") == 0) {
+        std::istringstream iss(line);
+        std::string key;
+        std::size_t kb;
+        iss >> key >> kb;
+        return kb * 1024; // kB -> bytes
+      }
+    }
+  }
+#endif
+  // Fallback: assume 8 GiB available
+  return static_cast<std::size_t>(8ULL) * 1024 * 1024 * 1024;
+}
+
+/**
+ * Query minimum free VRAM across all detected GPUs.
+ *
+ * Returns the smallest ``cudaMemGetInfo`` free-bytes value across
+ * devices 0 .. *ngpus*-1.
+ */
+static std::size_t query_gpu_free_vram(int ngpus) {
+  int orig_dev;
+  cudaGetDevice(&orig_dev);
+  std::size_t min_free = 0;
+  for (int d = 0; d < ngpus; ++d) {
+    cudaSetDevice(d);
+    std::size_t free_bytes, total_bytes;
+    if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess) {
+      if (d == 0 || free_bytes < min_free)
+        min_free = free_bytes;
+    }
+  }
+  cudaSetDevice(orig_dev);
+  return min_free;
+}
+
+/**
+ * Auto-tune pipeline parameters from hardware telemetry and burst-pair
+ * dimensions discovered during the scan pass.
+ *
+ * Derives ``streams_per_gpu``, ``max_slots``, ``producer_workers``,
+ * ``cpu_workers``, and ``ngpus`` following the cascading formulae
+ * described in the tuning documentation.  Applies a progressive
+ * scale-down loop when the predicted host memory footprint exceeds
+ * 80 % of available system RAM.
+ */
+static void auto_tune_parameters(DaemonContext &ctx) {
+  // ---- Step 0: Hardware telemetry ----
+
+  unsigned int T_hw = std::thread::hardware_concurrency();
+  if (T_hw == 0)
+    T_hw = 1;
+
+  int ngpus;
+  cudaError_t err = cudaGetDeviceCount(&ngpus);
+  if (err != cudaSuccess || ngpus <= 0)
+    ngpus = 1;
+  ctx.ngpus = ngpus;
+
+  std::size_t M_gpu_free = query_gpu_free_vram(ngpus);
+  std::size_t M_sys = query_system_ram();
+
+  // ---- Step 0: Task dimension constants ----
+
+  // S_raw  = max_src_nrow * max_src_ncol * sizeof(Complex) * 2 (Ref + Sec)
+  std::size_t S_raw = static_cast<std::size_t>(ctx.max_src_nrow) *
+                      ctx.max_src_ncol * sizeof(Complex) * 2;
+
+  // S_crop = max_nrow * max_ncol * sizeof(Complex) * 2 (Ref + Sec)
+  std::size_t S_crop = static_cast<std::size_t>(ctx.max_nrow) * ctx.max_ncol *
+                       sizeof(Complex) * 2;
+
+  std::cerr << "[crossmul_daemon|auto-tune] Hardware telemetry:" << std::endl;
+  std::cerr << "  CPU SMT threads                = " << T_hw << std::endl;
+  std::cerr << "  GPUs detected                  = " << ngpus << std::endl;
+  std::cerr << "  GPU free VRAM                  = "
+            << (M_gpu_free / (1024 * 1024)) << " MB" << std::endl;
+  std::cerr << "  System available RAM           = " << (M_sys / (1024 * 1024))
+            << " MB" << std::endl;
+  std::cerr << "  S_raw (max source pair)        = " << (S_raw / (1024 * 1024))
+            << " MB" << std::endl;
+  std::cerr << "  S_crop (max cropped pair)      = " << (S_crop / (1024 * 1024))
+            << " MB" << std::endl;
+
+  // ---- Step A: Determine streams_per_gpu ----
+  //
+  // M_lane ~= 4 * S_crop  (cropped pair + IFG staging + multilook buffers)
+  std::size_t M_lane = 4 * S_crop;
+
+  int streams_per_gpu = 1;
+  if (M_lane > 0 && M_gpu_free > 0) {
+    double safe_vram = static_cast<double>(M_gpu_free) * 0.85;
+    int max_by_vram = static_cast<int>(safe_vram / static_cast<double>(M_lane));
+    streams_per_gpu = std::max(1, std::min(4, max_by_vram));
+  }
+
+  std::cerr << "  [Step A] M_lane = " << (M_lane / (1024 * 1024))
+            << " MB, streams_per_gpu = " << streams_per_gpu << std::endl;
+
+  // ---- Step B: Deduce max_slots ----
+  //
+  // max_slots = (ngpus * streams_per_gpu) + 2
+  int max_slots =
+      std::min((ngpus * streams_per_gpu) + 2, (ngpus * streams_per_gpu) * 2);
+
+  std::cerr << "  [Step B] max_slots = " << max_slots << std::endl;
+
+  // ---- Step C: Allocate producer_workers & cpu_workers ----
+  //
+  // producer_workers defaults to 1
+  int producer_workers = 1;
+
+  // cpu_workers_ideal = max(4, ngpus * streams_per_gpu)
+  int cpu_workers_ideal = std::max(4, ngpus * streams_per_gpu);
+
+  // Apply SMT cap: cpu_workers <= T_hw - 1 - producer_workers
+  int cpu_workers = std::min(cpu_workers_ideal,
+                             static_cast<int>(T_hw) - 1 - producer_workers);
+
+  // Ensure cpu_workers >= 2 for forward progress
+  cpu_workers = std::max(1, cpu_workers);
+
+  // ---- Step D: OOM Safety Guardrail ----
+  //
+  // M_total_predict = (max_slots * S_crop) + ((cpu_workers + 2) * S_raw)
+  //
+  // If the predicted host footprint exceeds 80 % of available RAM, apply
+  // a two-phase progressive scale-down:
+  //   Phase 1. Reduce streams_per_gpu (and recalculate max_slots) first
+  //            — this lowers both host and device pressure together.
+  //   Phase 2. If still over-budget, reduce ngpus (fewer GPU lanes
+  //            → fewer slots → lower host footprint).
+  std::size_t M_total_predict =
+      (static_cast<std::size_t>(max_slots) * S_crop) +
+      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+
+  // Phase 1: scale down CUDA lanes per GPU
+  while (M_total_predict >
+             static_cast<std::size_t>(static_cast<double>(M_sys) * 0.80) &&
+         streams_per_gpu > 1) {
+    streams_per_gpu--;
+    max_slots = (ngpus * streams_per_gpu) + 2;
+    cpu_workers = std::min(cpu_workers, ngpus * streams_per_gpu);
+    M_total_predict = (static_cast<std::size_t>(max_slots) * S_crop) +
+                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+    std::cerr << "  [Guardrail] Predicted host footprint "
+              << (M_total_predict / (1024 * 1024))
+              << " MB > 80% of available RAM; "
+              << "scaling down -> streams_per_gpu=" << streams_per_gpu
+              << ", max_slots=" << max_slots << std::endl;
+  }
+
+  // Phase 2: scale down number of GPUs
+  while (M_total_predict >
+             static_cast<std::size_t>(static_cast<double>(M_sys) * 0.80) &&
+         ngpus > 1) {
+    ngpus--;
+    max_slots =
+        std::min((ngpus * streams_per_gpu) + 2, ngpus * streams_per_gpu * 2);
+    cpu_workers = std::min(cpu_workers, ngpus * streams_per_gpu);
+    M_total_predict = (static_cast<std::size_t>(max_slots) * S_crop) +
+                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+    std::cerr << "  [Guardrail] Predicted host footprint "
+              << (M_total_predict / (1024 * 1024))
+              << " MB > 80% of available RAM; "
+              << "scaling down -> ngpus=" << ngpus
+              << ", max_slots=" << max_slots << std::endl;
+  }
+
+  std::cerr << "  [Step C] producer_workers = " << producer_workers
+            << ", cpu_workers = " << cpu_workers << std::endl;
+  std::cerr << "  Predicted host footprint = "
+            << (M_total_predict / (1024 * 1024)) << " MB" << std::endl;
+
+  // ---- Apply ----
+  ctx.streams_per_gpu = streams_per_gpu;
+  ctx.raw_slots = max_slots;
+  ctx.task_slots_count = max_slots;
+  ctx.producer_workers = producer_workers;
+  ctx.cpu_workers = cpu_workers;
+}
+
+// =======================================================================
 // main
 // =======================================================================
 
@@ -1418,42 +1578,42 @@ int main(int argc, char *argv[]) {
 
   ctx.rowlook = std::stoi(get_arg(argc, argv, "--rowlook", "1"));
   ctx.collook = std::stoi(get_arg(argc, argv, "--collook", "1"));
-  ctx.producer_workers = std::stoi(get_arg(argc, argv, "--io-workers", "1"));
-  ctx.cpu_workers = std::stoi(get_arg(argc, argv, "--cpu-workers", "1"));
-  ctx.raw_slots = std::stoi(get_arg(argc, argv, "--max-slots", "1"));
-  ctx.task_slots_count = ctx.raw_slots; // same count for both pools
+  ctx.producer_workers = std::stoi(get_arg(argc, argv, "--io-workers", "-1"));
+  ctx.cpu_workers = std::stoi(get_arg(argc, argv, "--cpu-workers", "-1"));
+  ctx.raw_slots = std::stoi(get_arg(argc, argv, "--max-slots", "-1"));
+  ctx.task_slots_count = ctx.raw_slots;
   ctx.streams_per_gpu =
-      std::stoi(get_arg(argc, argv, "--streams-per-gpu", "1"));
+      std::stoi(get_arg(argc, argv, "--streams-per-gpu", "-1"));
   ctx.out_float = has_flag(argc, argv, "--out-float");
   ctx.verbose = has_flag(argc, argv, "--verbose");
 
-  // GPU count: from --gpus flag, else auto-detect
-  {
-    std::string gpus_str = get_arg(argc, argv, "--gpu-workers", "");
-    if (!gpus_str.empty()) {
-      ctx.ngpus = std::stoi(gpus_str);
-    } else {
-      int count;
-      cudaError_t err = cudaGetDeviceCount(&count);
-      if (err != cudaSuccess) {
-        std::cerr << "[crossmul_daemon] Cannot detect GPU count; "
-                  << "defaulting to 1." << std::endl;
-        count = 1;
-      }
-      ctx.ngpus = count;
-    }
-  }
+  // GPU count: parse from --gpu-workers, default to -1 (auto-detect)
+  ctx.ngpus = std::stoi(get_arg(argc, argv, "--gpu-workers", "-1"));
 
-  if (ctx.raw_slots < ctx.ngpus) {
-    std::cerr << "[crossmul_daemon] WARNING: max_slots (" << ctx.raw_slots
-              << ") < ngpus (" << ctx.ngpus
-              << "); increasing max_slots to ngpus." << std::endl;
-    ctx.raw_slots = ctx.ngpus;
-    ctx.task_slots_count = ctx.raw_slots;
-  }
+  // -- All-or-nothing tuning parameter validation --
+  bool producer_auto = (ctx.producer_workers == -1);
+  bool cpu_auto = (ctx.cpu_workers == -1);
+  bool streams_auto = (ctx.streams_per_gpu == -1);
+  bool slots_auto = (ctx.raw_slots == -1);
+  bool gpu_auto = (ctx.ngpus == -1);
 
-  if (ctx.cpu_workers < 1)
-    ctx.cpu_workers = 1;
+  bool all_auto =
+      producer_auto && cpu_auto && streams_auto && slots_auto && gpu_auto;
+  bool all_manual = (!producer_auto && ctx.producer_workers > 0) &&
+                    (!cpu_auto && ctx.cpu_workers > 0) &&
+                    (!streams_auto && ctx.streams_per_gpu > 0) &&
+                    (!slots_auto && ctx.raw_slots > 0) &&
+                    (!gpu_auto && ctx.ngpus > 0);
+
+  if (!all_auto && !all_manual) {
+    std::cerr << "[FATAL] Invalid parameter configuration. Please either "
+              << "omit all tuning arguments for hardware-managed "
+              << "auto-tuning, or provide the complete set of parameters "
+              << "(--io-workers, --cpu-workers, --streams-per-gpu, "
+              << "--gpu-workers, --max-slots). "
+              << "Partial overrides are not allowed." << std::endl;
+    return 1;
+  }
 
   // -- Read task list from file --
   std::string tasks_file = get_arg(argc, argv, "--tasks-file", "");
@@ -1468,7 +1628,7 @@ int main(int argc, char *argv[]) {
   std::cerr << "  collook         = " << ctx.collook << std::endl;
   std::cerr << "  out_float       = " << (ctx.out_float ? "yes" : "no")
             << std::endl;
-  std::cerr << "  io_workers      = " << ctx.ngpus << std::endl;
+  std::cerr << "  io_workers      = " << ctx.producer_workers << std::endl;
   std::cerr << "  cpu_workers     = " << ctx.cpu_workers << std::endl;
   std::cerr << "  gpu_workers     = " << ctx.ngpus << std::endl;
   std::cerr << "  streams_per_gpu = " << ctx.streams_per_gpu << std::endl;
@@ -1499,7 +1659,18 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  // -- Allocate resources --
+  // -- Auto-tune or validate manual overrides --
+  if (all_auto) {
+    std::cerr << "[crossmul_daemon] Auto-tuning pipeline parameters..."
+              << std::endl;
+    auto_tune_parameters(ctx);
+  } else {
+    // Manual override path — apply basic sanity checks
+    ctx.raw_slots = std::max(ctx.raw_slots, ctx.ngpus * ctx.streams_per_gpu);
+    ctx.task_slots_count = ctx.raw_slots;
+    std::cerr << "[crossmul_daemon] Using manual parameter override."
+              << std::endl;
+  }
   {
     ScopedTimer t("Allocate buffers");
     allocate_raw_buffers(ctx);
