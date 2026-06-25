@@ -1,7 +1,7 @@
 import glob
 import os
 import subprocess
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -219,6 +219,122 @@ def parse_fname(fn: str) -> Tuple[str, str]:
     return date, data_id
 
 
+def _reorder_tasks_for_cache_locality(
+    task_items: List[Tuple[str, str, str]],
+) -> List[Tuple[str, str, str]]:
+    """
+    Reorder ``(ref_slc, sec_slc, out_ifg)`` triples so that
+    consecutive entries share an image whenever possible, maximising
+    hits in the daemon's single-slot host-memory cache.
+
+    Each task is an undirected edge between two image nodes.  The
+    algorithm repeatedly drains all remaining tasks that touch the
+    current cached image, then uses the *other* image of the last
+    drained task as the next cache key.  Original ref/sec column
+    ordering is never swapped.
+
+    Parameters
+    ----------
+    task_items : List[Tuple[str, str, str]]
+        Unsorted task triples.
+
+    Returns
+    -------
+    List[Tuple[str, str, str]]
+        Reordered triples with original ref/sec columns intact.
+    """
+    from collections import defaultdict
+
+    n = len(task_items)
+    if n <= 1:
+        return list(task_items)
+
+    # -- Image → set of still-unconsumed task indices --
+    img_to_indices: dict[str, set[int]] = defaultdict(set)
+    for i, (ref_slc, sec_slc, _out) in enumerate(task_items):
+        img_to_indices[ref_slc].add(i)
+        img_to_indices[sec_slc].add(i)
+
+    remaining: set[int] = set(range(n))
+    sorted_tasks: list[tuple[str, str, str]] = []
+
+    # pick the first remaining index as the next seed
+    def _pop_first_remaining() -> int:
+        idx = min(remaining)
+        remaining.discard(idx)
+        return idx
+
+    # remove a task index from the adjacency index entirely
+    def _remove_index(idx: int) -> None:
+        r, s, _ = task_items[idx]
+        img_to_indices[r].discard(idx)
+        img_to_indices[s].discard(idx)
+
+    # ---- Bootstrap ----
+    seed = _pop_first_remaining()
+    _remove_index(seed)
+    sorted_tasks.append(task_items[seed])
+    cached = task_items[seed][0]  # reference image of the seed task
+
+    cold_starts = 0
+
+    while remaining:
+        # -- Collect every remaining task that touches *cached* --
+        batch: list[int] = []
+        for idx in list(img_to_indices.get(cached, ())):
+            if idx in remaining:
+                batch.append(idx)
+
+        if batch:
+            # Move the entire batch into sorted_tasks.
+            # The daemon processes them sequentially; each task is
+            # served from cache because its ref or sec matches
+            # *cached*.
+            for idx in batch:
+                remaining.discard(idx)
+                _remove_index(idx)
+                sorted_tasks.append(task_items[idx])
+
+            # Use the *other* image of the last task in the batch
+            # as the new cache key for the next iteration.
+            last_r, last_s, _ = sorted_tasks[-1]
+            cached = last_s if last_r == cached else last_r
+        else:
+            # Dead end — no remaining task touches *cached*.
+            # Pick the first remaining task as a cold-start seed.
+            cold_starts += 1
+            idx = _pop_first_remaining()
+            _remove_index(idx)
+            sorted_tasks.append(task_items[idx])
+            cached = task_items[idx][0]
+
+    # -- Log statistics --
+    # Count how many times the ref column changes across the sequence
+    # (this equals the number of reference-image cache loads).
+    predicted_loads = 1  # first task always triggers a load
+    prev_ref: Optional[str] = None
+    for t in sorted_tasks:
+        if t[0] != prev_ref:
+            predicted_loads += 1
+            prev_ref = t[0]
+
+    logger.info(
+        "I/O Cache reordering: %d tasks, %d predicted cache loads "
+        "(optimal clustering: %.0f%% reuse).",
+        n,
+        predicted_loads,
+        (1.0 - predicted_loads / max(n, 1)) * 100,
+    )
+    if cold_starts > 0:
+        logger.info(
+            "  Cold-start cluster jumps: %d (no task in the remaining "
+            "pool touched the current cached image).",
+            cold_starts,
+        )
+
+    return sorted_tasks
+
+
 def _run_crossmul_daemon(
     task_items: List[Tuple[str, str, str]],
     rowlook: int,
@@ -272,6 +388,16 @@ def _run_crossmul_daemon(
     import tempfile
 
     daemon_bin = get_bin_path("crossmul_daemon")
+
+    # -- Greedy DFS graph traversal: reorder tasks so that consecutive
+    #    entries share at least one image whenever possible, maximising
+    #    hits in the daemon's single-slot reference-image cache.
+    #
+    #    Each task is treated as an undirected edge between two image
+    #    nodes.  The traversal walks the graph depth-first, backtracking
+    #    when the current node has no remaining incident edges.
+    #    Original ref/sec column ordering is preserved.
+    task_items = _reorder_tasks_for_cache_locality(task_items)
 
     # -- Write tasks to a temporary file --
     #    Use delete=False because the daemon process reads the file

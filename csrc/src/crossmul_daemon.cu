@@ -13,8 +13,10 @@
  *     - ``RawBuffer`` pool (Stage 1 uncropped I/O buffers).
  *     - ``TaskSlot`` pool (Stage 2+ cropped buffers + result staging).
  * 4.  **Stage 1** — Multi-threaded I/O producer(s): reads headers,
- *     computes overlap, performs pure sequential disk reads into
- *     RawBuffers (NO cropping).
+ *     computes overlap, checks the global reference-image cache.  On a
+ *     cache hit the reference data is copied from a pre-loaded pinned
+ *     buffer (zero disk I/O); on a miss the full reference image is
+ *     read into the cache.  Secondary images are always read from disk.
  * 5.  **Stage 2** — CPU worker thread pool (4-8 threads): pops
  *     RawBuffers, crops them into TaskSlots via ``crop_memory_buffer``,
  *     releases the RawBuffer back to its free pool.
@@ -335,6 +337,13 @@ struct DaemonContext {
   // -- GPU workers --
   std::vector<GpuContext> gpus;
 
+  // -- Global Reference Image Cache (eliminates redundant ref disk reads) --
+  //    Protects cached_ref_path comparison and global_buffer load/store.
+  //    Never held while reading secondary images or pushing to work queues.
+  std::mutex cache_mutex;
+  std::string cached_path;
+  Complex *global_buffer = nullptr; // pinned, sized max_src_nrow * max_src_ncol
+
   // -- Progress & termination --
   std::atomic<size_t> next_task_id{0};
   std::atomic<int> completed{0};
@@ -534,15 +543,22 @@ static void emit_progress(DaemonContext &ctx) {
 // =======================================================================
 
 /**
- * Stage 1 — Pure I/O producer.
+ * Stage 1 — Pure I/O producer with reference-image caching.
  *
  * Sequentially iterates over the task list.  For each task:
  * 1. Reads ref + sec headers, computes overlap dimensions.
- * 2. Acquires a free RawBuffer.
- * 3. Stores full image bounds (ref, sec, destination) in the RawBuffer.
- * 4. Calls ``read_file_rows`` for ref and sec reading complete rows from
- *    the overlap top to bottom — NO per-element cropping.
+ * 2. Acquires a free RawBuffer and stores image bounds.
+ * 3. Checks the global cache under ``cache_mutex``:
+ *    - **Cache hit:** copies the overlap rows from
+ *      ``global_buffer`` into ``raw.ref_data`` (zero disk I/O).
+ *    - **Cache miss:** reads the *full* reference image from disk into
+ *      ``global_buffer``, updates the cache metadata, then copies
+ *      the overlap subset into ``raw.ref_data``.
+ * 4. Reads the secondary image from disk normally (always unique).
  * 5. Pushes the RawBuffer index to the CPU work queue.
+ *
+ * The lock is scoped tightly to the cache check and ref load — it is
+ * never held during secondary I/O or queue push operations.
  */
 static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
   while (true) {
@@ -643,17 +659,92 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     raw.ifg_header[4] = right / ctx.collook;
     raw.ifg_header[5] = bottom / ctx.rowlook;
 
-    // -- Pure I/O: read raw SLC blocks into RawBuffer --
+    // -- Read SLC blocks into RawBuffer (first try cache) --
+    bool ref_cache_hit, sec_cache_hit;
     try {
-      read_file_rows(task.ref_slc, reinterpret_cast<char *>(raw.ref_data),
-                     static_cast<std::size_t>(right1 - left1),
-                     static_cast<std::size_t>(top - top1),
-                     static_cast<std::size_t>(bottom - top), sizeof(Complex));
+      // --- Reference image: thread-safe cache interception ---
+      {
+        std::lock_guard<std::mutex> lock(ctx.cache_mutex);
+        ref_cache_hit = (ctx.cached_path == task.ref_slc);
+        sec_cache_hit = (ctx.cached_path == task.sec_slc);
 
-      read_file_rows(task.sec_slc, reinterpret_cast<char *>(raw.sec_data),
-                     static_cast<std::size_t>(right2 - left2),
-                     static_cast<std::size_t>(top - top2),
-                     static_cast<std::size_t>(bottom - top), sizeof(Complex));
+        if (!ref_cache_hit & !sec_cache_hit) {
+          // Case 1: neither reference or secondary image hits the cache
+          // Cache miss: read the full reference image into global buffer
+          int src_w = right1 - left1;
+          int src_h = bottom1 - top1;
+          read_file_rows(task.ref_slc,
+                         reinterpret_cast<char *>(ctx.global_buffer),
+                         static_cast<std::size_t>(src_w),
+                         0, // start from row 0 of the source image
+                         static_cast<std::size_t>(src_h), sizeof(Complex));
+          ctx.cached_path = task.ref_slc;
+          // now set ref_cache_hit to true because we just loaded the reference
+          // image to cache
+          ref_cache_hit = true;
+          if (ctx.verbose) {
+            std::cerr << "[I/O Cache] Image loaded: " << task.ref_slc << " ("
+                      << (right1 - left1) << " x " << (bottom1 - top1) << ")"
+                      << std::endl;
+          }
+        } else if (ctx.verbose) {
+          std::cerr << "[I/O Cache] Cache Hit for task " << task.out_ifg
+                    << ", skipping disk read." << std::endl;
+        }
+
+        if (ref_cache_hit) {
+          // Case 1: neither reference nor secondary image hits the cache, we
+          // just reset the globl cached image, OR Case 2: reference image hits
+          // the cache Copy the overlap subset from global_buffer into
+          // raw.ref_data. The global buffer holds the full reference image
+          // row-major. We extract rows (top - top1) through (top - top1) +
+          // (bottom - top).
+          int src_w = right1 - left1;
+          std::size_t row_offset = static_cast<std::size_t>(top - top1) * src_w;
+          std::size_t copy_elems =
+              static_cast<std::size_t>(src_w) * (bottom - top);
+          std::memcpy(raw.ref_data, ctx.global_buffer + row_offset,
+                      copy_elems * sizeof(Complex));
+        }
+      }
+      // --- Lock released — secondary I/O proceeds independently ---
+
+      // -- Secondary image: if not hit cache, read from disk --
+      {
+        std::lock_guard<std::mutex> lock(ctx.cache_mutex);
+        sec_cache_hit = (ctx.cached_path == task.sec_slc);
+
+        if (sec_cache_hit) {
+          // Case 3, the secondary image hits the cache
+          // Copy the overlap subset from global_buffer into raw.sec_data.
+          // The global buffer holds the full secondary image row-major.
+          // We extract rows (top - top2) through (top - top2) + (bottom - top).
+          int src_w = right2 - left2;
+          std::size_t row_offset = static_cast<std::size_t>(top - top2) * src_w;
+          std::size_t copy_elems =
+              static_cast<std::size_t>(src_w) * (bottom - top);
+          std::memcpy(raw.sec_data, ctx.global_buffer + row_offset,
+                      copy_elems * sizeof(Complex));
+        }
+      }
+
+      if (!ref_cache_hit) {
+        // Case 3, the secondary image hits the cache, so we need to read the
+        // reference image from disk
+        read_file_rows(task.ref_slc, reinterpret_cast<char *>(raw.ref_data),
+                       static_cast<std::size_t>(right1 - left1),
+                       static_cast<std::size_t>(top - top1),
+                       static_cast<std::size_t>(bottom - top), sizeof(Complex));
+      }
+
+      if (!sec_cache_hit) {
+        // Case 2, the reference image hits the cache, so we need to read the
+        // secondary image from disk
+        read_file_rows(task.sec_slc, reinterpret_cast<char *>(raw.sec_data),
+                       static_cast<std::size_t>(right2 - left2),
+                       static_cast<std::size_t>(top - top2),
+                       static_cast<std::size_t>(bottom - top), sizeof(Complex));
+      }
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
                 << " - I/O error: " << e.what() << std::endl;
@@ -1179,6 +1270,25 @@ static void allocate_raw_buffers(DaemonContext &ctx) {
             << " MB each)." << std::endl;
 }
 
+/**
+ * Allocate the global pinned-host-memory cache for the reference image.
+ *
+ * Sized to hold the largest possible reference frame
+ * (``max_src_nrow * max_src_ncol`` complex elements).  Only one frame
+ * is cached at any time; consecutive tasks with the same ref_slc path
+ * copy from this buffer instead of re-reading from disk.
+ */
+static void allocate_global_cache(DaemonContext &ctx) {
+  std::size_t n_elements =
+      static_cast<std::size_t>(ctx.max_src_nrow) * ctx.max_src_ncol;
+  CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ctx.global_buffer),
+                            sizeof(Complex) * n_elements));
+  ctx.cached_path.clear();
+  std::cerr << "[crossmul_daemon] Allocated global reference cache: "
+            << (sizeof(Complex) * n_elements / (1024 * 1024)) << " MB."
+            << std::endl;
+}
+
 /** Allocate the TaskSlot pool (Stage 2+ cropped buffers + result staging). */
 static void allocate_task_slots(DaemonContext &ctx) {
   ctx.task_slots = std::vector<TaskSlot>(ctx.task_slots_count);
@@ -1297,6 +1407,15 @@ static void free_raw_buffers(DaemonContext &ctx) {
       cudaFreeHost(rb.sec_data);
   }
   ctx.raw_buffers.clear();
+}
+
+/** Free the global reference image cache. */
+static void free_global_cache(DaemonContext &ctx) {
+  if (ctx.global_buffer) {
+    cudaFreeHost(ctx.global_buffer);
+    ctx.global_buffer = nullptr;
+  }
+  ctx.cached_path.clear();
 }
 
 /** Free the TaskSlot pool. */
@@ -1505,12 +1624,16 @@ static void auto_tune_parameters(DaemonContext &ctx) {
   int cpu_workers = std::min(cpu_workers_ideal,
                              static_cast<int>(T_hw) - 1 - producer_workers);
 
-  // Ensure cpu_workers >= 2 for forward progress
+  // Ensure at least 1 CPU worker for forward progress
   cpu_workers = std::max(1, cpu_workers);
 
   // ---- Step D: OOM Safety Guardrail ----
   //
   // M_total_predict = (max_slots * S_crop) + ((cpu_workers + 2) * S_raw)
+  //                  + S_ref_single
+  //
+  // The ``+ S_ref_single`` term accounts for the persistent global
+  // reference-image cache (max_src_nrow * max_src_ncol elements).
   //
   // If the predicted host footprint exceeds 80 % of available RAM, apply
   // a two-phase progressive scale-down:
@@ -1518,9 +1641,14 @@ static void auto_tune_parameters(DaemonContext &ctx) {
   //            — this lowers both host and device pressure together.
   //   Phase 2. If still over-budget, reduce ngpus (fewer GPU lanes
   //            → fewer slots → lower host footprint).
+  std::size_t S_ref_single = static_cast<std::size_t>(ctx.max_src_nrow) *
+                             ctx.max_src_ncol * sizeof(Complex);
   std::size_t M_total_predict =
       (static_cast<std::size_t>(max_slots) * S_crop) +
-      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+      (static_cast<std::size_t>(cpu_workers + 2) * S_raw) + S_ref_single;
+
+  std::cerr << "  S_ref_single (global ref cache)  = "
+            << (S_ref_single / (1024 * 1024)) << " MB" << std::endl;
 
   // Phase 1: scale down CUDA lanes per GPU
   while (M_total_predict >
@@ -1530,7 +1658,8 @@ static void auto_tune_parameters(DaemonContext &ctx) {
     max_slots = (ngpus * streams_per_gpu) + 2;
     cpu_workers = std::min(cpu_workers, ngpus * streams_per_gpu);
     M_total_predict = (static_cast<std::size_t>(max_slots) * S_crop) +
-                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw) +
+                      S_ref_single;
     std::cerr << "  [Guardrail] Predicted host footprint "
               << (M_total_predict / (1024 * 1024))
               << " MB > 80% of available RAM; "
@@ -1547,7 +1676,8 @@ static void auto_tune_parameters(DaemonContext &ctx) {
         std::min((ngpus * streams_per_gpu) + 2, ngpus * streams_per_gpu * 2);
     cpu_workers = std::min(cpu_workers, ngpus * streams_per_gpu);
     M_total_predict = (static_cast<std::size_t>(max_slots) * S_crop) +
-                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw);
+                      (static_cast<std::size_t>(cpu_workers + 2) * S_raw) +
+                      S_ref_single;
     std::cerr << "  [Guardrail] Predicted host footprint "
               << (M_total_predict / (1024 * 1024))
               << " MB > 80% of available RAM; "
@@ -1673,6 +1803,7 @@ int main(int argc, char *argv[]) {
   }
   {
     ScopedTimer t("Allocate buffers");
+    allocate_global_cache(ctx);
     allocate_raw_buffers(ctx);
     allocate_task_slots(ctx);
     allocate_gpu_contexts(ctx);
@@ -1735,6 +1866,7 @@ int main(int argc, char *argv[]) {
   free_gpu_contexts(ctx);
   free_task_slots(ctx);
   free_raw_buffers(ctx);
+  free_global_cache(ctx);
 
   return (ctx.failed.load() > 0) ? 1 : 0;
 }
