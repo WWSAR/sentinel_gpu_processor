@@ -9,29 +9,23 @@ SOL = 299792458.0  # Speed of Light
 def rotation3(d_theta, axis):
     r_theta = np.radians(d_theta)
     if axis == 1:
-        return np.array(
-            [
-                [1, 0, 0],
-                [0, np.cos(r_theta), np.sin(r_theta)],
-                [0, -np.sin(r_theta), np.cos(r_theta)],
-            ]
-        )
+        return np.array([
+            [1, 0, 0],
+            [0, np.cos(r_theta), np.sin(r_theta)],
+            [0, -np.sin(r_theta), np.cos(r_theta)],
+        ])
     elif axis == 2:
-        return np.array(
-            [
-                [np.cos(r_theta), 0, -np.sin(r_theta)],
-                [0, 1, 0],
-                [np.sin(r_theta), 0, np.cos(r_theta)],
-            ]
-        )
+        return np.array([
+            [np.cos(r_theta), 0, -np.sin(r_theta)],
+            [0, 1, 0],
+            [np.sin(r_theta), 0, np.cos(r_theta)],
+        ])
     elif axis == 3:
-        return np.array(
-            [
-                [np.cos(r_theta), np.sin(r_theta), 0],
-                [-np.sin(r_theta), np.cos(r_theta), 0],
-                [0, 0, 1],
-            ]
-        )
+        return np.array([
+            [np.cos(r_theta), np.sin(r_theta), 0],
+            [-np.sin(r_theta), np.cos(r_theta), 0],
+            [0, 0, 1],
+        ])
     else:
         raise ValueError("axis must be 1, 2, or 3")
 
@@ -280,21 +274,19 @@ def sch2xyz(llg, r_a=RA, r_e2=RE2):
     r_chg = np.cos(hdg)
     r_shg = np.sin(hdg)
 
-    r_mat = np.array(
+    r_mat = np.array([
         [
-            [
-                r_clt * r_clo,
-                -r_shg * r_slo - r_slt * r_clo * r_chg,
-                r_slo * r_chg - r_slt * r_clo * r_shg,
-            ],
-            [
-                r_clt * r_slo,
-                r_clo * r_shg - r_slt * r_slo * r_chg,
-                -r_clo * r_chg - r_slt * r_slo * r_shg,
-            ],
-            [r_slt, r_clt * r_chg, r_clt * r_shg],
-        ]
-    )
+            r_clt * r_clo,
+            -r_shg * r_slo - r_slt * r_clo * r_chg,
+            r_slo * r_chg - r_slt * r_clo * r_shg,
+        ],
+        [
+            r_clt * r_slo,
+            r_clo * r_shg - r_slt * r_slo * r_chg,
+            -r_clo * r_chg - r_slt * r_slo * r_shg,
+        ],
+        [r_slt, r_clt * r_chg, r_clt * r_shg],
+    ])
 
     r_matinv = r_mat.T
 
@@ -310,9 +302,11 @@ def tcnbasis(pos, vel, look_dir="RIGHT", r_a=RA, r_e2=RE2):
     llh = xyz2llh(pos, r_a, r_e2)
     r_lat = np.radians(llh[0])
     r_lon = np.radians(llh[1])
-    r_n = -np.array(
-        [np.cos(r_lat) * np.cos(r_lon), np.cos(r_lat) * np.sin(r_lon), np.sin(r_lat)]
-    )
+    r_n = -np.array([
+        np.cos(r_lat) * np.cos(r_lon),
+        np.cos(r_lat) * np.sin(r_lon),
+        np.sin(r_lat),
+    ])
     if look_dir.lower() == "right":
         r_temp = np.cross(r_n, vel)
     else:
@@ -328,9 +322,11 @@ def tcnbasis_vec(pos, vel, look_dir="RIGHT", r_a=RA, r_e2=RE2):
     llh = xyz2llh_vec(pos, r_a, r_e2)
     r_lat = np.radians(llh[:, 0])
     r_lon = np.radians(llh[:, 1])
-    r_n = -np.column_stack(
-        (np.cos(r_lat) * np.cos(r_lon), np.cos(r_lat) * np.sin(r_lon), np.sin(r_lat))
-    )
+    r_n = -np.column_stack((
+        np.cos(r_lat) * np.cos(r_lon),
+        np.cos(r_lat) * np.sin(r_lon),
+        np.sin(r_lat),
+    ))
     if look_dir.lower() == "right":
         r_temp = np.cross(r_n, vel)
     else:
