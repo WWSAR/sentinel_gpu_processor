@@ -23,20 +23,18 @@ def main() -> int:
     from s1proc.unwrap import batch_unwrap
     from s1proc.utils import run_check_integrity, run_create_slc_pair_list
 
-    tyro.extras.subcommand_cli_from_dict(
-        {
-            "init": initialize_config,
-            "integrity": run_check_integrity,
-            "preproc": preprocess,
-            "stack": run_stack,
-            "slcpairs": run_create_slc_pair_list,
-            "interfere": run_interfere,
-            "unwrap": batch_unwrap,
-            "amp": run_multilook_amp,
-            "coh": run_coherence,
-            "phasecorr": phase_correction,
-        }
-    )
+    tyro.extras.subcommand_cli_from_dict({
+        "init": initialize_config,
+        "integrity": run_check_integrity,
+        "preproc": preprocess,
+        "stack": run_stack,
+        "slcpairs": run_create_slc_pair_list,
+        "interfere": run_interfere,
+        "unwrap": batch_unwrap,
+        "amp": run_multilook_amp,
+        "coh": run_coherence,
+        "phasecorr": phase_correction,
+    })
     return os.EX_OK
 
 

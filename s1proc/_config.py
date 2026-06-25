@@ -58,10 +58,11 @@ class ProcessingConfig:
     max_tbl: int  # maximum temporal baseline
     min_sbl: int  # minimum spatial baseline
     max_sbl: int  # maximum spatial baseline
-    ngpu: Optional[int]  # number of GPUs for parallel interferogram processing
-    task_per_gpu: Optional[int]  # number of tasks running on each GPU (legacy)
-    max_slots: Optional[int] = None  # pre-allocated pinned-memory buffer slots
-    streams_per_gpu: Optional[int] = None  # internal CUDA execution lanes per GPU
+    io_workers: Optional[int]  # number of threads to read SLC data concurrently
+    cpu_workers: Optional[int]  # number of CPUs for parallel interferogram processing
+    gpu_workers: Optional[int]  # number of GPUs for parallel interferogram processing
+    max_slots: Optional[int]  # number of pre-allocated pinned-memory buffer slots
+    streams_per_gpu: Optional[int]  # internal CUDA execution lanes per GPU
 
 
 @dataclass

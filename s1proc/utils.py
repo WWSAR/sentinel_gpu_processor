@@ -280,9 +280,11 @@ def _los(
     logger.info("Computing look angles")
     r_lat = np.radians(lat.flatten())
     r_lon = np.radians(lon.flatten())
-    r_n = -np.column_stack(
-        [np.cos(r_lat) * np.cos(r_lon), np.cos(r_lat) * np.sin(r_lon), np.sin(r_lat)]
-    )
+    r_n = -np.column_stack([
+        np.cos(r_lat) * np.cos(r_lon),
+        np.cos(r_lat) * np.sin(r_lon),
+        np.sin(r_lat),
+    ])
     costheta = np.sum(losvec * r_n, axis=1).reshape(nrow, ncol)
     costheta = np.clip(costheta, -1, 1)
     theta = np.rad2deg(np.arccos(costheta)).astype(np.float32)
@@ -662,9 +664,12 @@ class IfgList:
             _ref_date = datetime.strptime(ref_date[-1], "%Y%m%d")
             _sec_date = datetime.strptime(sec_date[-1], "%Y%m%d")
             tempbl.append((_sec_date - _ref_date).days)
-        df = pd.DataFrame(
-            {"date1": ref_date, "date2": sec_date, "tempbl": tempbl, "image": imglist}
-        )
+        df = pd.DataFrame({
+            "date1": ref_date,
+            "date2": sec_date,
+            "tempbl": tempbl,
+            "image": imglist,
+        })
         self.df = df
 
     def get_date_list(self):

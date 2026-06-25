@@ -28,10 +28,12 @@ proc:
     max_tbl: 360     # maximum temporal baseline
     min_sbl: 0       # minimum spatial baseline
     max_sbl: 300     # maximum spatial baseline
-    ngpu:            # number of gpus used for parallel interferogram generation
-    task_per_gpu:    # number of tasks running on each GPU
-    max_slots:       # pre-allocated pinned-memory buffer slots (ngpu * 2 recommended)
-    streams_per_gpu: # internal CUDA execution lanes per GPU (default: 4)
+    io_workers:      # number of threads for concurrent image reading
+    cpu_workers:     # number of CPUs for parallel interferogram generation
+    gpu_workers:     # number of GPUs for parallel interferogram generation
+    streams_per_gpu: # internal CUDA execution lanes per GPU (default: 1)
+    max_slots:       # pre-allocated pinned-memory buffer slots
+                     # should be greater than gpu_workers * streams_per_gpu
 
 # Wrapped interferogram processing
 # Interferogram filtering, for the moment, only Goldstein filter is implemented

@@ -224,9 +224,11 @@ def _run_crossmul_daemon(
     rowlook: int,
     collook: int,
     out_float: bool,
-    ngpu: int,
+    io_workers: int,
+    cpu_workers: int,
+    gpu_workers: int,
+    streams_per_gpu: int,
     max_slots: int,
-    streams_per_gpu: int = 4,
 ) -> Tuple[int, int]:
     """
     Launch the ``crossmul_daemon`` long-running GPU processor.
@@ -245,7 +247,11 @@ def _run_crossmul_daemon(
         Column multi-looking factor.
     out_float : bool
         Write phase-only (float) output.
-    ngpu : int
+    io_workers: int
+        Number of threads to read SLC data
+    cpu_works : int
+        Number of CPU devices to use inside the daemon.
+    gpu_workers : int
         Number of GPU devices to use inside the daemon.
     max_slots : int
         Number of pre-allocated pinned-memory buffer slots.
@@ -283,12 +289,16 @@ def _run_crossmul_daemon(
         str(rowlook),
         "--collook",
         str(collook),
-        "--max-slots",
-        str(max_slots),
+        "--io-workers",
+        str(io_workers),
+        "--cpu-workers",
+        str(cpu_workers),
+        "--gpu-workers",
+        str(gpu_workers),
         "--streams-per-gpu",
         str(streams_per_gpu),
-        "--gpus",
-        str(ngpu),
+        "--max-slots",
+        str(max_slots),
         "--tasks-file",
         tasks_path,
     ]
@@ -297,81 +307,85 @@ def _run_crossmul_daemon(
 
     logger.info("Starting crossmul_daemon: %s", " ".join(cmd))
     logger.info(
-        "Tasks file: %s (%d tasks, max_slots=%d, ngpu=%d, streams_per_gpu=%d).",
+        "Tasks file: %s (%d tasks, max_slots=%d, io_workers=%d, "
+        + "cpu_workers=%d, gpus_workers=%d, streams_per_gpu=%d).",
         tasks_path,
         len(task_items),
         max_slots,
-        ngpu,
+        io_workers,
+        cpu_workers,
+        gpu_workers,
         streams_per_gpu,
     )
 
-    proc = subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        encoding="utf-8",
-        errors="ignore",
-        text=True,
-    )
+    with open("crossmul_daemon_stderr.log", "w", encoding="utf-8") as f_err:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=f_err,
+            encoding="utf-8",
+            errors="ignore",
+            text=True,
+            bufsize=1,
+        )
 
-    # -- Read daemon stdout (progress / completion lines) --
-    succeeded = 0
-    failed = 0
-    total = len(task_items)
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith("OK "):
-            succeeded += 1
-            logger.debug("[daemon] %s", line)
-        elif line.startswith("FAIL "):
-            failed += 1
-            logger.error("[daemon] %s", line)
-        elif line.startswith("PROGRESS "):
-            parts = line.split()
-            if len(parts) >= 5:
-                done = int(parts[1])
-                _failed = int(parts[2])
-                _total = int(parts[3])
-                elapsed_s = int(parts[4])
-                rate = done / max(elapsed_s, 1)
-                logger.info(
-                    "Daemon progress: %d/%d done, %d failed, "
-                    "elapsed %d s (%.1f pairs/s)",
-                    done,
-                    _total,
-                    _failed,
-                    elapsed_s,
-                    rate,
-                )
-        elif line.startswith("SUMMARY "):
-            parts = line.split()
-            if len(parts) >= 5:
-                succeeded = int(parts[1])
-                failed = int(parts[2])
-                elapsed_s = int(parts[4])
-                rate = total / max(elapsed_s, 1)
-                logger.info(
-                    "Daemon summary: %d succeeded, %d failed, "
-                    "total %d tasks in %d s (%.1f pairs/s)",
-                    succeeded,
-                    failed,
-                    total,
-                    elapsed_s,
-                    rate,
-                )
+        # -- Read daemon stdout (progress / completion lines) --
+        succeeded = 0
+        failed = 0
+        total = len(task_items)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("OK "):
+                succeeded += 1
+                logger.debug("[daemon] %s", line)
+            elif line.startswith("FAIL "):
+                failed += 1
+                logger.error("[daemon] %s", line)
+            elif line.startswith("PROGRESS "):
+                parts = line.split()
+                if len(parts) >= 5:
+                    done = int(parts[1])
+                    _failed = int(parts[2])
+                    _total = int(parts[3])
+                    elapsed_s = int(parts[4])
+                    rate = done / max(elapsed_s, 1)
+                    logger.info(
+                        "Daemon progress: %d/%d done, %d failed, "
+                        "elapsed %d s (%.1f pairs/s)",
+                        done,
+                        _total,
+                        _failed,
+                        elapsed_s,
+                        rate,
+                    )
+            elif line.startswith("SUMMARY "):
+                parts = line.split()
+                if len(parts) >= 5:
+                    succeeded = int(parts[1])
+                    failed = int(parts[2])
+                    elapsed_s = int(parts[4])
+                    rate = total / max(elapsed_s, 1)
+                    logger.info(
+                        "Daemon summary: %d succeeded, %d failed, "
+                        "total %d tasks in %d s (%.1f pairs/s)",
+                        succeeded,
+                        failed,
+                        total,
+                        elapsed_s,
+                        rate,
+                    )
 
-    # -- Drain stderr for diagnostics --
-    assert proc.stderr is not None
-    stderr_text = proc.stderr.read()
-    if stderr_text:
-        for err_line in stderr_text.strip().splitlines():
-            logger.debug("[daemon|stderr] %s", err_line)
+        retcode = proc.wait()
 
-    retcode = proc.wait()
+    if retcode != 0 or failed > 0:
+        logger.error(
+            "Daemon exited with errors. Check "
+            + "crossmul_daemon_stderr.log for details."
+        )
 
     # -- Clean up the temporary tasks file --
     try:
@@ -394,9 +408,11 @@ def interfere(
     rowlook: int = 1,
     collook: int = 1,
     out_float: bool = False,
-    ngpu: int | None = None,
-    max_slots: int | None = None,
+    io_workers: int | None = None,
+    cpu_workers: int | None = None,
+    gpu_workers: int | None = None,
     streams_per_gpu: int | None = None,
+    max_slots: int | None = None,
 ):
     """
     Form interferograms from a subswath list.
@@ -419,16 +435,21 @@ def interfere(
         Number of looks in column direction.
     out_float : bool
         Output float rather than cpx images.
-    ngpu : int or None
+    io_workers : int or None
+        Number of threads used for concurrent image reading.
+    cpu_workers : int or None
+        Number of CPUs used for interferogram generation.  If None,
+        auto-determined based no memory limit and number of CPU cores.
+    gpu_workers : int or None
         Number of GPUs used for interferogram generation.  If None,
         auto-detected via nvidia-smi.
-    max_slots : int or None
-        Number of pre-allocated pinned-memory buffer slots in the
-        daemon.  Defaults to ``ngpu * 2`` when *None*.
     streams_per_gpu : int
         Number of internal execution lanes per GPU in the daemon.
         Higher values improve utilisation when burst-pair images are
-        small relative to GPU memory (default 4).
+        small relative to GPU memory (default 1).
+    max_slots : int or None
+        Number of pre-allocated pinned-memory buffer slots in the
+        daemon.  Defaults to ``ngpu * streams_per_gpu + 1`` when *None*.
     """
     from s1proc.utils import _detect_gpu_count
 
@@ -483,34 +504,47 @@ def interfere(
         return
     logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
+    # -- io_workers / cpu_workers validation --
+    if io_workers is None:
+        io_workers = 1
+    elif io_workers < 1:
+        raise ValueError("io_workers must be >= 1.")
+
+    if cpu_workers is None:
+        cpu_workers = 1
+    elif cpu_workers < 1:
+        raise ValueError("cpu_workers must be >= 1.")
+
     # -- GPU / slot validation --
-    max_ngpu = _detect_gpu_count()
-    if ngpu is None:
-        ngpu = max_ngpu
-    elif ngpu > max_ngpu:
+    max_gpu_workers = _detect_gpu_count()
+    if gpu_workers is None:
+        gpu_workers = max_gpu_workers
+    elif gpu_workers < 1:
+        raise ValueError("gpu_workers must be >= 1.")
+    elif gpu_workers > max_gpu_workers:
         logger.warning(
             "User-specified GPUs (%d) > available (%d); clamping to %d.",
-            ngpu,
-            max_ngpu,
-            max_ngpu,
+            gpu_workers,
+            max_gpu_workers,
+            max_gpu_workers,
         )
-        ngpu = max_ngpu
-
-    if max_slots is None:
-        max_slots = ngpu * 2
-    if max_slots < ngpu:
-        logger.warning(
-            "max_slots (%d) < ngpu (%d); raising to %d.",
-            max_slots,
-            ngpu,
-            ngpu,
-        )
-        max_slots = ngpu
+        gpu_workers = max_gpu_workers
 
     if streams_per_gpu is None:
-        streams_per_gpu = 4
+        streams_per_gpu = 1
     if streams_per_gpu < 1:
         raise ValueError("streams_per_gpu must be >= 1.")
+
+    if max_slots is None:
+        max_slots = int(np.ceil(gpu_workers * streams_per_gpu * 1.25))
+    if max_slots < gpu_workers:
+        logger.warning(
+            "max_slots (%d) < number of streams (%d); raising to %d.",
+            max_slots,
+            gpu_workers * streams_per_gpu,
+            gpu_workers * streams_per_gpu,
+        )
+        max_slots = gpu_workers * streams_per_gpu
 
     # -- Filter out already-completed burst pairs --
     task_items: List[Tuple[str, str, str]] = []
@@ -533,9 +567,11 @@ def interfere(
         rowlook=rowlook,
         collook=collook,
         out_float=out_float,
-        ngpu=ngpu,
-        max_slots=max_slots,
+        io_workers=io_workers,
+        cpu_workers=cpu_workers,
+        gpu_workers=gpu_workers,
         streams_per_gpu=streams_per_gpu,
+        max_slots=max_slots,
     )
 
     if failed > 0:
@@ -580,8 +616,10 @@ def run_interfere(
         rowlook=pcfg.rowlook,
         collook=pcfg.collook,
         out_float=False,
-        ngpu=pcfg.ngpu,
-        max_slots=pcfg.max_slots,
+        io_workers=pcfg.io_workers,
+        cpu_workers=pcfg.cpu_workers,
+        gpu_workers=pcfg.gpu_workers,
         streams_per_gpu=pcfg.streams_per_gpu,
+        max_slots=pcfg.max_slots,
     )
     return

@@ -273,6 +273,7 @@ struct DaemonContext {
   int task_slots_count; // number of TaskSlots (= max_slots)
   int streams_per_gpu;
   int cpu_workers;
+  int producer_workers;
   int max_nrow; // maximum overlap nrow across all tasks
   int max_ncol;
   int max_nrow_sm; // max_nrow / rowlook
@@ -317,13 +318,19 @@ struct DaemonContext {
   std::mutex disk_write_mutex;
   std::condition_variable disk_write_cv;
 
+  // -- Progress message --
+  std::mutex emit_progress_mutex;
+
   // -- GPU workers --
   std::vector<GpuContext> gpus;
 
   // -- Progress & termination --
+  std::atomic<size_t> next_task_id{0};
   std::atomic<int> completed{0};
   std::atomic<int> failed{0};
   std::atomic<bool> producer_done{false};
+  std::atomic<bool> all_cpus_done{false};
+  std::atomic<bool> all_gpus_done{false};
   std::atomic<int> cpu_active{0}; // count of running CPU workers
   std::atomic<int> gpu_active{0}; // count of running GPU consumers
   std::chrono::steady_clock::time_point t_start;
@@ -510,7 +517,8 @@ static void crop_memory_buffer(const Complex *src, Complex *dst, int src_w,
 // -----------------------------------------------------------------------
 
 /** Print a periodic progress line to stdout. */
-static void emit_progress(const DaemonContext &ctx) {
+static void emit_progress(DaemonContext &ctx) {
+  std::lock_guard<std::mutex> lock(ctx.emit_progress_mutex);
   auto now = std::chrono::steady_clock::now();
   double elapsed = std::chrono::duration<double>(now - ctx.t_start).count();
   std::cout << "PROGRESS " << ctx.completed.load() << " " << ctx.failed.load()
@@ -519,7 +527,7 @@ static void emit_progress(const DaemonContext &ctx) {
 }
 
 // =======================================================================
-// Stage 1: Single-Threaded I/O Producer
+// Stage 1: Multi-Threaded I/O Producers
 // =======================================================================
 
 /**
@@ -532,9 +540,13 @@ static void emit_progress(const DaemonContext &ctx) {
  * 4. Stores crop metadata in the RawBuffer.
  * 5. Pushes the RawBuffer index to the CPU work queue.
  */
-static void producer_thread(DaemonContext &ctx) {
-  for (int t = 0; t < ctx.n_total; ++t) {
-    const Task &task = ctx.tasks[t];
+static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
+  while (true) {
+    size_t task_idx = ctx.next_task_id.fetch_add(1);
+    if (task_idx >= ctx.n_total) {
+      break;
+    }
+    const Task &task = ctx.tasks[task_idx];
 
     // -- Acquire a free RawBuffer --
     int raw_idx = acquire_raw_buffer(ctx);
@@ -690,7 +702,10 @@ static void producer_thread(DaemonContext &ctx) {
     }
   }
 
-  ctx.producer_done.store(true);
+  {
+    std::unique_lock<std::mutex> lock(ctx.cpu_work_mutex);
+    ctx.producer_done.store(true);
+  }
   ctx.cpu_work_cv.notify_all();
   std::cerr << "[crossmul_daemon] Producer (Stage 1) finished - all "
             << ctx.n_total << " tasks read." << std::endl;
@@ -778,6 +793,10 @@ static void cpu_worker_thread(DaemonContext &ctx, int worker_id) {
   // -- Last CPU worker to exit signals GPU consumers --
   int remaining = --ctx.cpu_active;
   if (remaining == 0) {
+    {
+      std::lock_guard<std::mutex> lock(ctx.gpu_ready_mutex);
+      ctx.all_cpus_done.store(true);
+    }
     ctx.gpu_ready_cv.notify_all();
   }
 
@@ -951,24 +970,24 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
     }
 
     // -- Termination check --
-    bool cpu_done = (ctx.cpu_active.load() == 0);
+    bool cpu_done = ctx.all_cpus_done.load();
     if (cpu_done) {
       // Are all lanes idle AND the GPU-ready queue empty?
-      bool all_idle = true;
-      for (int li = 0; li < n_lanes; ++li) {
-        if (g.lanes[li].state != 0) {
-          all_idle = false;
-          break;
-        }
-      }
+      // bool all_idle = true;
+      // for (int li = 0; li < n_lanes; ++li) {
+      //  if (g.lanes[li].state != 0) {
+      //    all_idle = false;
+      //    break;
+      //  }
+      //}
 
-      bool queue_empty = false;
-      {
-        std::lock_guard<std::mutex> lk(ctx.gpu_ready_mutex);
-        queue_empty = ctx.gpu_ready_queue.empty();
-      }
+      // bool queue_empty = false;
+      //{
+      //   std::lock_guard<std::mutex> lk(ctx.gpu_ready_mutex);
+      //   queue_empty = ctx.gpu_ready_queue.empty();
+      // }
 
-      if (all_idle && queue_empty)
+      if (ctx.completed.load() >= ctx.n_total)
         break;
     }
 
@@ -983,6 +1002,10 @@ static void gpu_consumer_thread(DaemonContext &ctx, int gpu_idx) {
   // -- Last GPU consumer to exit signals the disk writer --
   int remaining = --ctx.gpu_active;
   if (remaining == 0) {
+    {
+      std::lock_guard<std::mutex> lk(ctx.disk_write_mutex);
+      ctx.all_gpus_done.store(true);
+    }
     ctx.disk_write_cv.notify_all();
   }
 
@@ -1019,14 +1042,14 @@ static void disk_writer_thread(DaemonContext &ctx) {
     {
       std::unique_lock<std::mutex> lock(ctx.disk_write_mutex);
       ctx.disk_write_cv.wait(lock, [&ctx] {
-        return !ctx.disk_write_queue.empty() || ctx.gpu_active.load() == 0;
+        return !ctx.disk_write_queue.empty() || ctx.all_gpus_done.load();
       });
 
       if (!ctx.disk_write_queue.empty()) {
         item = std::move(ctx.disk_write_queue.front());
         ctx.disk_write_queue.pop();
         has_item = true;
-      } else if (ctx.gpu_active.load() == 0) {
+      } else if (ctx.all_gpus_done.load()) {
         // All GPU consumers done and queue is empty — we're finished.
         break;
       }
@@ -1395,17 +1418,18 @@ int main(int argc, char *argv[]) {
 
   ctx.rowlook = std::stoi(get_arg(argc, argv, "--rowlook", "1"));
   ctx.collook = std::stoi(get_arg(argc, argv, "--collook", "1"));
-  ctx.raw_slots = std::stoi(get_arg(argc, argv, "--max-slots", "8"));
+  ctx.producer_workers = std::stoi(get_arg(argc, argv, "--io-workers", "1"));
+  ctx.cpu_workers = std::stoi(get_arg(argc, argv, "--cpu-workers", "1"));
+  ctx.raw_slots = std::stoi(get_arg(argc, argv, "--max-slots", "1"));
   ctx.task_slots_count = ctx.raw_slots; // same count for both pools
   ctx.streams_per_gpu =
-      std::stoi(get_arg(argc, argv, "--streams-per-gpu", "4"));
-  ctx.cpu_workers = std::stoi(get_arg(argc, argv, "--cpu-workers", "4"));
+      std::stoi(get_arg(argc, argv, "--streams-per-gpu", "1"));
   ctx.out_float = has_flag(argc, argv, "--out-float");
   ctx.verbose = has_flag(argc, argv, "--verbose");
 
   // GPU count: from --gpus flag, else auto-detect
   {
-    std::string gpus_str = get_arg(argc, argv, "--gpus", "");
+    std::string gpus_str = get_arg(argc, argv, "--gpu-workers", "");
     if (!gpus_str.empty()) {
       ctx.ngpus = std::stoi(gpus_str);
     } else {
@@ -1444,10 +1468,11 @@ int main(int argc, char *argv[]) {
   std::cerr << "  collook         = " << ctx.collook << std::endl;
   std::cerr << "  out_float       = " << (ctx.out_float ? "yes" : "no")
             << std::endl;
-  std::cerr << "  max_slots       = " << ctx.raw_slots << std::endl;
-  std::cerr << "  streams_per_gpu = " << ctx.streams_per_gpu << std::endl;
+  std::cerr << "  io_workers      = " << ctx.ngpus << std::endl;
   std::cerr << "  cpu_workers     = " << ctx.cpu_workers << std::endl;
-  std::cerr << "  ngpus           = " << ctx.ngpus << std::endl;
+  std::cerr << "  gpu_workers     = " << ctx.ngpus << std::endl;
+  std::cerr << "  streams_per_gpu = " << ctx.streams_per_gpu << std::endl;
+  std::cerr << "  max_slots       = " << ctx.raw_slots << std::endl;
   std::cerr << "  tasks_file      = " << tasks_file << std::endl;
 
   ctx.tasks = read_tasks_from_file(tasks_file);
@@ -1490,7 +1515,11 @@ int main(int argc, char *argv[]) {
   ctx.t_start = std::chrono::steady_clock::now();
 
   // Stage 1: single I/O producer
-  std::thread producer(producer_thread, std::ref(ctx));
+  std::vector<std::thread> producer_workers;
+  producer_workers.reserve(ctx.producer_workers);
+  for (int i = 0; i < ctx.producer_workers; ++i) {
+    producer_workers.emplace_back(producer_worker_thread, std::ref(ctx), i);
+  }
 
   // Stage 2: CPU worker thread pool
   std::vector<std::thread> cpu_workers;
@@ -1509,8 +1538,9 @@ int main(int argc, char *argv[]) {
   // Stage 4: single async disk writer
   std::thread disk_writer(disk_writer_thread, std::ref(ctx));
 
-  // -- Wait for completion (in pipeline order: producer → CPU → GPU → disk) --
-  producer.join();
+  // -- Wait for completion (in pipeline order: producers → CPU → GPU → disk) --
+  for (auto &t : producer_workers)
+    t.join();
   for (auto &t : cpu_workers)
     t.join();
   for (auto &t : gpu_consumers)

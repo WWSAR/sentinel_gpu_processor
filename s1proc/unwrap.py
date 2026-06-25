@@ -381,37 +381,33 @@ def batch_unwrap(
             logger.info(f"Output target {outfile} already exists. Skipping.")
             continue
         if ucfg.method == "whirlwind":
-            task_items.append(
-                {
-                    "whirlwind_executable": unwrap_executable,
-                    "ifg_file": ifg_file,
-                    "corr_file": corr_file,
-                    "outfile": outfile,
-                    "nrow": nrow,
-                    "ncol": ncol,
-                    "only_save_phase": ucfg.parameters.only_save_phase,
-                    "conncomp": ucfg.parameters.conncomp,
-                    "bridge": ucfg.parameters.bridge,
-                }
-            )
+            task_items.append({
+                "whirlwind_executable": unwrap_executable,
+                "ifg_file": ifg_file,
+                "corr_file": corr_file,
+                "outfile": outfile,
+                "nrow": nrow,
+                "ncol": ncol,
+                "only_save_phase": ucfg.parameters.only_save_phase,
+                "conncomp": ucfg.parameters.conncomp,
+                "bridge": ucfg.parameters.bridge,
+            })
         elif ucfg.method == "snaphu":
-            task_items.append(
-                {
-                    "snaphu_executable": unwrap_executable,
-                    "ifg_file": ifg_file,
-                    "corr_file": corr_file,
-                    "outfile": outfile,
-                    "nrow": nrow,
-                    "ncol": ncol,
-                    "cost_mode": ucfg.parameters.cost_mode,
-                    "rowtile": rowtile,
-                    "coltile": coltile,
-                    "rowoverlap": ucfg.parameters.rowoverlap,
-                    "coloverlap": ucfg.parameters.coloverlap,
-                    "tile_nproc": tile_nproc,
-                    "only_save_phase": ucfg.parameters.only_save_phase,
-                }
-            )
+            task_items.append({
+                "snaphu_executable": unwrap_executable,
+                "ifg_file": ifg_file,
+                "corr_file": corr_file,
+                "outfile": outfile,
+                "nrow": nrow,
+                "ncol": ncol,
+                "cost_mode": ucfg.parameters.cost_mode,
+                "rowtile": rowtile,
+                "coltile": coltile,
+                "rowoverlap": ucfg.parameters.rowoverlap,
+                "coloverlap": ucfg.parameters.coloverlap,
+                "tile_nproc": tile_nproc,
+                "only_save_phase": ucfg.parameters.only_save_phase,
+            })
 
     if not task_items:
         logger.warning("All files in queue have already been successfully processed.")
