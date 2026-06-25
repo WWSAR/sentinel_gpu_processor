@@ -584,13 +584,13 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     int right2 = header2[4], bottom2 = header2[5];
 
     // -- Compute output overlap region (aligned) --
-    int left = (left1 < left2 ? left1 : left2);
+    int left = (left1 > left2 ? left1 : left2);
     left = (left + ctx.collook - 1) / ctx.collook * ctx.collook;
-    int right = (right1 > right2 ? right1 : right2);
+    int right = (right1 < right2 ? right1 : right2);
     right = right / ctx.collook * ctx.collook;
-    int top = (top1 < top2 ? top1 : top2);
+    int top = (top1 > top2 ? top1 : top2);
     top = (top + ctx.rowlook - 1) / ctx.rowlook * ctx.rowlook;
-    int bottom = (bottom1 > bottom2 ? bottom1 : bottom2);
+    int bottom = (bottom1 < bottom2 ? bottom1 : bottom2);
     bottom = bottom / ctx.rowlook * ctx.rowlook;
 
     int nrow = bottom - top;
