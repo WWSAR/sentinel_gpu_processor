@@ -7,6 +7,7 @@ io:
     ifg_path: igrams                      # raw wrapped interferograms
     amp_path: amp                         # multilooked amplitude 
     unw_path: unw                         # unwrapped interferograms
+    time_series_path: analysis            # time series results
     dem_file: elevation.dem               # DEM grid
     rsc_file: elevation.dem.rsc           # rsc description file
     img_pair_file: subswath_list          # list of interferograms to process
@@ -69,6 +70,22 @@ unwrap:
         rowoverlap: 200
         coloverlap: 200
         tile_nproc: null
+
+# Time series
+timeseries:
+    method: "stack"
+    parameters:
+        ref_lon: -103.141
+        ref_lat: -31.811
+        # optional, default value = 1.483, 4.0
+        mad_scale:
+        threshold_sigma:
+        periods:
+            - ["20141101", "20170131"]
+            - ["20141101", "20180131"]
+            - ["20141101", "20190131"]
+        check_points: false
+        check_point_list: "checkpoints.txt"
 
 # date and study area
 date:

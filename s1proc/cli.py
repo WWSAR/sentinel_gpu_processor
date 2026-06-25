@@ -20,6 +20,7 @@ def main() -> int:
     from s1proc.phase_correction import phase_correction
     from s1proc.preproc import preprocess
     from s1proc.sentinel_stack import run_stack
+    from s1proc.time_series import time_series
     from s1proc.unwrap import batch_unwrap
     from s1proc.utils import run_check_integrity, run_create_slc_pair_list
 
@@ -35,6 +36,7 @@ def main() -> int:
             "amp": run_multilook_amp,
             "coh": run_coherence,
             "phasecorr": phase_correction,
+            "timeseries": time_series,
         }
     )
     return os.EX_OK

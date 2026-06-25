@@ -8,6 +8,7 @@ import numpy as np
 import zarr
 from matplotlib import pyplot as plt
 from matplotlib.colors import ListedColormap
+from numcodecs import Blosc
 from numpy.typing import DTypeLike
 from tqdm import tqdm
 
@@ -532,7 +533,8 @@ def img2zarr(
         shape=(nimg, nrow, ncol),
         chunks=chunks,
         dtype=dtype,
-        compressor=zarr.Blosc(cname="zstd", clevel=3),
+        compressor=Blosc(cname="zstd", clevel=3),
+        zarr_format=2,
     )
 
     # copy attrs
