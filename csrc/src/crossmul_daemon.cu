@@ -350,11 +350,12 @@ struct DaemonContext {
   std::atomic<size_t> next_task_id{0};
   std::atomic<int> completed{0};
   std::atomic<int> failed{0};
-  std::atomic<bool> producer_done{false};
+  std::atomic<bool> all_producers_done{false};
   std::atomic<bool> all_cpus_done{false};
   std::atomic<bool> all_gpus_done{false};
-  std::atomic<int> cpu_active{0}; // count of running CPU workers
-  std::atomic<int> gpu_active{0}; // count of running GPU consumers
+  std::atomic<int> producer_active{0}; // count of running producer workers
+  std::atomic<int> cpu_active{0};      // count of running CPU workers
+  std::atomic<int> gpu_active{0};      // count of running GPU consumers
   std::chrono::steady_clock::time_point t_start;
 };
 
@@ -682,7 +683,7 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
             }
 
             ref_cache_hit = path_match_ref;
-            sec_cache_hit = path_match_ref;
+            sec_cache_hit = path_match_sec;
             break;
           }
 
@@ -800,11 +801,15 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
     }
   }
 
-  {
-    std::unique_lock<std::mutex> lock(ctx.cpu_work_mutex);
-    ctx.producer_done.store(true);
+  int remaining = --ctx.producer_active;
+  if (remaining == 0) {
+    {
+      std::lock_guard<std::mutex> lock(ctx.cpu_work_mutex);
+      ctx.all_producers_done.store(true);
+    }
+    ctx.cpu_work_cv.notify_all();
   }
-  ctx.cpu_work_cv.notify_all();
+
   std::cerr << "[crossmul_daemon] Producer (Stage 1) finished - all "
             << ctx.n_total << " tasks read." << std::endl;
 }
@@ -835,13 +840,13 @@ static void cpu_worker_thread(DaemonContext &ctx, int worker_id) {
     {
       std::unique_lock<std::mutex> lock(ctx.cpu_work_mutex);
       ctx.cpu_work_cv.wait(lock, [&ctx] {
-        return !ctx.cpu_work_queue.empty() || ctx.producer_done.load();
+        return !ctx.cpu_work_queue.empty() || ctx.all_producers_done.load();
       });
 
       if (!ctx.cpu_work_queue.empty()) {
         raw_idx = ctx.cpu_work_queue.front();
         ctx.cpu_work_queue.pop();
-      } else if (ctx.producer_done.load()) {
+      } else if (ctx.all_producers_done.load()) {
         break; // no more work will arrive
       }
     }
@@ -1844,6 +1849,7 @@ int main(int argc, char *argv[]) {
   }
 
   // -- Initialise active worker counts for termination signalling --
+  ctx.producer_active.store(ctx.producer_workers);
   ctx.cpu_active.store(ctx.cpu_workers);
   ctx.gpu_active.store(ctx.ngpus);
 
