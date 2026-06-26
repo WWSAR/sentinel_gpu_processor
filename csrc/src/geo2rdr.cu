@@ -128,17 +128,16 @@ __global__ void find_first_last_nonzero_rows_kernel(const float2 *d_data,
 }
 
 /**
- * Compute deramp_phase and deramp burst SLC data in-place on the device.
+ * Deramp burst SLC data in-place on the device.
  *
  * For each pixel at (row, col):
  *   etadiff = eta[row] - etaref[col]
  *   phase   = -pi * kt[col] * etadiff^2
  *   burst   = burst * exp(i * phase)
- *   deramp_phase = phase
  */
 __global__ void deramp_burst(double *kt, double *eta, double *etaref,
-                             Complex *burst, double *deramp_phase,
-                             const std::size_t nrange, const std::size_t n) {
+                             Complex *burst, const std::size_t nrange,
+                             const std::size_t n) {
   std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t stride = blockDim.x * gridDim.x;
   unsigned int row, col;
@@ -151,7 +150,6 @@ __global__ void deramp_burst(double *kt, double *eta, double *etaref,
     col = i - row * nrange;
     etadiff = eta[row] - etaref[col];
     phase = -M_PI * kt[col] * etadiff * etadiff;
-    deramp_phase[i] = phase;
     b.x = cos(phase);
     b.y = sin(phase);
     burst[i].x = a.x * b.x - a.y * b.y;
@@ -165,30 +163,31 @@ __global__ void deramp_burst(double *kt, double *eta, double *etaref,
  * For each output pixel:
  *   1. Compute lat/lon from row/col, llh→xyz
  *   2. Compute range/azimuth time via orbit iteration
- *   3. Bilinearly interpolate deramped burst data and deramp_phase
+ *   3. Bilinearly interpolate deramped burst data
  *   4. Apply phase correction: exp(i * (4*pi/wvl*rngpix - reramp))
  *
- * d_deramp_phase is read directly from device memory (no host round-trip).
  */
 __global__ void
 reproject(const short int *dem, const Complex *burstdata,
-          const double *deramp_phase, Complex *__restrict__ outdata, double *tt,
-          double *xx, double *vv, const std::size_t nstatvec, const double tmid,
-          double *xmid, double *vmid, const double latmax, const double lonmin,
+          Complex *__restrict__ outdata, double *tt, double *xx, double *vv,
+          const std::size_t nstatvec, const double tmid, double *xmid,
+          double *vmid, const double latmax, const double lonmin,
           const double dlat, const double dlon, const std::size_t nlon,
           const double rngstart, const double tstart, const double dmrg,
           const double dtaz, const int nrange, const int lines_per_burst,
-          const int first_valid_line, const int last_valid_line,
-          const int first_valid_sample, const int last_valid_sample,
-          const double wvl, const std::size_t n) {
+          const double fmt0intp, const double fmc0intp, const double fmc1intp,
+          const double fmc2intp, const double dct0intp, const double dcc0intp,
+          const double dcc1intp, const double dcc2intp, const double etac0,
+          const double ks, const int first_valid_line,
+          const int last_valid_line, const int first_valid_sample,
+          const int last_valid_sample, const double wvl, const std::size_t n) {
   std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t stride = blockDim.x * gridDim.x;
   int row, col, intr, inta;
   double lat, lon, h;
   std::size_t idx1, idx2, idx3, idx4;
   double tline, rngpix, rgoff, azoff, fracr, fraca, llh[3], xyz[3], dr[3];
-  double reramp1, reramp2, reramp, phase1, phase2, phase3, phase4, phase;
-  double resx, resy, cosphase, sinphase;
+  double resx, resy, cosphase, sinphase, phase, reramp;
   Complex cpx1, cpx2, burst1, burst2, burst3, burst4, res, zero;
   zero.x = 0;
   zero.y = 0;
@@ -208,6 +207,16 @@ reproject(const short int *dem, const Complex *burstdata,
     azoff = (tline - tstart) / dtaz;
     if (rgoff >= first_valid_sample && rgoff < last_valid_sample &&
         azoff >= first_valid_line + 5 && azoff < last_valid_line - 5) {
+      double dt = rngpix * 2 / SOL - fmt0intp;
+      double ka = fmc0intp + dt * (fmc1intp + fmc2intp * dt);
+      dt = rngpix * 2 / SOL - dct0intp;
+      double fnc = dcc0intp + dt * (dcc1intp + dcc2intp * dt);
+      double kt = ka * ks / (ka - ks);
+      double etac = -fnc / ka;
+      double etaref = etac - etac0;
+      double eta = -lines_per_burst * dtaz / 2. + tline - tstart;
+      double etadiff = eta - etaref;
+      reramp = -M_PI * kt * etadiff * etadiff;
       intr = int(rgoff);
       fracr = rgoff - intr;
       inta = int(azoff);
@@ -224,15 +233,8 @@ reproject(const short int *dem, const Complex *burstdata,
       cpx1.y = burst1.y * (1 - fracr) + burst2.y * fracr;
       cpx2.x = burst3.x * (1 - fracr) + burst4.x * fracr;
       cpx2.y = burst3.y * (1 - fracr) + burst4.y * fracr;
-      phase1 = deramp_phase[idx1];
-      phase2 = deramp_phase[idx2];
-      phase3 = deramp_phase[idx3];
-      phase4 = deramp_phase[idx4];
-      reramp1 = phase1 * (1 - fracr) + phase2 * fracr;
-      reramp2 = phase3 * (1 - fracr) + phase4 * fracr;
       resx = cpx1.x * (1 - fraca) + cpx2.x * fraca;
       resy = cpx1.y * (1 - fraca) + cpx2.y * fraca;
-      reramp = reramp1 * (1 - fraca) + reramp2 * fraca;
       phase = 4.0 * M_PI / wvl * rngpix - reramp;
       cosphase = cos(phase);
       sinphase = sin(phase);
@@ -304,10 +306,11 @@ bool find_nonzero_rows(const float2 *d_data, int rows, int cols, int *d_first,
  * For each burst:
  *   1. Read original (non-deramped) SLC data from stdin or file.
  *   2. Compute deramp coefficients (kt, eta, etaref) on host, copy to device.
- *   3. Launch deramp_burst kernel → deramps burst in-place + fills
- * d_deramp_phase. ** d_deramp_phase lives on device only — never copied to
- * host. **
- *   4. Launch reproject kernel → reads deramp_phase directly from device.
+ *   3. Launch deramp_burst kernel → deramps burst data in-place.
+ *   4. Launch reproject kernel → bilinearly interpolates deramped data,
+ *      recomputes the reramp phase analytically at each pixel (no
+ *      pre-computed deramp_phase file needed), and applies the range
+ *      propagation phase.
  *   5. Find valid output rows; copy result to host and save.
  */
 int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
@@ -435,7 +438,6 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
   double *d_tt, *d_xx, *d_vv, *d_xmid, *d_vmid;
   double *d_kt, *d_eta, *d_etaref;
   Complex *d_burstdata, *d_outdata;
-  double *d_deramp_phase;
   short int *d_dem;
   int *d_first, *d_last; // pre-allocated for find_nonzero_rows
 
@@ -448,7 +450,6 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
   cudaMalloc((void **)&d_eta, sizeof(double) * lines_per_burst);
   cudaMalloc((void **)&d_etaref, sizeof(double) * nrange);
   cudaMalloc((void **)&d_burstdata, sizeof(Complex) * burstsize);
-  cudaMalloc((void **)&d_deramp_phase, sizeof(double) * burstsize);
   cudaMalloc((void **)&d_outdata, buffer_size);
   cudaMalloc((void **)&d_dem, sizeof(short int) * nrow_buffer * ncol_buffer);
   cudaMalloc((void **)&d_first, sizeof(int));
@@ -463,7 +464,8 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
 
   // ---- Phase 8: Burst loop ----
   for (int iburst = 0; iburst < azimuth_bursts; ++iburst) {
-    // --- 8a. Compute kt/eta/etaref on host ---
+    // for (int iburst = 1; iburst < 2; ++iburst) {
+    //  --- 8a. Compute kt/eta/etaref on host ---
     double timecenterseconds;
     double xpoint[3], vpoint[3], vs, ks;
     double dcc0intp, dcc1intp, dcc2intp, dct0intp;
@@ -521,9 +523,9 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     for (int i = 0; i < nrange; ++i) {
       trange = slant_range_time + i / range_sampling_rate;
       dt = trange - fmt0intp;
-      ka[i] = fmc0intp + fmc1intp * dt + fmc2intp * dt * dt;
+      ka[i] = fmc0intp + dt * (fmc1intp + fmc2intp * dt);
       dt = trange - dct0intp;
-      fnc[i] = dcc0intp + dcc1intp * dt + dcc2intp * dt * dt;
+      fnc[i] = dcc0intp + dt * (dcc1intp + dcc2intp * dt);
       kt[i] = ka[i] * ks / (ka[i] - ks);
       etac[i] = -fnc[i] / ka[i];
       etaref[i] = etac[i] - etac[0];
@@ -548,10 +550,9 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     cudaMemcpy(d_burstdata, burst, sizeof(Complex) * burstsize,
                cudaMemcpyHostToDevice);
 
-    // --- 8e. Deramp on GPU (burst data deramped in-place, deramp_phase stays
-    // on device) ---
+    // --- 8e. Deramp on GPU (burst data deramped in-place) ---
     deramp_burst<<<numBlocks, blockSize>>>(d_kt, d_eta, d_etaref, d_burstdata,
-                                           d_deramp_phase, nrange, burstsize);
+                                           nrange, burstsize);
     CHECK_CUDA(cudaDeviceSynchronize());
 
     // --- 8f. Compute burst geometry ---
@@ -596,11 +597,12 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     // --- 8i. Reproject ---
     int demBlocks = (nrow * ncol + blockSize - 1) / blockSize;
     reproject<<<demBlocks, blockSize>>>(
-        d_dem, d_burstdata, d_deramp_phase, d_outdata, d_tt, d_xx, d_vv,
-        nstatvec, tmid, d_xmid, d_vmid, demrsc.latmax + demrsc.dlat * top,
+        d_dem, d_burstdata, d_outdata, d_tt, d_xx, d_vv, nstatvec, tmid, d_xmid,
+        d_vmid, demrsc.latmax + demrsc.dlat * top,
         demrsc.lonmin + demrsc.dlon * left, demrsc.dlat, demrsc.dlon, ncol,
-        rngstart, tstart, dmrg, dtaz, nrange, lines_per_burst,
-        first_valid_line[iburst], last_valid_line[iburst],
+        rngstart, tstart, dmrg, dtaz, nrange, lines_per_burst, fmt0intp,
+        fmc0intp, fmc1intp, fmc2intp, dct0intp, dcc0intp, dcc1intp, dcc2intp,
+        etac[0], ks, first_valid_line[iburst], last_valid_line[iburst],
         first_valid_sample[iburst], last_valid_sample[iburst], wvl,
         nrow * ncol);
     CHECK_CUDA(cudaDeviceSynchronize());
@@ -679,7 +681,6 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
   cudaFree(d_eta);
   cudaFree(d_etaref);
   cudaFree(d_burstdata);
-  cudaFree(d_deramp_phase);
   cudaFree(d_outdata);
   cudaFree(d_dem);
   cudaFree(d_first);
