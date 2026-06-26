@@ -483,37 +483,47 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
         2.0 * vs * radar_frequency / SOL * azimuth_steering_rate * M_PI / 180.0;
 
     idx = closest_sample(fmtime, timecenterseconds, npolyfm);
-    if (fmtime[idx] < timecenterseconds) {
+    if (fmtime[idx] < timecenterseconds && idx < npolyfm - 1) {
       frac =
           (timecenterseconds - fmtime[idx]) / (fmtime[idx + 1] - fmtime[idx]);
       fmc0intp = fmc0[idx] + frac * (fmc0[idx + 1] - fmc0[idx]);
       fmc1intp = fmc1[idx] + frac * (fmc1[idx + 1] - fmc1[idx]);
       fmc2intp = fmc2[idx] + frac * (fmc2[idx + 1] - fmc2[idx]);
       fmt0intp = fmt0[idx] + frac * (fmt0[idx + 1] - fmt0[idx]);
-    } else {
+    } else if (fmtime[idx] > timecenterseconds && idx > 0) {
       frac = (timecenterseconds - fmtime[idx - 1]) /
              (fmtime[idx] - fmtime[idx - 1]);
       fmc0intp = fmc0[idx - 1] + frac * (fmc0[idx] - fmc0[idx - 1]);
       fmc1intp = fmc1[idx - 1] + frac * (fmc1[idx] - fmc1[idx - 1]);
       fmc2intp = fmc2[idx - 1] + frac * (fmc2[idx] - fmc2[idx - 1]);
       fmt0intp = fmt0[idx - 1] + frac * (fmt0[idx] - fmt0[idx - 1]);
+    } else {
+      fmc0intp = fmc0[idx];
+      fmc1intp = fmc1[idx];
+      fmc2intp = fmc2[idx];
+      fmt0intp = fmt0[idx];
     }
 
     idx = closest_sample(dctime, timecenterseconds, npolydc);
-    if (dctime[idx] < timecenterseconds) {
+    if (dctime[idx] < timecenterseconds && idx < npolydc - 1) {
       frac =
           (timecenterseconds - dctime[idx]) / (dctime[idx + 1] - dctime[idx]);
       dcc0intp = dcc0[idx] + frac * (dcc0[idx + 1] - dcc0[idx]);
       dcc1intp = dcc1[idx] + frac * (dcc1[idx + 1] - dcc1[idx]);
       dcc2intp = dcc2[idx] + frac * (dcc2[idx + 1] - dcc2[idx]);
       dct0intp = dct0[idx] + frac * (dct0[idx + 1] - dct0[idx]);
-    } else {
+    } else if (dctime[idx] > timecenterseconds && idx > 0) {
       frac = (timecenterseconds - dctime[idx - 1]) /
              (dctime[idx] - dctime[idx - 1]);
       dcc0intp = dcc0[idx - 1] + frac * (dcc0[idx] - dcc0[idx - 1]);
       dcc1intp = dcc1[idx - 1] + frac * (dcc1[idx] - dcc1[idx - 1]);
       dcc2intp = dcc2[idx - 1] + frac * (dcc2[idx] - dcc2[idx - 1]);
       dct0intp = dct0[idx - 1] + frac * (dct0[idx] - dct0[idx - 1]);
+    } else {
+      dcc0intp = dcc0[idx];
+      dcc1intp = dcc1[idx];
+      dcc2intp = dcc2[idx];
+      dct0intp = dct0[idx];
     }
 
     for (int i = 0; i < lines_per_burst; ++i) {
@@ -554,6 +564,8 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     deramp_burst<<<numBlocks, blockSize>>>(d_kt, d_eta, d_etaref, d_burstdata,
                                            nrange, burstsize);
     CHECK_CUDA(cudaDeviceSynchronize());
+    cudaMemcpy(burst, d_burstdata, sizeof(Complex) * burstsize,
+               cudaMemcpyDeviceToHost);
 
     // --- 8f. Compute burst geometry ---
     double latmin, latmax, lonmin, lonmax;
