@@ -639,6 +639,11 @@ def interfere(
     n_ifg = len(burst_pair_map)
     if n_pair == 0:
         logger.warning("Did not find any burst pairs.")
+        if n_ifg > 0:
+            logger.info("All burst-pair interferograms already exist; nothing to do.")
+            for outfile in tqdm(burst_pair_map, desc="stitching"):
+                stitch(burst_pair_map[outfile], outfile, out_float)
+            logger.info("All interferograms are generated.")
         return
     logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
@@ -673,13 +678,6 @@ def interfere(
             continue
         task_items.append((ref_slc, sec_slc, out_ifg))
     del burst_pairs
-
-    if not task_items:
-        logger.info("All burst-pair interferograms already exist; nothing to do.")
-        for outfile in tqdm(burst_pair_map, desc="stitching"):
-            stitch(burst_pair_map[outfile], outfile, out_float)
-        logger.info("All interferograms are generated.")
-        return
 
     # -- Launch daemon --
     succeeded, failed = _run_crossmul_daemon(
