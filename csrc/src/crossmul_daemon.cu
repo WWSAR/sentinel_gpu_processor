@@ -699,8 +699,8 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
           i_am_the_loader = true;
 
           // decide which image will be loaded to the global cache
-          if (next_task != nullptr && (task.sec_slc == next_task->sec_slc ||
-                                       task.sec_slc == next_task->ref_slc)) {
+          if (next_task != nullptr && ((task.sec_slc == next_task->sec_slc ||
+                                        task.sec_slc == next_task->ref_slc))) {
             target_path = task.sec_slc;
             sec_cache_hit = true;
           } else {
