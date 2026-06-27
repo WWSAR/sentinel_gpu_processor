@@ -225,17 +225,8 @@ __host__ __device__ void intp_orbit(const std::size_t nstatvec,
                                     double *timeorbit, double *xx, double *vv,
                                     const double t, double *satx,
                                     double *satv) {
-  std::size_t ilocation = 0;
-  double delta_t, min_delta_t = 1.e10;
   double tt[4], x[12], v[12];
-  // find the location of the sampling time that is closest to t
-  for (std::size_t i = 0; i < nstatvec; ++i) {
-    delta_t = fabs(t - timeorbit[i]);
-    if (delta_t < min_delta_t) {
-      min_delta_t = delta_t;
-      ilocation = i;
-    }
-  }
+  int ilocation = (t - timeorbit[0]) / (timeorbit[1] - timeorbit[0]);
   // Four points are needed for the Hermite interpolation
   ilocation = ilocation > 1 ? ilocation : 1;
   ilocation = ilocation < (nstatvec - 3) ? ilocation : nstatvec - 3;

@@ -1,7 +1,7 @@
 import glob
 import os
 import subprocess
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -42,7 +42,6 @@ def match_bursts(
         idx_diff = np.abs(sec_tops - ref_top) + np.abs(sec_bottoms - ref_bottom)
         best_match = np.argmin(idx_diff)
         burst_pairs.append((ref_burst.data, sec_subswath.bursts[best_match].data))
-        logger.debug(burst_pairs[-1])
     return burst_pairs
 
 
@@ -219,6 +218,122 @@ def parse_fname(fn: str) -> Tuple[str, str]:
     return date, data_id
 
 
+def _reorder_tasks_for_cache_locality(
+    task_items: List[Tuple[str, str, str]],
+) -> List[Tuple[str, str, str]]:
+    """
+    Reorder ``(ref_slc, sec_slc, out_ifg)`` triples so that
+    consecutive entries share an image whenever possible, maximising
+    hits in the daemon's single-slot host-memory cache.
+
+    Each task is an undirected edge between two image nodes.  The
+    algorithm repeatedly drains all remaining tasks that touch the
+    current cached image, then uses the *other* image of the last
+    drained task as the next cache key.  Original ref/sec column
+    ordering is never swapped.
+
+    Parameters
+    ----------
+    task_items : List[Tuple[str, str, str]]
+        Unsorted task triples.
+
+    Returns
+    -------
+    List[Tuple[str, str, str]]
+        Reordered triples with original ref/sec columns intact.
+    """
+    from collections import defaultdict
+
+    n = len(task_items)
+    if n <= 1:
+        return list(task_items)
+
+    # -- Image → set of still-unconsumed task indices --
+    img_to_indices: dict[str, set[int]] = defaultdict(set)
+    for i, (ref_slc, sec_slc, _out) in enumerate(task_items):
+        img_to_indices[ref_slc].add(i)
+        img_to_indices[sec_slc].add(i)
+
+    remaining: set[int] = set(range(n))
+    sorted_tasks: list[tuple[str, str, str]] = []
+
+    # pick the first remaining index as the next seed
+    def _pop_first_remaining() -> int:
+        idx = min(remaining)
+        remaining.discard(idx)
+        return idx
+
+    # remove a task index from the adjacency index entirely
+    def _remove_index(idx: int) -> None:
+        r, s, _ = task_items[idx]
+        img_to_indices[r].discard(idx)
+        img_to_indices[s].discard(idx)
+
+    # ---- Bootstrap ----
+    seed = _pop_first_remaining()
+    _remove_index(seed)
+    sorted_tasks.append(task_items[seed])
+    cached = task_items[seed][0]  # reference image of the seed task
+
+    cold_starts = 0
+
+    while remaining:
+        # -- Collect every remaining task that touches *cached* --
+        batch: list[int] = []
+        for idx in list(img_to_indices.get(cached, ())):
+            if idx in remaining:
+                batch.append(idx)
+
+        if batch:
+            # Move the entire batch into sorted_tasks.
+            # The daemon processes them sequentially; each task is
+            # served from cache because its ref or sec matches
+            # *cached*.
+            for idx in batch:
+                remaining.discard(idx)
+                _remove_index(idx)
+                sorted_tasks.append(task_items[idx])
+
+            # Use the *other* image of the last task in the batch
+            # as the new cache key for the next iteration.
+            last_r, last_s, _ = sorted_tasks[-1]
+            cached = last_s if last_r == cached else last_r
+        else:
+            # Dead end — no remaining task touches *cached*.
+            # Pick the first remaining task as a cold-start seed.
+            cold_starts += 1
+            idx = _pop_first_remaining()
+            _remove_index(idx)
+            sorted_tasks.append(task_items[idx])
+            cached = task_items[idx][0]
+
+    # -- Log statistics --
+    # Count how many times the ref column changes across the sequence
+    # (this equals the number of reference-image cache loads).
+    predicted_loads = 1  # first task always triggers a load
+    prev_ref: Optional[str] = None
+    for t in sorted_tasks:
+        if t[0] != prev_ref:
+            predicted_loads += 1
+            prev_ref = t[0]
+
+    logger.info(
+        "I/O Cache reordering: %d tasks, %d predicted cache loads "
+        "(optimal clustering: %.0f%% reuse).",
+        n,
+        predicted_loads,
+        (1.0 - predicted_loads / max(n, 1)) * 100,
+    )
+    if cold_starts > 0:
+        logger.info(
+            "  Cold-start cluster jumps: %d (no task in the remaining "
+            "pool touched the current cached image).",
+            cold_starts,
+        )
+
+    return sorted_tasks
+
+
 def _run_crossmul_daemon(
     task_items: List[Tuple[str, str, str]],
     rowlook: int,
@@ -229,6 +344,7 @@ def _run_crossmul_daemon(
     gpu_workers: int,
     streams_per_gpu: int,
     max_slots: int,
+    verbose: bool,
 ) -> Tuple[int, int]:
     """
     Launch the ``crossmul_daemon`` long-running GPU processor.
@@ -261,6 +377,8 @@ def _run_crossmul_daemon(
     streams_per_gpu : int
         Number of internal CUDA execution lanes per GPU.
         Pass ``-1`` for auto-tune.
+    verbose: bool
+        Print more debug messages
 
     Returns
     -------
@@ -272,6 +390,16 @@ def _run_crossmul_daemon(
     import tempfile
 
     daemon_bin = get_bin_path("crossmul_daemon")
+
+    # -- Greedy DFS graph traversal: reorder tasks so that consecutive
+    #    entries share at least one image whenever possible, maximising
+    #    hits in the daemon's single-slot reference-image cache.
+    #
+    #    Each task is treated as an undirected edge between two image
+    #    nodes.  The traversal walks the graph depth-first, backtracking
+    #    when the current node has no remaining incident edges.
+    #    Original ref/sec column ordering is preserved.
+    task_items = _reorder_tasks_for_cache_locality(task_items)
 
     # -- Write tasks to a temporary file --
     #    Use delete=False because the daemon process reads the file
@@ -308,6 +436,8 @@ def _run_crossmul_daemon(
     ]
     if out_float:
         cmd.append("--out-float")
+    if verbose:
+        cmd.append("--verbose")
 
     logger.info("Starting crossmul_daemon: %s", " ".join(cmd))
     logger.info(
@@ -417,6 +547,7 @@ def interfere(
     gpu_workers: int = -1,
     streams_per_gpu: int = -1,
     max_slots: int = -1,
+    verbose: bool = False,
 ):
     """
     Form interferograms from a subswath list.
@@ -457,6 +588,8 @@ def interfere(
         Number of pre-allocated pinned-memory buffer slots in the
         daemon.  Set to ``-1`` (default) for automatic tuning from
         GPU count and streams-per-GPU.
+    verbose: bool
+        Print more debug information
     """
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
@@ -506,6 +639,11 @@ def interfere(
     n_ifg = len(burst_pair_map)
     if n_pair == 0:
         logger.warning("Did not find any burst pairs.")
+        if n_ifg > 0:
+            logger.info("All burst-pair interferograms already exist; nothing to do.")
+            for outfile in tqdm(burst_pair_map, desc="stitching"):
+                stitch(burst_pair_map[outfile], outfile, out_float)
+            logger.info("All interferograms are generated.")
         return
     logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
@@ -541,13 +679,6 @@ def interfere(
         task_items.append((ref_slc, sec_slc, out_ifg))
     del burst_pairs
 
-    if not task_items:
-        logger.info("All burst-pair interferograms already exist; nothing to do.")
-        for outfile in tqdm(burst_pair_map, desc="stitching"):
-            stitch(burst_pair_map[outfile], outfile, out_float)
-        logger.info("All interferograms are generated.")
-        return
-
     # -- Launch daemon --
     succeeded, failed = _run_crossmul_daemon(
         task_items,
@@ -559,6 +690,7 @@ def interfere(
         gpu_workers=gpu_workers,
         streams_per_gpu=streams_per_gpu,
         max_slots=max_slots,
+        verbose=verbose,
     )
 
     if failed > 0:
@@ -610,5 +742,6 @@ def run_interfere(
             pcfg.streams_per_gpu if pcfg.streams_per_gpu is not None else -1
         ),
         max_slots=pcfg.max_slots if pcfg.max_slots is not None else -1,
+        verbose=verbose,
     )
     return
