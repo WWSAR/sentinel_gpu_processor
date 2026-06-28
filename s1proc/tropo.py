@@ -5,57 +5,16 @@ import glob
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
 
 from s1proc import geocoordinates, sario
 from s1proc._config import TroposphericParams
 from s1proc._log import set_logging_level, setup_logger
-from s1proc.utils import IfgList, los, multilook_dem
+from s1proc.utils import IfgList, get_files, los, multilook_dem
 
 logger = setup_logger(name=__name__, level="INFO")
-
-
-def get_input_files(input_path: str) -> List[str]:
-    """
-    Get interferograms to be corrected
-
-    Parameters
-    ----------
-    input_path: str
-        Input path
-
-    Returns
-    -------
-    ifg_list: List[str]
-        A list of interferograms to prcoess
-    """
-    p = Path(input_path)
-    if p.is_file():
-        return [input_path]
-    elif p.is_dir():
-        int_list = glob.glob(os.path.join(input_path, "*.int"))
-        unw_list = glob.glob(os.paht.join(input_path, "*.unw"))
-        if len(int_list) > 0 and len(unw_list) > 0:
-            logger.warning(
-                "Find both wrapped and unwrapped interferograms"
-                + f" in the input directory {input_path}."
-            )
-        ifg_list = np.concatenate(int_list, unw_list)
-        if len(ifg_list) == 0:
-            logger.warning(
-                "Cannot find any interferogram from the input "
-                + f"directory {input_path}."
-            )
-    else:
-        ifg_list = glob.glob(input_path)
-        if len(ifg_list) == 0:
-            logger.warning(
-                "Cannot find any interferogram from the input "
-                + f"pattern {input_path}."
-            )
-    return ifg_list
 
 
 def read_orbit(orbfile: Path | str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -358,7 +317,7 @@ def tropo_preproc(
     # parse input data
     if ifg_path is None:
         ifg_path = icfg.ifg_path
-    raw_ifg_list = get_input_files(ifg_path)
+    raw_ifg_list = get_files(ifg_path, "int")
     ifg_list = IfgList(raw_ifg_list)
     date_list = ifg_list.get_date_list()
 
