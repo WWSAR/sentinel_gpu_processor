@@ -205,7 +205,7 @@ reproject(const short int *dem, const Complex *burstdata,
     rngpix = sqrt(dr[0] * dr[0] + dr[1] * dr[1] + dr[2] * dr[2]);
     rgoff = (rngpix - rngstart) / dmrg;
     azoff = (tline - tstart) / dtaz;
-    if (rgoff >= first_valid_sample && rgoff < last_valid_sample &&
+    if (rgoff > first_valid_sample && rgoff < last_valid_sample - 1 &&
         azoff >= first_valid_line + 5 && azoff < last_valid_line - 5) {
       double dt = rngpix * 2 / SOL - fmt0intp;
       double ka = fmc0intp + dt * (fmc1intp + fmc2intp * dt);
@@ -564,8 +564,6 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     deramp_burst<<<numBlocks, blockSize>>>(d_kt, d_eta, d_etaref, d_burstdata,
                                            nrange, burstsize);
     CHECK_CUDA(cudaDeviceSynchronize());
-    cudaMemcpy(burst, d_burstdata, sizeof(Complex) * burstsize,
-               cudaMemcpyDeviceToHost);
 
     // --- 8f. Compute burst geometry ---
     double latmin, latmax, lonmin, lonmax;
