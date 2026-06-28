@@ -12,7 +12,7 @@ import numpy as np
 from osgeo import gdal
 
 from s1proc import get_bin_path, sql_mod
-from s1proc._log import setup_logger
+from s1proc._log import set_logging_level, setup_logger
 from s1proc.geocoordinates import GeoCoordinates
 from s1proc.orbit import rah2ll
 from s1proc.precise_orbit import parse_orbit
@@ -175,6 +175,7 @@ def _stream_tiff_from_zip(
 
     Data is read and written one burst at a time to keep peak memory low.
     """
+    gdal.UseExceptions()
     vsizip_path = f"/vsizip/{zip_path.replace(os.sep, '/')}/{tiff_name}"
     ds = gdal.Open(vsizip_path)
     if ds is None:
@@ -210,15 +211,16 @@ def sentinel_scene(
     zip_file: str,
     demfile: str,
     rscfile: str,
-    orbfile: str | None = None,
+    eof_file: str | None = None,
     polarization: str = "vv",
     subswath_list: Sequence[int] = [1, 2, 3],
     proc_dir: str = "stack",
     slc_dir: str = "slc",
     rm_zipfile: bool = False,
     rm_folder: bool = False,
-    hmin=0,
-    hmax=1e4,
+    hmin: float = 0,
+    hmax: float = 1e4,
+    verbose: bool = False,
 ) -> List[str]:
     """
     Process one sentinel scene files to coregistered geocoded slc
@@ -231,7 +233,7 @@ def sentinel_scene(
         DEM file
     rscfile: str
         rsc file
-    orbfile: str|None
+    eof_file: str|None
         Precise orbit file. If none, coarse orbit will be used
     polarization: str
         Polarization(s) to process
@@ -249,14 +251,18 @@ def sentinel_scene(
         Minimum elevation of the study area
     hmax: int
         Maximum elevation of the study area
+    verbose: bool
+        Set logging level to DEBUG
 
     Returns
     -------
     slc_files: List[str]
         Output SLC list
     """
+    if verbose:
+        set_logging_level(logger, "DEBUG")
     logger.info(f"Processing: {zip_file} to a geocoded SLC")
-    logger.debug(f"input orbit file: {orbfile}")
+    logger.debug(f"input orbit file: {eof_file}")
 
     geo2rdr = get_bin_path("geo2rdr")
 
@@ -285,13 +291,10 @@ def sentinel_scene(
     #   3.  Create orbtiming file with orbit state vectors
     #   4.  Rename and save the ancillary files needed for deramping the slc
     #   5.  Stream TIFF data directly from zip into geo2rdr
-
-    if orbfile is not None:
+    precise_orbfname = os.path.join(proc_dir, f"{acq_date}.orbtiming")
+    if eof_file is not None:
         logger.debug("*** Using precise orbit ***")
-        parse_orbit(
-            orbfile.strip(), zip_file, os.path.join(proc_dir, f"{acq_date}.orbtiming")
-        )
-
+        parse_orbit(eof_file.strip(), zip_file, precise_orbfname)
     swathfiles = []
     xmlfiles = []
     with zipfile.ZipFile(zip_file, "r") as zf:
@@ -349,7 +352,12 @@ def sentinel_scene(
 
         # add ancillary data file names to database
         sql_mod.add_param(c, swathfile, "orbinfo")
-        sql_mod.edit_param(c, swathfile, "orbinfo", orbfname, "-", "char", "")
+        if eof_file is not None:
+            sql_mod.edit_param(
+                c, swathfile, "orbinfo", precise_orbfname, "-", "char", ""
+            )
+        else:
+            sql_mod.edit_param(c, swathfile, "orbinfo", orbfname, "-", "char", "")
         sql_mod.add_param(c, swathfile, "dcinfo")
         sql_mod.edit_param(c, swathfile, "dcinfo", dcfname, "-", "char", "")
         sql_mod.add_param(c, swathfile, "fmrateinfo")

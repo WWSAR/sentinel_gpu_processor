@@ -4,10 +4,6 @@ import os
 import re
 from datetime import datetime, timedelta
 
-from s1proc._log import setup_logger
-
-logger = setup_logger(name=__name__, level="INFO")
-
 
 def readxmlparam(xmllines, param):
     for line in xmllines:
@@ -52,7 +48,6 @@ def parse_orbit(orbfile, zipfile, outputfile):
     # expand start and stop times by 10 seconds
     start_time = sent["start_time"] - timedelta(seconds=10)
     stop_time = sent["stop_time"] + timedelta(seconds=10)
-    logger.debug(f"start time: {start_time}, stop time: {stop_time}")
 
     # read the precise orbit file
     xmlfile = open(orbfile, "r")
