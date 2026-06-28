@@ -365,6 +365,7 @@ def preprocess(config_file="config.yaml"):
     if cfg.proc.download_eof:
         from eof import download as eof_download
 
+        data_path = Path(cfg.io.data_path)
         eof_path = Path(cfg.io.eof_path)
         eof_path.mkdir(parents=True, exist_ok=True)
         eof_download.main(search_path=str(data_path), save_dir=str(eof_path))
