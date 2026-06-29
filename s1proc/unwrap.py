@@ -132,7 +132,7 @@ def apply_zero_mask(
 def unwrap_snaphu(
     snaphu_executable: Path | str,
     ifg_file: Path | str,
-    corr_file: Path | str,
+    corr_file: Path | str | None,
     outfile: Path | str,
     nrow: int,
     ncol: int,
@@ -206,6 +206,9 @@ def unwrap_snaphu(
     if tile_nproc > 1:
         cmd += ["--nproc", str(tile_nproc)]
 
+    if corr_file is not None:
+        cmd += ["-c", str(corr_file)]
+
     logger.debug(f"Executing: {ifg_file} -> {outfile}")
     logger.debug("Command: " + " ".join(cmd))
 
@@ -229,7 +232,6 @@ def unwrap_whirlwind(
     ifg_file: Path | str,
     corr_file: Path | str,
     outfile: Path | str,
-    nrow: int,
     ncol: int,
     only_save_phase: bool,
     conncomp: bool,
@@ -248,8 +250,6 @@ def unwrap_whirlwind(
         InSAR correlation file
     outfile: Path|str
         Unwrapped interferogram
-    nrow: int
-        Number of rows of the input interferogram
     ncol: int
         Number of columns of the input interferogram
     only_save_phase: bool
@@ -274,7 +274,7 @@ def unwrap_whirlwind(
     if only_save_phase:
         cmd += ["--out-format", "float"]
     if not conncomp:
-        cmd += ["--no-concomp"]
+        cmd += ["--no-conncomp"]
     if not bridge:
         cmd += ["--no-bridge"]
 
@@ -296,6 +296,7 @@ def unwrap_whirlwind(
 
 def batch_unwrap(
     ifg_path: str | None = None,
+    cc_path: str | None = None,
     unw_path: str | None = None,
     max_cpus: int | None = None,
     config: str = "config.yaml",
@@ -308,6 +309,8 @@ def batch_unwrap(
     ----------
     ifg_path: str | None
         Input interferogram path
+    cc_path: str | None
+        Correlation path
     unw_path: str | None
         Output unwrapped interferogram path
     max_cpus: int | None
@@ -340,13 +343,17 @@ def batch_unwrap(
         # Snaphu parameter setting
         if ucfg.parameters.rowtile is None:
             rowtile = int(np.maximum(np.floor(nrow / 1024), 1))
+        else:
+            rowtile = ucfg.parameters.rowtile
         if ucfg.parameters.coltile is None:
             coltile = int(np.maximum(np.floor(ncol / 1024), 1))
+        else:
+            coltile = ucfg.parameters.coltile
         ntile = rowtile * coltile
         if ucfg.parameters.tile_nproc is None:
             tile_nproc = np.min([ntile, max_cpus])
         else:
-            tile_nproc = np.min([ntile, max_cpus, tile_nproc])
+            tile_nproc = np.min([ntile, max_cpus, ucfg.parameters.tile_nproc])
         cores_per_task = tile_nproc
         unwrap_func = unwrap_snaphu
         logger.debug("Snaphu parameters")
@@ -361,6 +368,8 @@ def batch_unwrap(
 
     if ifg_path is None:
         ifg_path = os.path.join(icfg.ifg_path, "*.int")
+    if cc_path is None:
+        cc_path = icfg.ifg_path
     if unw_path is None:
         unw_path = icfg.unw_path
 
@@ -375,8 +384,8 @@ def batch_unwrap(
 
     task_items = []
     for ifg_file in ifg_files:
-        corr_file = ifg_file.replace(".int", ".cc")
-        outfile = os.path.join(unw_path, (Path(ifg_file).stem + ".unw"))
+        corr_file = os.path.join(cc_path, Path(ifg_file).stem + ".cc")
+        outfile = os.path.join(unw_path, Path(ifg_file).stem + ".unw")
         if os.path.exists(outfile):
             logger.info(f"Output target {outfile} already exists. Skipping.")
             continue
@@ -386,7 +395,6 @@ def batch_unwrap(
                 "ifg_file": ifg_file,
                 "corr_file": corr_file,
                 "outfile": outfile,
-                "nrow": nrow,
                 "ncol": ncol,
                 "only_save_phase": ucfg.parameters.only_save_phase,
                 "conncomp": ucfg.parameters.conncomp,
