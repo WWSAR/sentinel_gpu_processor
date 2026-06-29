@@ -4,6 +4,10 @@ if(UNIX)
     add_subdirectory(snaphu)
 endif()
 
+if(WIN32)
+    add_subdirectory(snaphu_win)
+endif()
+
 project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 11)
