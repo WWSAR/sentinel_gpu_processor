@@ -386,6 +386,9 @@ def batch_unwrap(
     for ifg_file in ifg_files:
         corr_file = os.path.join(cc_path, Path(ifg_file).stem + ".cc")
         outfile = os.path.join(unw_path, Path(ifg_file).stem + ".unw")
+        # avoid data writing error in SNAPHu
+        corr_file = Path(corr_file).as_posix()
+        outfile = Path(outfile).as_posix()
         if os.path.exists(outfile):
             logger.info(f"Output target {outfile} already exists. Skipping.")
             continue
