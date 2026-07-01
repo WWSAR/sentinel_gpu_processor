@@ -120,16 +120,19 @@ class UnwrapConfig:
 class TimeSeriesParams:
     ref_lon: float
     ref_lat: float
-    periods: list[list[str]]
     mad_scalar: Optional[float] = None
-    threshold_sigma: Optional[float] = None
-    check_points: bool = False
-    check_points_list: Optional[str] = None
+    seasonal_terms: int = 1
+    regularization: float = 1e-3
+    l1_rho: float = 0.4
+    l1_alpha: float = 1.0
+    l1_max_iter: int = 20
 
 
 @dataclass
 class TimeSeriesConfig:
-    method: Literal["stack", "sbas"] = "sbas"
+    method: Literal["stack", "sbas_linear", "sbas_seasonal", "sbas_ls", "sbas_l1"] = (
+        "stack"
+    )
     parameters: TimeSeriesParams = field(default_factory=TimeSeriesParams)
 
 
