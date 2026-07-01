@@ -36,6 +36,7 @@ class IoConfig:
     amp_path: str
     ifg_path: str
     unw_path: str
+    time_series_path: str
     dem_file: str
     rsc_file: str
     img_pair_file: str
@@ -44,6 +45,7 @@ class IoConfig:
     unw_corr_path: str
     multilook_dem_file: str
     multilook_rsc_file: str
+    mask_file: str
 
 
 @dataclass
@@ -118,6 +120,26 @@ class UnwrapConfig:
 
 
 @dataclass
+class TimeSeriesParams:
+    ref_lon: float
+    ref_lat: float
+    mad_scalar: Optional[float] = None
+    seasonal_terms: int = 1
+    regularization: float = 1e-3
+    l1_rho: float = 0.4
+    l1_alpha: float = 1.0
+    l1_max_iter: int = 20
+
+
+@dataclass
+class TimeSeriesConfig:
+    method: Literal["stack", "sbas_linear", "sbas_seasonal", "sbas_ls", "sbas_l1"] = (
+        "stack"
+    )
+    parameters: TimeSeriesParams = field(default_factory=TimeSeriesParams)
+
+
+@dataclass
 class S1Config:
     io: IoConfig = field(default_factory=IoConfig)
     proc: ProcessingConfig = field(default_factory=ProcessingConfig)
@@ -125,6 +147,7 @@ class S1Config:
     tropo: TroposphericConfig = field(default_factory=TroposphericConfig)
     detrend: DetrendingConfig = field(default_factory=DetrendingConfig)
     unwrap: UnwrapConfig = field(default_factory=UnwrapConfig)
+    timeseries: TimeSeriesConfig = field(default_factory=TimeSeriesConfig)
     area: AreaConfig = field(default_factory=AreaConfig)
     date: DateConfig = field(default_factory=DateConfig)
 

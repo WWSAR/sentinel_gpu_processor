@@ -7,14 +7,16 @@ io:
     ifg_path: igrams                      # raw wrapped interferograms
     amp_path: amp                         # multilooked amplitude 
     unw_path: unw                         # unwrapped interferograms
+    time_series_path: analysis            # time series results
     dem_file: elevation.dem               # DEM grid
     rsc_file: elevation.dem.rsc           # rsc description file
     img_pair_file: subswath_list          # list of interferograms to process
     geometry_path: geometry               # geometry-related files (los/inc)
     ifg_corr_path: ifg_corrected          # corrected wrapped interferograms
-    unw_corr_path: unw_corrected     # corrected unwrapped interferograms
+    unw_corr_path: unw_corrected          # corrected unwrapped interferograms
     multilook_dem_file: dem/multilook.dem # multilooked DEM
     multilook_rsc_file: dem/multilook.rsc # multilooked rsc file
+    mask_file: dem/mask.bin               # mask file (1: valid pixel, 0: invalid pixel)
 
 # SLC and interferogram generation parameters
 proc:
@@ -63,7 +65,7 @@ unwrap:
     method: "whirlwind" # select between [whirlwind (recommended) and snaphu]
     parameters:
         only_save_phase: true
-        # whirldinw parameters
+        # whirlwind parameters
         conncomp: false
         bridge: false
         # snaphu parameters
@@ -73,6 +75,29 @@ unwrap:
         rowoverlap: 200
         coloverlap: 200
         tile_nproc: null
+
+# Time series
+# method: "stack" (velocity stacking), "sbas_linear" (SBAS constant velocity),
+#         "sbas_seasonal" (SBAS with periodic terms), "sbas_ls" (SBAS L2 least-squares),
+#         "sbas_l1" (SBAS L1-norm inversion via ADMM)
+timeseries:
+    method: "sbas_l1"
+    parameters:
+        ref_lon:
+        ref_lat:
+        # mad_scalar: threshold for median absolute deviation outlier removal (default null = disabled)
+        mad_scalar: 4
+        # seasonal_terms: number of seasonal harmonics (1=annual, 2=annual+semi-annual)
+        seasonal_terms: 1
+        # regularization: Tikhonov regularization factor for least-squares inversion
+        regularization: 0.001
+        # L1-ADMM parameters (for method="sbas_l1" only)
+        # l1_rho: augmented Lagrangian parameter (default 0.4)
+        l1_rho: 0.4
+        # l1_alpha: over-relaxation parameter, typically 1.0-1.8
+        l1_alpha: 1.0
+        # l1_max_iter: number of ADMM iterations
+        l1_max_iter: 20
 
 # date and study area
 date:
