@@ -13,9 +13,10 @@ io:
     img_pair_file: subswath_list          # list of interferograms to process
     geometry_path: geometry               # geometry-related files (los/inc)
     ifg_corr_path: ifg_corrected          # corrected wrapped interferograms
-    unw_corr_path: unw_corrected     # corrected unwrapped interferograms
+    unw_corr_path: unw_corrected          # corrected unwrapped interferograms
     multilook_dem_file: dem/multilook.dem # multilooked DEM
     multilook_rsc_file: dem/multilook.rsc # multilooked rsc file
+    mask_file: dem/mask.bin               # mask file (1: valid pixel, 0: invalid pixel)
 
 # SLC and interferogram generation parameters
 proc:
@@ -60,7 +61,7 @@ unwrap:
     method: "whirlwind" # select between [whirlwind (recommended) and snaphu]
     parameters:
         only_save_phase: true
-        # whirldinw parameters
+        # whirlwind parameters
         conncomp: false
         bridge: false
         # snaphu parameters
@@ -75,10 +76,10 @@ unwrap:
 timeseries:
     method: "stack"
     parameters:
-        ref_lon: -103.141
-        ref_lat: -31.811
-        # optional, default value = 1.483, 4.0
-        mad_scale:
+        ref_lon:
+        ref_lat:
+        # optional, default value = 4.0
+        mad_scalar: 4
         threshold_sigma:
         periods:
             - ["20141101", "20170131"]

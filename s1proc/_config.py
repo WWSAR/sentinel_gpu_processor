@@ -45,6 +45,7 @@ class IoConfig:
     unw_corr_path: str
     multilook_dem_file: str
     multilook_rsc_file: str
+    mask_file: str
 
 
 @dataclass
@@ -120,7 +121,7 @@ class TimeSeriesParams:
     ref_lon: float
     ref_lat: float
     periods: list[list[str]]
-    mad_scale: Optional[float] = None
+    mad_scalar: Optional[float] = None
     threshold_sigma: Optional[float] = None
     check_points: bool = False
     check_points_list: Optional[str] = None

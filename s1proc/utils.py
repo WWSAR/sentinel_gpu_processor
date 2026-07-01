@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
-from numpy.typing import DTypeLike
+from numpy.typing import DTypeLike, NDArray
 from tqdm import tqdm
 
 from s1proc import geocoordinates, geometry, orbit, sario
@@ -667,13 +667,103 @@ class IfgList:
             {"date1": ref_date, "date2": sec_date, "tempbl": tempbl, "image": imglist}
         )
         self.df = df
+        self.dates = self.get_date_list()
+        self.nifg = len(self.df)
+        self.ndate = len(self.dates)
+        self.datedict = dict(zip(self.dates, np.arange(self.ndate)))
 
-    def get_date_list(self):
+    def get_date_list(self) -> List[str]:
         date_list1 = self.df["date1"].tolist()
         date_list2 = self.df["date2"].tolist()
         date_list = np.concatenate((date_list1, date_list2))
         date_list = np.sort(np.unique(date_list))
         return date_list
+
+    def date2days(self) -> NDArray[np.float32]:
+        """
+        Compute the time difference between each acquisition dates and the first
+        acquisition date
+
+        Returns
+        -------
+        days: NDArray[np.float32]
+            Days to the first date
+        """
+        _dates = [datetime.strptime(s, "%Y%m%d") for s in self.dates]
+        days = np.array([(d - _dates[0]).days for d in _dates])
+        return days
+
+    def date_interval(self, drop_first_date: bool = False) -> NDArray[np.float32]:
+        """
+        Compute the time difference (in days) between consecutive acquisition dates
+
+        Parameters
+        ----------
+        drop_first_date: bool
+            Drop te first element. The length of the returned array will be ndate - 1
+            instead of ndate.
+
+        Returns
+        -------
+        time_interval: NDArray[np.float32]
+            Time difference (in days) between consecutive acquistion dates
+        """
+        days = self.date2days()
+        if drop_first_date:
+            return np.diff(days)
+        else:
+            return np.concatenate((np.array([0]), np.diff(days)))
+
+    def diff_displacement_matrix(
+        self, drop_first_column: bool = False
+    ) -> NDArray[np.float32]:
+        """
+        Generate a matrix representing the differential operator of displacement, namely
+        the matrix A in the SBAS paper.
+
+        Parameters
+        ----------
+        drop_first_column: bool
+            Drop the first column of the A matrix, assuming the displacement on the
+            first date is zero. The shape of the returned matrix A will be
+            (nifg x ndate - 1), with nifg being the number of interferograms, ndate the
+            number of unique SAR acqusitions. Ohterwise, the shape of the returned
+            matrix will be (nifg x ndate).
+
+        Returns
+        -------
+        A: NDArray[np.float32]
+            The differentiation matrix A
+        """
+        A = np.zeros((self.nifg, self.ndate), dtype=np.float32)
+        for i, row in self.df.iterrows():
+            date1 = row["date1"]
+            date2 = row["date2"]
+            A[i, self.datedict[date1]] = -1
+            A[i, self.datedict[date2]] = 1
+        if drop_first_column:
+            A = A[1:, :]
+        return A
+
+    def int_velocity_matrix(self) -> NDArray[np.float32]:
+        """
+        Generate a matrix representing the integration operator of velocity, namely
+        the matrix B in the SBAS paper.
+
+        Returns
+        -------
+        B: NDArray[np.float32]
+            The integration matrix B
+        """
+        B = np.zeros((self.nifg, self.ndate - 1), dtype=np.float32)
+        days = self.date_interval(drop_first_date=True)
+        for i, row in self.df.iterrows():
+            date1 = row["date1"]
+            date2 = row["date2"]
+            idx1 = self.datedict[date1]
+            idx2 = self.datedict[date2]
+            B[i, idx1:idx2] = days[idx1:idx2]
+        return B
 
 
 def _detect_gpu_count() -> int:
