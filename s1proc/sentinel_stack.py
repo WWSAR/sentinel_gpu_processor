@@ -7,7 +7,7 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-from s1proc._log import setup_logger
+from s1proc._log import set_logging_level, setup_logger
 from s1proc.sario import sentinel_acq_time
 from s1proc.sentinel_scene import sentinel_scene
 
@@ -35,13 +35,14 @@ def parse_orbitfilename(orbitfilelist):
     start_date = []
     end_date = []
     for orbitfile in orbitfilelist:
-        words = orbitfile.split("_")
+        basename = os.path.basename(orbitfile)
+        words = basename.split("_")
         s1 = words[-2]
-        start_date_str = s1[1:9]
+        start_date_str = s1[1:16]
         s2 = words[-1]
-        end_date_str = s2[0:8]
-        start_date.append(datetime.strptime(start_date_str, "%Y%m%d"))
-        end_date.append(datetime.strptime(end_date_str, "%Y%m%d"))
+        end_date_str = s2[0:15]
+        start_date.append(datetime.strptime(start_date_str, "%Y%m%dT%H%M%S"))
+        end_date.append(datetime.strptime(end_date_str, "%Y%m%dT%H%M%S"))
     return start_date, end_date
 
 
@@ -58,6 +59,7 @@ def stack(
     rm_folder: bool = False,
     reprocess: bool = False,
     zip_list: Sequence[str] | None = None,
+    verbose: bool = False,
 ):
     """
     Process a stack of sentinel products to coregistered geocoded SLCS
@@ -88,7 +90,11 @@ def stack(
         Reprocess the geo file if it already exists
     zip_list: Sequence[str]
         List of zip files to process
+    verbose: bool
+        Set logging level to DEBUG
     """
+    if verbose:
+        set_logging_level(logger, "DEBUG")
 
     # get list of geotiff products
     zips = sorted(glob.glob(os.path.join(data_dir, "*.zip")))
@@ -140,6 +146,7 @@ def stack(
             rm_folder,
             hmin,
             hmax,
+            verbose=verbose,
         )
         mark_processed(zip_file, proc_dir, slc_files)
     logger.info("Loop over scenes complete.")
@@ -153,6 +160,7 @@ def run_stack(
     reprocess: bool = False,
     zip_list: Sequence[str] | None = None,
     config: str = "config.yaml",
+    verbose: bool = False,
 ):
     """
     Process a stack of sentinel products to coregistered geocoded SLCS
@@ -173,6 +181,8 @@ def run_stack(
         List of zip files to process
     config: Path|str
         Configuration file
+    verbose: bool
+        Set logging level to DEBUG
     """
     from s1proc._config import load_config
 
@@ -191,5 +201,6 @@ def run_stack(
         rm_folder=rm_folder,
         reprocess=reprocess,
         zip_list=zip_list,
+        verbose=verbose,
     )
     return

@@ -272,6 +272,7 @@ def download_metalink(
         "16",
         "--console-log-level",
         "error",
+        "--auto-file-renaming=false",
         "--check-integrity=true",
     ]
     if continue_on_error:

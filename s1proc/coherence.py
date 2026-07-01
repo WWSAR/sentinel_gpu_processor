@@ -140,6 +140,8 @@ def coherence(
             amp1 = np.fromfile(os.path.join(amp_dir, f"{date1}.amp"), dtype=np.float32)
         amp2 = np.fromfile(os.path.join(amp_dir, f"{date2}.amp"), dtype=np.float32)
         c = np.abs(ifg) / (amp1 + 1e-12) / (amp2 + 1e-12)
+        invalid_mask = c > 1
+        c[invalid_mask] = np.random.rand(np.sum(invalid_mask))
         c = amp1 * amp2 + 1j * c
         c = np.reshape(c, (nrow, ncol))
         savec(c, out_file)

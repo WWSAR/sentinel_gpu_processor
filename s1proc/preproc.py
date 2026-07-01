@@ -298,38 +298,50 @@ def preprocess(config_file="config.yaml"):
         # Filter GeoJSON by frame list
         geojson_file = root_dir / "roi.geojson"
         if not geojson_file.is_file():
-            raise FileNotFoundError(f"Cannot find {geojson_file}")
-
-        with open(geojson_file, "r", encoding="utf-8") as f:
-            s1_data = json.load(f)
-
-        if frame_list is None or len(frame_list) == 0:
-            logger.warning(
-                "frame list is empty or not set, frame filter " + "will not be applied"
-            )
+            logger.warning(f"Cannot find {geojson_file}")
         else:
-            s1_data = _filter_by_frame(s1_data, frame_list)
-        metalink_file = root_dir / "roi.metalink"
-        _geojson_to_metalink(s1_data, metalink_file)
-        logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
+            from ruamel.yaml import YAML
 
-        # Compute study area bounds
-        frames_bbox = _compute_frames_bbox(s1_data["features"])
-        if frames_bbox is None:
-            raise RuntimeError(
-                "No frame footprints found — cannot determine study area"
-            )
+            yaml = YAML()
+            yaml.default_flow_style = False
+            yaml.sort_keys = False
+            yaml.indent(mapping=4, sequence=4, offset=2)
+            with open(geojson_file, "r", encoding="utf-8") as f:
+                s1_data = json.load(f)
 
-        logger.info("Frames bounding box: %s", frames_bbox)
+            if frame_list is None or len(frame_list) == 0:
+                logger.warning(
+                    "frame list is empty or not set, frame filter will not be applied"
+                )
+            else:
+                s1_data = _filter_by_frame(s1_data, frame_list)
+            metalink_file = root_dir / "roi.metalink"
+            _geojson_to_metalink(s1_data, metalink_file)
+            logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
 
-        bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
-        study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
-        if study_bbox is None:
-            raise RuntimeError(
-                f"Frame footprints {frames_bbox} do not overlap with area.bbox "
-                + f" {bbox_tuple}"
-            )
-        logger.info("Study area (intersection): %s", study_bbox)
+            # Compute study area bounds
+            frames_bbox = _compute_frames_bbox(s1_data["features"])
+            if frames_bbox is None:
+                raise RuntimeError(
+                    "No frame footprints found — cannot determine study area"
+                )
+
+            logger.info("Frames bounding box: %s", frames_bbox)
+
+            bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
+            study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
+            if study_bbox is None:
+                raise RuntimeError(
+                    f"Frame footprints {frames_bbox} do not overlap with area.bbox "
+                    + f" {bbox_tuple}"
+                )
+            logger.info("Study area (intersection): %s", study_bbox)
+            bbox = study_bbox
+            with open(config_file, "r") as f:
+                cfg_dict = yaml.load(f)
+                cfg_dict["area"]["bbox"] = list(bbox)
+            with open(config_file, "w") as f:
+                yaml.dump(cfg_dict, f)
 
         # Download COP DEM
         # check if cop_global.vrt is cahced
@@ -365,6 +377,7 @@ def preprocess(config_file="config.yaml"):
     if cfg.proc.download_eof:
         from eof import download as eof_download
 
+        data_path = Path(cfg.io.data_path)
         eof_path = Path(cfg.io.eof_path)
         eof_path.mkdir(parents=True, exist_ok=True)
         eof_download.main(search_path=str(data_path), save_dir=str(eof_path))

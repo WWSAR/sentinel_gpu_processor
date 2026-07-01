@@ -4,6 +4,10 @@ if(UNIX)
     add_subdirectory(snaphu)
 endif()
 
+if(WIN32)
+    add_subdirectory(snaphu_win)
+endif()
+
 project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 11)
@@ -64,6 +68,7 @@ endif()
 add_executable(geo2rdr src/geo2rdr.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu src/bounds.cu)
 add_executable(crossmul src/crossmul.cu src/sario.cu)
+add_executable(crossmul_daemon src/crossmul_daemon.cu src/sario.cu)
 add_executable(phase_similarity src/phase_similarity.cu)
 add_executable(goldstein src/goldstein.cu)
 
@@ -72,6 +77,7 @@ set_target_properties(geo2rdr PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
 # Add include directories for all targets
 target_include_directories(geo2rdr PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
+target_include_directories(crossmul_daemon PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIRS})
 
@@ -80,7 +86,7 @@ target_link_libraries(geo2rdr SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS geo2rdr crossmul phase_similarity goldstein
+install(TARGETS geo2rdr crossmul crossmul_daemon phase_similarity goldstein
         RUNTIME DESTINATION bin
 )
 #install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein

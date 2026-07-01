@@ -39,14 +39,13 @@ s1proc = ["bin/*", "*.so", "*.pyd", "*.dll"]
 s1proc = "s1proc.cli:main"
 
 [tool.ruff]
-# 每行的最大长度
 line-length = 88
 target-version = "py310"
 
 [tool.ruff.lint]
-# 激活默认的检查规则（E: 错误, F: 规则, I: 导入顺序）
 select = ["E", "F", "I"]
 
 [tool.ruff.format]
-# 强制使用双引号（类似 Black 风格）
+# add blank spaces on both sides of =
+preview = true
 quote-style = "double"

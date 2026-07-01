@@ -1,7 +1,7 @@
 import glob
 import os
 import subprocess
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -42,7 +42,6 @@ def match_bursts(
         idx_diff = np.abs(sec_tops - ref_top) + np.abs(sec_bottoms - ref_bottom)
         best_match = np.argmin(idx_diff)
         burst_pairs.append((ref_burst.data, sec_subswath.bursts[best_match].data))
-        logger.debug(burst_pairs[-1])
     return burst_pairs
 
 
@@ -219,48 +218,319 @@ def parse_fname(fn: str) -> Tuple[str, str]:
     return date, data_id
 
 
-def crossmul_wrapper(
-    burst_pair_file: str,
-    rowlook: int,
-    collook: int,
-    out_float: bool,
-    gpu_device: int | None = None,
-) -> str:
+def _reorder_tasks_for_cache_locality(
+    task_items: List[Tuple[str, str, str]],
+) -> List[Tuple[str, str, str]]:
     """
-    Python wrapper for the CUDA-version crossmul
+    Reorder ``(ref_slc, sec_slc, out_ifg)`` triples so that
+    consecutive entries share an image whenever possible, maximising
+    hits in the daemon's single-slot host-memory cache.
+
+    Each task is an undirected edge between two image nodes.  The
+    algorithm repeatedly drains all remaining tasks that touch the
+    current cached image, then uses the *other* image of the last
+    drained task as the next cache key.  Original ref/sec column
+    ordering is never swapped.
 
     Parameters
     ----------
-    burst_pair_file: str
-        The file containing pairs of bursts to form burst-level
-        burst-level interferograms
-    rowlook: int
-        Number of looks along the row direction
-    collook: int
-        Number of looks along the column direction
-    out_float: bool
-        Only save the interferometric phase (ignoring amplitude)
-    gpu_device: int | None  = None
-        GPU device to run crossmul. If None, let the system to decide
-        which GPU to use
+    task_items : List[Tuple[str, str, str]]
+        Unsorted task triples.
 
     Returns
     -------
-    result_identifier: str
-        A message to be shown by the GPU task scheduler
+    List[Tuple[str, str, str]]
+        Reordered triples with original ref/sec columns intact.
     """
-    crossmul = get_bin_path("crossmul")
+    from collections import defaultdict
+
+    n = len(task_items)
+    if n <= 1:
+        return list(task_items)
+
+    # -- Image → set of still-unconsumed task indices --
+    img_to_indices: dict[str, set[int]] = defaultdict(set)
+    for i, (ref_slc, sec_slc, _out) in enumerate(task_items):
+        img_to_indices[ref_slc].add(i)
+        img_to_indices[sec_slc].add(i)
+
+    remaining: set[int] = set(range(n))
+    sorted_tasks: list[tuple[str, str, str]] = []
+
+    # pick the first remaining index as the next seed
+    def _pop_first_remaining() -> int:
+        idx = min(remaining)
+        remaining.discard(idx)
+        return idx
+
+    # remove a task index from the adjacency index entirely
+    def _remove_index(idx: int) -> None:
+        r, s, _ = task_items[idx]
+        img_to_indices[r].discard(idx)
+        img_to_indices[s].discard(idx)
+
+    # ---- Bootstrap ----
+    seed = _pop_first_remaining()
+    _remove_index(seed)
+    sorted_tasks.append(task_items[seed])
+    cached = task_items[seed][0]  # reference image of the seed task
+
+    cold_starts = 0
+
+    while remaining:
+        # -- Collect every remaining task that touches *cached* --
+        batch: list[int] = []
+        for idx in list(img_to_indices.get(cached, ())):
+            if idx in remaining:
+                batch.append(idx)
+
+        if batch:
+            # Move the entire batch into sorted_tasks.
+            # The daemon processes them sequentially; each task is
+            # served from cache because its ref or sec matches
+            # *cached*.
+            for idx in batch:
+                remaining.discard(idx)
+                _remove_index(idx)
+                sorted_tasks.append(task_items[idx])
+
+            # Use the *other* image of the last task in the batch
+            # as the new cache key for the next iteration.
+            last_r, last_s, _ = sorted_tasks[-1]
+            cached = last_s if last_r == cached else last_r
+        else:
+            # Dead end — no remaining task touches *cached*.
+            # Pick the first remaining task as a cold-start seed.
+            cold_starts += 1
+            idx = _pop_first_remaining()
+            _remove_index(idx)
+            sorted_tasks.append(task_items[idx])
+            cached = task_items[idx][0]
+
+    # -- Log statistics --
+    # Count how many times the ref column changes across the sequence
+    # (this equals the number of reference-image cache loads).
+    predicted_loads = 1  # first task always triggers a load
+    prev_ref: Optional[str] = None
+    for t in sorted_tasks:
+        if t[0] != prev_ref:
+            predicted_loads += 1
+            prev_ref = t[0]
+
+    logger.info(
+        "I/O Cache reordering: %d tasks, %d predicted cache loads "
+        "(optimal clustering: %.0f%% reuse).",
+        n,
+        predicted_loads,
+        (1.0 - predicted_loads / max(n, 1)) * 100,
+    )
+    if cold_starts > 0:
+        logger.info(
+            "  Cold-start cluster jumps: %d (no task in the remaining "
+            "pool touched the current cached image).",
+            cold_starts,
+        )
+
+    return sorted_tasks
+
+
+def _run_crossmul_daemon(
+    task_items: List[Tuple[str, str, str]],
+    rowlook: int,
+    collook: int,
+    out_float: bool,
+    io_workers: int,
+    cpu_workers: int,
+    gpu_workers: int,
+    streams_per_gpu: int,
+    max_slots: int,
+    verbose: bool,
+) -> Tuple[int, int]:
+    """
+    Launch the ``crossmul_daemon`` long-running GPU processor.
+
+    Burst-pair paths are written to a temporary file and passed to the
+    daemon via ``--tasks-file``.  Progress and completion status are
+    read from daemon **stdout** line-by-line.
+
+    Parameters
+    ----------
+    task_items : List[Tuple[str, str, str]]
+        (ref_slc, sec_slc, out_ifg) triples.
+    rowlook : int
+        Row multi-looking factor.
+    collook : int
+        Column multi-looking factor.
+    out_float : bool
+        Write phase-only (float) output.
+    io_workers: int
+        Number of threads to read SLC data.  Pass ``-1`` for auto-tune.
+    cpu_workers : int
+        Number of CPU crop worker threads inside the daemon.
+        Pass ``-1`` for auto-tune.
+    gpu_workers : int
+        Number of GPU devices to use inside the daemon.
+        Pass ``-1`` for auto-detect.
+    max_slots : int
+        Number of pre-allocated pinned-memory buffer slots.
+        Pass ``-1`` for auto-tune.
+    streams_per_gpu : int
+        Number of internal CUDA execution lanes per GPU.
+        Pass ``-1`` for auto-tune.
+    verbose: bool
+        Print more debug messages
+
+    Returns
+    -------
+    succeeded : int
+        Number of burst pairs that completed successfully.
+    failed : int
+        Number of burst pairs that failed.
+    """
+    import tempfile
+
+    daemon_bin = get_bin_path("crossmul_daemon")
+
+    # -- Greedy DFS graph traversal: reorder tasks so that consecutive
+    #    entries share at least one image whenever possible, maximising
+    #    hits in the daemon's single-slot reference-image cache.
+    #
+    #    Each task is treated as an undirected edge between two image
+    #    nodes.  The traversal walks the graph depth-first, backtracking
+    #    when the current node has no remaining incident edges.
+    #    Original ref/sec column ordering is preserved.
+    task_items = _reorder_tasks_for_cache_locality(task_items)
+
+    # -- Write tasks to a temporary file --
+    #    Use delete=False because the daemon process reads the file
+    #    independently.  The file is cleaned up after the subprocess exits.
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".txt",
+        prefix="crossmul_tasks_",
+        delete=False,
+    )
+    tasks_path = tmp.name
+    for ref_slc, sec_slc, out_ifg in task_items:
+        tmp.write(f"{ref_slc} {sec_slc} {out_ifg}\n")
+    tmp.close()
+
     cmd = [
-        crossmul,
-        burst_pair_file,
+        daemon_bin,
+        "--rowlook",
         str(rowlook),
+        "--collook",
         str(collook),
-        "1" if out_float else "0",
+        "--io-workers",
+        str(io_workers),
+        "--cpu-workers",
+        str(cpu_workers),
+        "--gpu-workers",
+        str(gpu_workers),
+        "--streams-per-gpu",
+        str(streams_per_gpu),
+        "--max-slots",
+        str(max_slots),
+        "--tasks-file",
+        tasks_path,
     ]
-    if gpu_device is not None:
-        cmd += ["--gpu", str(gpu_device)]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
-    return f"Interferogram generation for {burst_pair_file}"
+    if out_float:
+        cmd.append("--out-float")
+    if verbose:
+        cmd.append("--verbose")
+
+    logger.info("Starting crossmul_daemon: %s", " ".join(cmd))
+    logger.info(
+        "Tasks file: %s (%d tasks, max_slots=%d, io_workers=%d, "
+        + "cpu_workers=%d, gpus_workers=%d, streams_per_gpu=%d).",
+        tasks_path,
+        len(task_items),
+        max_slots,
+        io_workers,
+        cpu_workers,
+        gpu_workers,
+        streams_per_gpu,
+    )
+
+    with open("crossmul_daemon_stderr.log", "w", encoding="utf-8") as f_err:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=f_err,
+            encoding="utf-8",
+            errors="ignore",
+            text=True,
+            bufsize=1,
+        )
+
+        # -- Read daemon stdout (progress / completion lines) --
+        succeeded = 0
+        failed = 0
+        total = len(task_items)
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("OK "):
+                succeeded += 1
+                logger.debug("[daemon] %s", line)
+            elif line.startswith("FAIL "):
+                failed += 1
+                logger.error("[daemon] %s", line)
+            elif line.startswith("PROGRESS "):
+                parts = line.split()
+                if len(parts) >= 5:
+                    done = int(parts[1])
+                    _failed = int(parts[2])
+                    _total = int(parts[3])
+                    elapsed_s = int(parts[4])
+                    rate = done / max(elapsed_s, 1)
+                    logger.info(
+                        "Daemon progress: %d/%d done, %d failed, "
+                        "elapsed %d s (%.1f pairs/s)",
+                        done,
+                        _total,
+                        _failed,
+                        elapsed_s,
+                        rate,
+                    )
+            elif line.startswith("SUMMARY "):
+                parts = line.split()
+                if len(parts) >= 5:
+                    succeeded = int(parts[1])
+                    failed = int(parts[2])
+                    elapsed_s = int(parts[4])
+                    rate = total / max(elapsed_s, 1)
+                    logger.info(
+                        "Daemon summary: %d succeeded, %d failed, "
+                        "total %d tasks in %d s (%.1f pairs/s)",
+                        succeeded,
+                        failed,
+                        total,
+                        elapsed_s,
+                        rate,
+                    )
+
+        retcode = proc.wait()
+
+    if retcode != 0 or failed > 0:
+        logger.error(
+            "Daemon exited with errors. Check "
+            + "crossmul_daemon_stderr.log for details."
+        )
+
+    # -- Clean up the temporary tasks file --
+    try:
+        os.unlink(tasks_path)
+    except OSError:
+        pass
+
+    if retcode != 0:
+        logger.warning("crossmul_daemon exited with code %d.", retcode)
+
+    return succeeded, failed
 
 
 def interfere(
@@ -272,38 +542,55 @@ def interfere(
     rowlook: int = 1,
     collook: int = 1,
     out_float: bool = False,
-    ngpu: int | None = None,
-    task_per_gpu: int = 1,
+    io_workers: int = -1,
+    cpu_workers: int = -1,
+    gpu_workers: int = -1,
+    streams_per_gpu: int = -1,
+    max_slots: int = -1,
+    verbose: bool = False,
 ):
     """
-    Form interferograms from a subswath list
+    Form interferograms from a subswath list.
 
     Parameters
     ----------
-    img_pair_file: str
-        File containing pairs of dates to form interferogram
-    slc_path: str
-        Directory of SLC files
-    rscfile: str
-        rsc file
-    small_rsc_file: str
-        Multilooked rsc file
-    ifg_path: str
-        Directory to save interferograms
-    rowlook: int
-        Number of look in row direction
-    collook: int
-        Number of look in column direction
-    out_float: bool
-        Output float rather than cpx images
-    ngpu: int
-        Number of GPUs used for interferogram generation. If None, set to
-        the total number of GPUs on current machine
-    task_per_gpu: int
-        Number of tasks running on each GPU in parallel
+    img_pair_file : str
+        File containing pairs of dates to form interferogram.
+    slc_path : str
+        Directory of SLC files.
+    rscfile : str
+        rsc file.
+    small_rsc_file : str
+        Multilooked rsc file.
+    ifg_path : str
+        Directory to save interferograms.
+    rowlook : int
+        Number of looks in row direction.
+    collook : int
+        Number of looks in column direction.
+    out_float : bool
+        Output float rather than cpx images.
+    io_workers : int
+        Number of threads used for concurrent image reading.
+        Set to ``-1`` (default) to let the daemon auto-tune this value
+        based on available hardware and task dimensions.
+    cpu_workers : int
+        Number of CPU threads for burst cropping (Stage 2).
+        Set to ``-1`` (default) for hardware-aware automatic tuning.
+    gpu_workers : int
+        Number of GPUs to use for interferogram generation.
+        Set to ``-1`` (default) for automatic detection via CUDA.
+    streams_per_gpu : int
+        Number of internal CUDA execution lanes per GPU in the daemon.
+        Set to ``-1`` (default) for automatic tuning based on VRAM
+        headroom and burst-pair dimensions.
+    max_slots : int
+        Number of pre-allocated pinned-memory buffer slots in the
+        daemon.  Set to ``-1`` (default) for automatic tuning from
+        GPU count and streams-per-GPU.
+    verbose: bool
+        Print more debug information
     """
-    from s1proc.utils import GpuTaskScheduler, _detect_gpu_count
-
     os.makedirs(ifg_path, exist_ok=True)
     rsc = geocoordinates.GeoCoordinates(rscfile)
     rsclook = rsc.take_look(rowlook, collook)
@@ -343,65 +630,75 @@ def interfere(
             ref_burst_group, sec_burst_group, ifg_path
         )
         burst_pair_map[outfile] = [b[2] for b in _burst_pairs]
-        # skip a set of bursts if all their associated interferograms already
-        # exist
+        # skip a set of bursts if all their associated interferograms
+        # already exist
         if not all([os.path.exists(b[2]) for b in _burst_pairs]):
             burst_pairs.extend(_burst_pairs)
 
-    # Deduce appropriate parameters for GpuTaskScheduler
     n_pair = len(burst_pairs)
     n_ifg = len(burst_pair_map)
     if n_pair == 0:
         logger.warning("Did not find any burst pairs.")
+        if n_ifg > 0:
+            logger.info("All burst-pair interferograms already exist; nothing to do.")
+            for outfile in tqdm(burst_pair_map, desc="stitching"):
+                stitch(burst_pair_map[outfile], outfile, out_float)
+            logger.info("All interferograms are generated.")
         return
-    logger.info(f"Find {n_pair} burst pairs in {n_ifg} interferograms.")
+    logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
-    # Run crossmul to form interferograsm
-    max_ngpu = _detect_gpu_count()
-    if ngpu is None:
-        ngpu = max_ngpu
-    elif ngpu > max_ngpu:
-        logger.warning(
-            f"User-specified number of GPUs ({ngpu}) exceeds the number of "
-            + f"available GPUs on this machine ({max_ngpu})."
+    # -- Validate all-or-nothing tuning parameter contract --
+    tuning_params = {
+        "io_workers": io_workers,
+        "cpu_workers": cpu_workers,
+        "gpu_workers": gpu_workers,
+        "streams_per_gpu": streams_per_gpu,
+        "max_slots": max_slots,
+    }
+    auto_tune = all(v == -1 for v in tuning_params.values())
+    manual = all(isinstance(v, int) and v > 0 for v in tuning_params.values())
+
+    if not (auto_tune or manual):
+        import sys
+
+        print(
+            "[FATAL] Invalid parameter configuration. Please either omit all "
+            "tuning arguments for hardware-managed auto-tuning, or provide the "
+            "complete set of parameters (--io-workers, --cpu-workers, "
+            "--streams-per-gpu, --gpu-workers, --max-slots). "
+            "Partial overrides are not allowed.",
+            file=sys.stderr,
         )
-        ngpu = max_ngpu
-    if task_per_gpu is None:
-        task_per_gpu = 1
-    if task_per_gpu <= 0:
-        raise ValueError("task_per_gpu must be positive.")
+        raise SystemExit(1)
 
-    n_sublist = ngpu * task_per_gpu
-    n_sublist = np.minimum(n_sublist, n_pair)
-    logger.info(f"Divide burst pairs into {n_sublist} groups.")
-    n_pair_per_sublist = int(np.ceil(n_pair / n_sublist))
-    logger.info(f"Each group contains {n_pair_per_sublist} to process")
-    task_items = []
-    for i in range(n_sublist):
-        burst_pair_file = os.path.join(ifg_path, f"burst_pair_list_{i}.txt")
-        with open(burst_pair_file, "w") as f:
-            start_idx = n_pair_per_sublist * i
-            end_idx = int(np.minimum(n_pair_per_sublist * (i + 1), n_pair))
-            for i in range(start_idx, end_idx - 1):
-                f.write(" ".join(burst_pairs[i]) + "\n")
-            f.write(" ".join(burst_pairs[end_idx - 1]))
-        task_item = {
-            "burst_pair_file": burst_pair_file,
-            "rowlook": rowlook,
-            "collook": collook,
-            "out_float": out_float,
-        }
-        task_items.append(task_item)
+    # -- Filter out already-completed burst pairs --
+    task_items: List[Tuple[str, str, str]] = []
+    for ref_slc, sec_slc, out_ifg in burst_pairs:
+        if os.path.exists(out_ifg):
+            continue
+        task_items.append((ref_slc, sec_slc, out_ifg))
     del burst_pairs
 
-    gpu_task_scheduler = GpuTaskScheduler(ngpu)
-    gpu_task_scheduler.execute_parallel_tasks(
-        crossmul_wrapper,
-        task_items=task_items,
-        task_per_gpu=task_per_gpu,
-        identifier="burst_pair_file",
+    # -- Launch daemon --
+    succeeded, failed = _run_crossmul_daemon(
+        task_items,
+        rowlook=rowlook,
+        collook=collook,
+        out_float=out_float,
+        io_workers=io_workers,
+        cpu_workers=cpu_workers,
+        gpu_workers=gpu_workers,
+        streams_per_gpu=streams_per_gpu,
+        max_slots=max_slots,
+        verbose=verbose,
     )
 
+    if failed > 0:
+        logger.warning(
+            "%d burst pair(s) failed.  Check log output for FAIL lines.", failed
+        )
+
+    # -- Stitch per-burst interferograms into full subswath images --
     for outfile in tqdm(burst_pair_map, desc="stitching"):
         stitch(burst_pair_map[outfile], outfile, out_float)
     logger.info("All interferograms are generated.")
@@ -412,14 +709,14 @@ def run_interfere(
     verbose: bool = False,
 ):
     """
-    Form interferograms from a subswath list
+    Form interferograms from a subswath list.
 
     Parameters
     ----------
-    config: str
-        Configuration file
-    verbose: bool
-        Set logging level to 'DEBUG'
+    config : str
+        Configuration file.
+    verbose : bool
+        Set logging level to 'DEBUG'.
     """
     from s1proc._config import load_config
 
@@ -438,7 +735,13 @@ def run_interfere(
         rowlook=pcfg.rowlook,
         collook=pcfg.collook,
         out_float=False,
-        ngpu=pcfg.ngpu,
-        task_per_gpu=pcfg.task_per_gpu,
+        io_workers=pcfg.io_workers if pcfg.io_workers is not None else -1,
+        cpu_workers=pcfg.cpu_workers if pcfg.cpu_workers is not None else -1,
+        gpu_workers=pcfg.gpu_workers if pcfg.gpu_workers is not None else -1,
+        streams_per_gpu=(
+            pcfg.streams_per_gpu if pcfg.streams_per_gpu is not None else -1
+        ),
+        max_slots=pcfg.max_slots if pcfg.max_slots is not None else -1,
+        verbose=verbose,
     )
     return
