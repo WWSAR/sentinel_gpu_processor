@@ -460,7 +460,7 @@ def check_integrity(
     os.makedirs(out_dir, exist_ok=True)
     for date in bad_dates:
         move_files(amp_dir, out_dir, f"*{date}*.amp")
-        move_files(slc_dir, out_dir, f"*{date}*.geo")
+        move_files(slc_dir, out_dir, f"*{date}*.gslc")
         move_files(ifg_dir, out_dir, f"*{date}*.int")
         move_files(unw_dir, out_dir, f"*{date}*.unw")
     return bad_dates
