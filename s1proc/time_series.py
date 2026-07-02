@@ -1022,6 +1022,18 @@ def run_time_series(
 ) -> None:
     """Run time series analysis.
 
+    Parameters
+    ----------
+    unw_path : Path or str or None
+        Directory containing unwrapped interferograms.  When *None* the
+        paths from the configuration are used.
+    outpath : Path or str or None
+        Output directory.  Falls back to ``io.time_series_path``.
+    config : str
+        Path to the YAML configuration file.
+
+    Notes
+    -----
     Supports five methods via the configuration key ``timeseries.method``:
 
     - ``"stack"`` — velocity stacking (always 2D).
@@ -1036,16 +1048,6 @@ def run_time_series(
     https://web.stanford.edu/~boyd/papers/admm/least_abs_deviations/lad.html,
     as adapted for InSAR in the `dolphin
     <https://github.com/isce-framework/dolphin>`_ package.
-
-    Parameters
-    ----------
-    unw_path : Path or str or None
-        Directory containing unwrapped interferograms.  When *None* the
-        paths from the configuration are used.
-    outpath : Path or str or None
-        Output directory.  Falls back to ``io.time_series_path``.
-    config : str
-        Path to the YAML configuration file.
     """
     from s1proc._config import load_config
     from s1proc.geocoordinates import GeoCoordinates
