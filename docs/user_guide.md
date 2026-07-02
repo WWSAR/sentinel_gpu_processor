@@ -32,8 +32,8 @@ The remaining steps are **experimental** and have not been thoroughly tested:
 ### 1. Unified geocoding step
 
 The original processor required three sequential steps: `readgeotiff`
-(extract GeoTIFFs from zip files), `deramp_burst` (deramp individual
-bursts), and `geo2rdr_reramp` (geocode and reramp to radar coordinates).
+(convert TIFF images to raw complex SLC images), `deramp_burst` (deramp individual
+bursts), and `geo2rdr_reramp` (geocode and reramp).
 Each step wrote intermediate files to disk, consuming significant storage
 and I/O bandwidth on large stacks.
 
@@ -41,7 +41,7 @@ and I/O bandwidth on large stacks.
 (`s1proc.sentinel_scene.sentinel_scene` → `s1proc.sentinel_stack.run_stack`).
 It reads raw TIFF data directly from the Sentinel-1 zip files — **no
 unzipping is needed** — and writes geocoded SLCs straight to disk. No
-intermediate per-burst GeoTIFFs or deramped files are stored, saving disk
+intermediate SLC images or deramped files are stored, saving disk
 space and reducing I/O load.
 
 ### 2. Burst-level geocoded SLCs (GSLCs)
@@ -57,7 +57,7 @@ rather than full-scene images. This has two important advantages:
   to be paired with its counterpart regardless of frame assignment.
 
 - **Seamless phase stitching.** The original processor forms interferograms
-  from full-subswath images, which introduces decorrelated lines at burst
+  from full-scene images, which introduces decorrelated lines at burst
   and subswath boundaries. In `s1proc`, burst-level GSLCs are paired to
   generate per-burst interferograms (`s1proc.interfere.interfere_subswath`),
   which are then stitched within each subswath (`stitch_subswath`) and
@@ -132,7 +132,7 @@ When date and bbox are provided, `s1proc init` will:
 1. Write `config.yaml` with those values filled in.
 2. Query the **ASF Data Search API** (via `s1proc.query.query_asf`) to
    discover all Sentinel-1 IW SLC scenes overlapping your area.
-3. Save the full result set as `roi.geojson`.
+3. Save the full result set as `roi.geojson`, which can be dragged into QGIS for visualization.
 4. Group scenes by orbit **path number**, create one sub-folder per path
    (e.g. `ascending/path_123/`), and write a tailored `config.yaml` and
    `roi.geojson` into each.
@@ -325,9 +325,9 @@ For each scene it:
 
 1. Reads the acquisition time and matches it to the correct precise orbit
    (EOF) file.
-2. Calls `s1proc.sentinel_scene.sentinel_scene`, which unzips the product,
-   extracts the GeoTIFF for each subswath, applies deramping, and geocodes
-   to the DEM grid.
+2. Calls `s1proc.sentinel_scene.sentinel_scene`, which extracts the TIFF
+   images for each subswath, applies deramping, and geocodes to the DEM
+   grid.
 3. Writes per-burst geocoded SLC files (`.gslc`) to `io.slc_path` (default:
    `slc/`).
 4. Records a `.done` marker in `io.proc_path` (default: `proc/`) so the
@@ -718,9 +718,9 @@ available, selected by `timeseries.method` in `config.yaml`:
 | `sbas_ls` | 3D time series | SBAS L2 least-squares per-interval velocity |
 | `sbas_l1` | 3D time series | SBAS L1-norm (LAD) inversion via ADMM |
 
-All methods support MAD-based outlier removal (`mad_scalar`) and Tikhonov
+All methods support MAD-based outlier removal [Staniewicz et al. (2021)](https://agupubs.onlinelibrary.wiley.com/doi/full/10.1029/2020GL090151) and Tikhonov
 regularisation. The L1 solver uses the ADMM algorithm following
-[Boyd et al. (2010)](https://web.stanford.edu/~boyd/papers/admm/).
+[Boyd et al. (2010)](https://web.stanford.edu/~boyd/papers/admm/), adapted from the timeseries module in [dolphin](https://github.com/isce-framework/dolphin/blob/main/src/dolphin/timeseries.py) ([Staniewicz et al., (2024)](https://doi.org/10.21105/joss.06997)).
 
 **Key configuration parameters:**
 
