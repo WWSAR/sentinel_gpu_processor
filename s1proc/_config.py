@@ -121,8 +121,8 @@ class UnwrapConfig:
 
 @dataclass
 class TimeSeriesParams:
-    ref_lon: float
-    ref_lat: float
+    ref_lon: Optional[float] = None
+    ref_lat: Optional[float] = None
     mad_scalar: Optional[float] = None
     seasonal_terms: int = 1
     regularization: float = 1e-3
