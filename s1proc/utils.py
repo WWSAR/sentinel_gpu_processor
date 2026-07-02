@@ -390,6 +390,7 @@ def check_integrity(
     amp_dir: str,
     max_deviation: float = 0.05,
     outfile: str = "incomplete_date.txt",
+    maskfile: str = "mask.bin",
     movedata: bool = False,
     slc_dir: str = "slc",
     ifg_dir: str = "igrams",
@@ -410,6 +411,8 @@ def check_integrity(
         considered as an incomplete image
     outfile: str
         A txt file containing all dates with data loss
+    maskfile: str
+        A boolean mask file showing valid radar pixels (1 = valid, 0 = invalid)
     movedata: bool
         If True, move all incomplete files to out_dir
     slc_dir: str
@@ -429,9 +432,16 @@ def check_integrity(
     amp_list = np.array(glob.glob(os.path.join(amp_dir, "*.amp")))
     nimg = len(amp_list)
     non_zero_pixels = np.zeros(nimg, dtype=int)
+    valid_pixel_counts = None
     for i, amp_file in tqdm(enumerate(amp_list), total=nimg, desc="non-zero pixels"):
         a = np.fromfile(amp_file, dtype=np.float32)
+        if valid_pixel_counts is None:
+            valid_pixel_counts = (a > 0).astype(int)
+        else:
+            valid_pixel_counts += a > 0
         non_zero_pixels[i] = np.sum(a != 0)
+    valid_pixel_threshold = np.median(valid_pixel_counts[valid_pixel_counts > 0])
+    (valid_pixel_counts > valid_pixel_threshold).tofile(maskfile)
     median_non_zero_pixel = np.median(non_zero_pixels)
     threshold = median_non_zero_pixel * max_deviation
     incomplete_idx = (median_non_zero_pixel - non_zero_pixels) > threshold
@@ -495,6 +505,7 @@ def run_check_integrity(
         amp_dir=icfg.amp_path,
         max_deviation=max_deviation,
         outfile=outfile,
+        maskfile=icfg.mask_file,
         movedata=movedata,
         slc_dir=icfg.slc_path,
         ifg_dir=icfg.ifg_path,
