@@ -1,0 +1,32 @@
+name:
+    s1proc
+channels:
+    - conda-forge
+    - defaults
+dependencies:
+    - python=3.11
+    - cmake
+    - ninja
+    - libcufft-dev
+    - libcufft
+    - cuda-version=12.4
+    - cuda-cudart=12.4.*
+    - cuda-cudart-dev=12.4.*
+    - sqlite
+    - numpy >=1.23
+    - pandas >=2.0
+    - numba >=0.58
+    - requests >=2.31
+    - matplotlib >=3.8
+    - tyro >=0.9
+    - tqdm >=4
+    - pyaps3 >=0.3.7
+    - sentineleof >=0.12.0
+    - sardem >=0.13.0
+    - gdal >=3.10
+    - zarr >=2.18.3
+    - dacite >=1.9.2
+    - ruamel.yaml >=0.18.0
+    - platformdirs >=4.0
+    - cupy
+    - dask >=2024.1.0

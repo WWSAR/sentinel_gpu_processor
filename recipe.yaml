@@ -68,6 +68,8 @@ requirements:
     - dacite >=1.9.2
     - ruamel.yaml >=0.18.0
     - platformdirs >=4.0
+    - cupy
+    - dask >=2024.1.0
 
 tests:
   - script:

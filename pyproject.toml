@@ -9,7 +9,7 @@ description = "GPU-accelerated Sentinel-1 SAR processing tools"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Ke Wang", email = "kewang@utexas.edu" }]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 dependencies = [
     "numpy>=1.23",
@@ -26,7 +26,9 @@ dependencies = [
     "zarr>=2.18.3",
     "dacite>=1.9.2",
     "ruamel.yaml>=0.18.0",
-    "platformdirs>=4.0"
+    "platformdirs>=4.0",
+    "cupy",
+    "dask>=2024.1.0"
 ]
 
 [tool.setuptools.packages.find]
