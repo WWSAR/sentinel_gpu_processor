@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import abc
+import concurrent.futures
+import threading
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, Thread, main_thread
@@ -270,87 +272,131 @@ class BackgroundReader(BackgroundWorker):
         """User-defined method for reading a chunk of data."""
 
 
-class MultiBinaryFileWriter(BackgroundWriter):
-    """Multi-file asynchronous routing writer.
+class MultiBinaryFileWriter:
+    """Multi-file parallel routing writer for ``da.store``.
 
     Routes and writes incoming Dask chunks into multiple independent flat binary
-    files concurrently based on the slice metadata provided during the store operation.
+    files concurrently using a thread pool.  Each chunk's band dimension is
+    unpacked and each band is written to the corresponding file via a dedicated
+    writer thread.
+
+    A bounded semaphore provides backpressure so that GPU computation does not
+    outrun disk I/O by an unbounded margin.  Per-file locks guard against
+    concurrent writes to the same file that can occur during spatial chunking.
     """
 
     def __init__(
         self,
-        file_map: Dict[int, Path],  # Map indexing band positions to physical paths
-        single_file_shape: Tuple[int, int],  # Spatial dimensions (nrow, ncol)
+        file_map: Dict[int, Path],
+        single_file_shape: Tuple[int, int],
         dtype: DTypeLike,
-        nq: int = 1,
+        nq: int = 4,
         timeout: float = _DEFAULT_TIMEOUT,
-    ):
-        # Initialize the background worker thread with strict backpressure flow control
-        # (nq)
-        self.name = "MultiBinaryFileWriter"
+    ) -> None:
         self.file_map = {k: Path(v) for k, v in file_map.items()}
         self.rows, self.cols = single_file_shape
         self.dtype = np.dtype(dtype)
-
-        # 1. Initialize all output files to the target size (Virtual allocation/
-        # Zero-fill via truncate)
-        self.single_file_size = self.rows * self.cols * self.dtype.itemsize
-        # for path in self.file_map.values():
-        #    with open(path, "wb") as f:
-        #        f.truncate(self.single_file_size)
-
-        # 2. Calculate the spatial stride for 2D positioning inside a single file
         self.row_stride = self.cols * self.dtype.itemsize
-        super().__init__(nq=nq, timeout=timeout, name="MultiBinaryFileWriter")
-        logger.debug(self.name + ":Initializing is done")
+        self.single_file_size = self.rows * self.cols * self.dtype.itemsize
 
-    def __setitem__(self, key: tuple[slice, slice, slice], data: np.ndarray):
-        """The magic entry point triggered by Dask's da.store engine.
+        # Pre-allocate all output files to final size so that partial spatial
+        # writes can seek into an existing file without a create-or-open race.
+        for path in self.file_map.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists() or path.stat().st_size != self.single_file_size:
+                with open(path, "wb") as f:
+                    f.truncate(self.single_file_size)
 
-        Dask internally executes `target[key] = data`. We intercept this call
-        and seamlessly reroute it to our high-performance background asynchronous queue.
+        # One worker per file, capped so we don't oversubscribe the disk.
+        n_workers = min(len(self.file_map), 8)
+        self._executor: concurrent.futures.ThreadPoolExecutor = (
+            concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
+        )
+
+        # Backpressure: block __setitem__ once too many writes are in flight.
+        # The semaphore value is (nq × workers) so the user can tune the queue
+        # depth independently of the worker count.
+        self._max_pending = max(1, nq * n_workers)
+        self._write_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(
+            self._max_pending,
+        )
+
+        # Per-file locks serialise writes to the same file when multiple spatial
+        # chunks target the same band (spatial chunking mode).
+        self._file_locks: Dict[int, threading.Lock] = {
+            idx: threading.Lock() for idx in self.file_map
+        }
+
+        self._futures: list[concurrent.futures.Future] = []
+        self._futures_lock: threading.Lock = threading.Lock()
+        self.timeout = timeout
+
+        logger.debug(
+            "MultiBinaryFileWriter initialised: %d workers, max %d in-flight writes",
+            n_workers,
+            self._max_pending,
+        )
+
+    # ------------------------------------------------------------------
+    # Dask store protocol
+    # ------------------------------------------------------------------
+
+    def __setitem__(self, key: tuple[slice, slice, slice], data: np.ndarray) -> None:
+        """Dask entry point: ``target[key] = data``.
+
+        Submits the write to the thread pool and returns immediately so that
+        GPU computation can proceed.  If the in-flight write limit is reached
+        the calling thread blocks here, providing natural backpressure.
         """
-        # Dask passes (key, data); BackgroundWriter expects
-        # queue_write(data, key) or write(data, key).
+        self._write_sem.acquire()
+        try:
+            future: concurrent.futures.Future = self._executor.submit(
+                self._write_with_cleanup, key, data
+            )
+            with self._futures_lock:
+                self._futures.append(future)
+        except Exception:
+            self._write_sem.release()
+            raise
 
-        if hasattr(self, "queue_write"):
-            # If the base class uses queue_write to push tasks to the background thread
-            self.queue_write(key, data)
-        else:
-            # Fallback to direct write for synchronous operation
+    def _write_with_cleanup(
+        self, key: tuple[slice, slice, slice], data: np.ndarray
+    ) -> None:
+        """Wrapper that releases the backpressure semaphore after write."""
+        try:
             self.write(key, data)
+        finally:
+            self._write_sem.release()
 
-    def write(self, key: tuple[slice, slice, slice], data: np.ndarray):
-        """Core batch-routing algorithm. Unpacks multi-band chunks into target files.
+    # ------------------------------------------------------------------
+    # Core write logic
+    # ------------------------------------------------------------------
+
+    def write(self, key: tuple[slice, slice, slice], data: np.ndarray) -> None:
+        """Route chunk bands to target files and write them to disk.
 
         Parameters
         ----------
-        data : np.ndarray
-            The 3D data block, shaped as (N_bands, Chunk_Rows, Chunk_Cols).
         key : tuple of slice
-            The global 3D slice coordinates representing (band_slice, row_slice,
-            col_slice).
+            Global 3-D slice ``(band_slice, row_slice, col_slice)``.
+        data : np.ndarray
+            3-D block of shape ``(N_bands, chunk_rows, chunk_cols)``.
         """
         b_slice, r_slice, c_slice = key
 
-        # Extract the absolute global start and stop indices for the band dimension
         b_start = b_slice.start if b_slice.start is not None else 0
         b_stop = b_slice.stop if b_slice.stop is not None else data.shape[0]
 
         r_start = r_slice.start if r_slice.start is not None else 0
         c_start = c_slice.start if c_slice.start is not None else 0
 
-        # Calculate spatial offset inside a single file (shared across the current
-        # spatial batch)
-        spatial_offset = (r_start * self.row_stride) + (c_start * self.dtype.itemsize)
-
-        is_full_spatial_chunk = (
+        is_full = (
             r_start == 0
             and c_start == 0
             and data.shape[1] == self.rows
             and data.shape[2] == self.cols
         )
-        # Loop through each band contained inside this incoming Dask chunk
+
         for local_idx, global_band_idx in enumerate(range(b_start, b_stop)):
             target_file = self.file_map.get(global_band_idx)
             single_band_data = data[local_idx, :, :]
@@ -358,27 +404,33 @@ class MultiBinaryFileWriter(BackgroundWriter):
             if not single_band_data.flags["C_CONTIGUOUS"]:
                 single_band_data = np.ascontiguousarray(single_band_data)
 
-            if is_full_spatial_chunk:
-                single_band_data.tofile(str(target_file))
-            else:
-                spatial_offset = (r_start * self.row_stride) + (
-                    c_start * self.dtype.itemsize
-                )
-
-                with open(target_file, "r+b" if target_file.exists() else "wb") as f:
-                    if f.mode == "r+b":
+            with self._file_locks[global_band_idx]:
+                if is_full:
+                    # Fast path: single contiguous write of the full image.
+                    single_band_data.tofile(str(target_file))
+                else:
+                    spatial_offset = (
+                        r_start * self.row_stride + c_start * self.dtype.itemsize
+                    )
+                    with open(target_file, "r+b") as f:
                         f.seek(spatial_offset)
-                    f.write(single_band_data.tobytes())
+                        f.write(single_band_data.tobytes())
 
-    def __del__(self):
-        import threading
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
-        # check if the thread calling __del__ is self._thread
-        if hasattr(self, "_thread") and threading.current_thread() is self._thread:
-            logger.warning(
-                f"{self.name} thread invoking its own __del__, skipping join."
-            )
-            if hasattr(self, "_finished_event"):
-                self._finished_event.set()
-        else:
-            super().__del__()
+    def notify_finished(self, timeout: float | None = None) -> None:
+        """Block until all queued writes have been flushed to disk."""
+        if timeout is None:
+            timeout = getattr(self, "timeout", None)
+        with self._futures_lock:
+            futures_snapshot = list(self._futures)
+        if futures_snapshot:
+            concurrent.futures.wait(futures_snapshot, timeout=timeout)
+        self._executor.shutdown(wait=True)
+        logger.debug("MultiBinaryFileWriter: all writes flushed, executor shut down.")
+
+    def __del__(self) -> None:
+        if hasattr(self, "_executor"):
+            self._executor.shutdown(wait=False)

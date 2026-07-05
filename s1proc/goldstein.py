@@ -489,15 +489,11 @@ def goldstein_filter_wrapper(
         file_map=output_routing_table,
         single_file_shape=(nrow, ncol),
         dtype=np.complex64,
-        nq=2,
+        nq=4,
         timeout=2,
-    )
-    mapper = create_virtual_stack(
-        output_paths, np.complex64, nrow, ncol, row_chunk, new_axis=0
     )
     try:
         with ProgressBar():
-            # align_dask_stack.to_zarr(mapper)
             da.store(
                 sources=align_dask_stack,
                 targets=multi_writer,
@@ -505,10 +501,8 @@ def goldstein_filter_wrapper(
                 compute=True,
             )
     finally:
-        logger.info(
-            "Waiting for background writer threads to flush dirty pages to disk..."
-        )
-        # multi_writer.notify_finished()
+        logger.info("Waiting for background writer threads to flush to disk...")
+        multi_writer.notify_finished()
         logger.info("Pipeline completed — all binary files flushed to disk.")
 
     logger.info("Goldstein filtering complete: %d interferograms processed", B)
