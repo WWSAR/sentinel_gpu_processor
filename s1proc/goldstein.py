@@ -483,21 +483,37 @@ def goldstein_filter_wrapper(
 
     align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
 
-    from s1proc.from_dolphin._background import BinaryFileStore
+    from s1proc.from_dolphin._background import (
+        MultiBinaryFileWriter,
+    )
 
-    store = BinaryFileStore(
+    # MultiBinaryFileWriter uses a pool of daemon writer threads behind a
+    # bounded queue.  __setitem__ is a fast queue.put() — the dask thread
+    # returns immediately and the writers flush to disk in the background.
+    # This keeps GPU compute and disk I/O fully overlapped.
+    #
+    # BinaryFileStore (a zarr v3 MemoryStore subclass) is an alternative
+    # that routes da.to_zarr writes to binary files.  It is architecturally
+    # cleaner but adds zarr codec-pipeline overhead per chunk (~60 ms).
+    # Uncomment the store + da.to_zarr lines below to try it.
+    multi_writer = MultiBinaryFileWriter(
         file_map=output_routing_table,
         single_file_shape=(nrow, ncol),
         dtype=np.complex64,
+        nq=4,
+        timeout=2,
     )
     try:
         with ProgressBar():
-            da.to_zarr(
-                align_dask_stack,
-                url=store,
+            da.store(
+                sources=align_dask_stack,
+                targets=multi_writer,
+                lock=False,
                 compute=True,
             )
     finally:
+        logger.info("Waiting for background writer threads to flush to disk...")
+        multi_writer.notify_finished()
         logger.info("Pipeline completed — all binary files flushed to disk.")
 
     logger.info("Goldstein filtering complete: %d interferograms processed", B)
