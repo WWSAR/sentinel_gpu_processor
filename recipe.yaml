@@ -70,6 +70,7 @@ requirements:
     - platformdirs >=4.0
     - cupy
     - dask >=2024.1.0
+    - fsspec >= 2024.6.0,<2027.0.0
 
 tests:
   - script:
