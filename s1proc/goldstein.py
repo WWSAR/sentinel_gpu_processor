@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import queue
 from pathlib import Path
-from typing import List
+from typing import TYPE_CHECKING, List, Tuple
 
 import cupy as cp
 import numpy as np
+
+if TYPE_CHECKING:
+    import dask.array as da
 
 from s1proc._background import MultiBinaryFileWriter
 from s1proc._log import setup_logger
@@ -359,83 +362,48 @@ def _compute_spatial_row_chunk(
     return max(stride, min(row_chunk, nrow))
 
 
-def goldstein_filter_wrapper(
-    file_paths: List[Path | str],
-    out_path: Path | str | None = None,
-    nrow: int = 0,
-    ncol: int = 0,
-    alpha: float = 0.5,
-    window_size: int = 32,
-    overlap: int = 24,
-    max_vram_gb: float = 6.0,
-    out_suffix: str = ".filt",
-) -> None:
-    """Apply the Goldstein filter to interferograms using GPU-accelerated
-    batch processing with background I/O.
+def get_goldstein_chunks(
+    nrow: int,
+    ncol: int,
+    window_size: int,
+    overlap: int | None = None,
+    max_vram_gb: float | None = None,
+) -> Tuple[int, int, int]:
+    """
+    Estimate 3D chunks for Goldstein filtering
 
     Parameters
     ----------
-    file_paths : list of Path | str
-        Paths to raw binary interferogram files (``complex64``, row-major,
-        no header).
-    out_path : Path, str, or None
-        Directory for filtered output files.  When ``None`` each output is
-        placed alongside its input with *out_suffix* appended (matching the
-        legacy C++ binary behaviour).
     nrow : int
         Number of rows in each interferogram.
     ncol : int
         Number of columns in each interferogram.
-    alpha : float
-        Goldstein filter parameter (``0.0`` = no filtering, ``1.0`` =
-        maximum filtering).  Default 0.5.
     window_size : int
         Processing window side length in pixels.  Default 32.
-    overlap : int
-        Overlap between adjacent windows in pixels.  Default 24 (75 % for
-        a 32×32 window).
-    max_vram_gb : float
-        Maximum GPU VRAM budget in gigabytes.  Used to determine the batch
-        size or spatial chunk size.  Default 6.0.
-    out_suffix : str
-        Suffix appended to each input filename for the output.  Default
-        ``".filt"``.
-    n_readers : int
-        Number of background reader threads.  Default 2.
-    n_writers : int
-        Number of background writer threads.  Default 2.
+    overlap : int | None
+        Overlap between adjacent windows in pixels.  Default (75 % of
+        window_size).
+    max_vram_gb : float | None
+        Maximum GPU VRAM budget in gigabytes.  When *None*, queries
+        ``pynvml`` for the free VRAM of the GPU with the most headroom.
 
-    Examples
-    --------
-    Filter all interferograms in a directory with the default 32×32 window:
-
-    >>> from s1proc.goldstein import goldstein_filter_wrapper
-    >>> from s1proc.utils import get_files
-    >>> files = get_files("ifg/", "int")
-    >>> goldstein_filter_wrapper(files, nrow=2400, ncol=3200, max_vram_gb=8.0)
+    Returns
+    -------
+    Tuple[int, int, int]
+        ``(time_chunk, row_chunk, col_chunk)`` for the dask array.
     """
-    import dask.array as da
-    from dask.diagnostics import ProgressBar
+    from s1proc.utils import _query_gpu_info
 
-    from s1proc.sario import create_virtual_stack
+    if overlap is None:
+        overlap = int(min(np.ceil(window_size * 0.75), window_size - 1))
 
-    B = len(file_paths)
-    if B == 0:
-        logger.warning("file_paths is empty — nothing to filter.")
-        return
-
-    stride = window_size - overlap
-    if stride <= 0:
-        raise ValueError(
-            f"overlap ({overlap}) must be less than window_size ({window_size})"
+    if max_vram_gb is None:
+        gpu_info = _query_gpu_info()
+        max_vram_gb = max(
+            gpu_info[i]["free_vram_gb"] for i in range(gpu_info["gpu_count"])
         )
 
     max_vram_bytes = int(max_vram_gb * 1024**3)
-    if out_path is not None:
-        out_path = Path(out_path)
-        out_path.mkdir(parents=True, exist_ok=True)
-
-    # ---- VRAM estimation & batching -----------------------------------------
     image_vram = _estimate_peak_vram_per_ifg(nrow, ncol, window_size, overlap)
     logger.info(
         "Estimated peak VRAM per interferogram: %.1f MB  (max allowed: %.1f GB)",
@@ -443,17 +411,10 @@ def goldstein_filter_wrapper(
         max_vram_gb,
     )
 
-    # file_paths_abs = [Path(f).resolve() for f in file_paths]
-    output_paths = [
-        Path(out_path) / (Path(f).stem + f".int{out_suffix}") for f in file_paths
-    ]
-    output_routing_table = dict(zip(np.arange(len(file_paths)), output_paths))
-
-    spatial_chunking = image_vram > max_vram_bytes
-    if spatial_chunking:
+    if image_vram > max_vram_bytes:
         time_chunk = 1
         row_chunk = _compute_spatial_row_chunk(
-            nrow, ncol, stride, window_size, max_vram_bytes
+            nrow, ncol, window_size - overlap, window_size, max_vram_bytes
         )
         logger.info(
             "Spatial chunking enabled: %d rows per chunk (image: %d rows)",
@@ -465,13 +426,233 @@ def goldstein_filter_wrapper(
         time_chunk = batch_size
         row_chunk = nrow
         logger.info("Batch size: %d interferograms per GPU call", batch_size)
-    mapper = create_virtual_stack(
-        file_paths, np.complex64, nrow, ncol, row_chunk, new_axis=0
+    return (time_chunk, row_chunk, ncol)
+
+
+# ---------------------------------------------------------------------------
+# Type dispatcher helpers
+# ---------------------------------------------------------------------------
+
+
+# Union type accepted by the unified entry point.
+FilterInputType = str | Path | List[str | Path] | "da.Array"
+
+
+def _is_zarr_path(path: Path) -> bool:
+    """Check whether *path* points to a valid Zarr dataset (v2 or v3)."""
+    if path.is_dir():
+        if (path / ".zarray").exists():
+            return True
+        if (path / "zarr.json").exists():
+            return True
+    return False
+
+
+def _load_as_dask_array(
+    igrams: FilterInputType,
+    nrow: int,
+    ncol: int,
+    row_chunk: int,
+) -> "da.Array":
+    """Normalise *igrams* to a ``dask.array.Array`` with shape ``(N, H, W)``.
+
+    Parameters
+    ----------
+    igrams : FilterInputType
+        One of: a ``dask.array.Array``, a path to a Zarr dataset, or a
+        list of paths to flat binary files (``complex64``, row-major).
+    nrow : int
+        Image rows.  Required when *igrams* is a file list.
+    ncol : int
+        Image columns.  Required when *igrams* is a file list.
+    row_chunk : int
+        Rows per chunk for the virtual stack.  Required when *igrams* is a
+        file list.
+
+    Returns
+    -------
+    da.Array
+        3-D dask array of shape ``(N, nrow, ncol)`` and dtype
+        ``complex64``.
+
+    Raises
+    ------
+    TypeError
+        If *igrams* has an unsupported type.
+    ValueError
+        If *nrow* / *ncol* are missing when needed.
+    """
+    import dask.array as da
+
+    from s1proc.sario import create_virtual_stack
+
+    # ---- 1. dask.array.Array ------------------------------------------------
+    if isinstance(igrams, da.Array):
+        return igrams
+
+    # ---- 2. Single path → Zarr or binary file --------------------------------
+    if isinstance(igrams, (str, Path)):
+        path = Path(igrams)
+        if _is_zarr_path(path):
+            return da.from_zarr(str(path))
+        raise ValueError(
+            f"Single path '{path}' is not a Zarr dataset. "
+            "For a single binary file pass it as a list: [path]."
+        )
+
+    # ---- 3. List of paths ---------------------------------------------------
+    if isinstance(igrams, list):
+        if len(igrams) == 0:
+            return da.zeros((0, nrow, ncol), dtype=np.complex64, chunks=(1, nrow, ncol))
+
+        first = Path(igrams[0])
+        if _is_zarr_path(first):
+            raise TypeError(
+                "A list was passed but the first element is a Zarr dataset. "
+                "Pass the directory path as a string/Path instead of wrapping "
+                "it in a list."
+            )
+
+        if nrow <= 0 or ncol <= 0:
+            raise ValueError(
+                "nrow and ncol must be positive when loading from a file list. "
+                f"Got nrow={nrow}, ncol={ncol}."
+            )
+        if row_chunk <= 0:
+            raise ValueError(f"row_chunk must be positive, got {row_chunk}.")
+
+        mapper = create_virtual_stack(
+            [Path(f) for f in igrams],
+            np.complex64,
+            nrow,
+            ncol,
+            row_chunk,
+            new_axis=0,
+        )
+        return da.from_zarr(mapper)
+
+    raise TypeError(
+        f"igrams must be a dask Array, a Zarr path, or a list of file paths. "
+        f"Got {type(igrams).__name__}."
     )
 
-    ifg_stack = da.from_zarr(mapper)
-    ifg_stack = ifg_stack.rechunk({0: time_chunk, 1: row_chunk, 2: ncol})
-    filtered_dask_stack = da.map_blocks(
+
+# ---------------------------------------------------------------------------
+# Core filtering pipeline
+# ---------------------------------------------------------------------------
+
+
+def goldstein_filter_wrapper(
+    igrams: FilterInputType,
+    nrow: int = 0,
+    ncol: int = 0,
+    alpha: float = 0.5,
+    window_size: int = 32,
+    overlap: int | None = None,
+    max_vram_gb: float | None = None,
+) -> "da.Array":
+    """Apply the Goldstein filter to a stack of wrapped interferograms.
+
+    This is the single entry point for filtering.  It accepts diverse input
+    types (dask arrays, Zarr paths, lists of raw binary files), normalises
+    them to a ``da.Array``, applies GPU-accelerated batch filtering, and
+    returns a lazy ``da.Array`` of the filtered result.
+
+    Parameters
+    ----------
+    igrams : dask.array.Array, str, Path, or list[str | Path]
+        Input interferograms.  Allowed types:
+
+        - ``da.Array`` — used directly (no loading).
+        - ``str`` or ``Path`` — must point to a Zarr v2/v3 dataset.
+        - ``list[str | Path]`` — list of flat binary files (``complex64``,
+          row-major, no header).  Requires *nrow* and *ncol*.
+
+    nrow : int
+        Number of image rows.  Required when *igrams* is a file list.
+    ncol : int
+        Number of image columns.  Required when *igrams* is a file list.
+    alpha : float
+        Goldstein filter parameter (``0.0`` = no filtering, ``1.0`` =
+        maximum filtering).  Default 0.5.
+    window_size : int
+        Processing window side length in pixels.  Default 32.
+    overlap : int or None
+        Overlap between adjacent windows in pixels.  ``None`` (default)
+        uses 75 % of *window_size*.
+    max_vram_gb : float or None
+        Maximum GPU VRAM budget in GB.  ``None`` (default) auto-detects
+        the free VRAM on the most available GPU via ``pynvml``.
+
+    Returns
+    -------
+    da.Array
+        Lazy 3-D dask array of filtered interferograms with shape
+        ``(N, nrow, ncol)`` and dtype ``complex64``.  Call ``.compute()``
+        or pass to :func:`save_filtered_stack` to write to disk.
+
+    Raises
+    ------
+    TypeError
+        If *igrams* has an unsupported type.
+    ValueError
+        If required arguments (e.g. *nrow* / *ncol*) are missing or invalid.
+
+    Examples
+    --------
+    Filter a dask array already in memory:
+
+    >>> filtered = goldstein_filter_wrapper(my_dask_array)
+
+    Filter a list of raw binary files and write to disk:
+
+    >>> from s1proc.goldstein import goldstein_filter_wrapper, save_filtered_stack
+    >>> from s1proc.utils import get_files
+    >>> files = get_files("ifg/", "int")
+    >>> filtered = goldstein_filter_wrapper(files, nrow=2400, ncol=3200)
+    >>> save_filtered_stack(filtered, files, out_dir="filtered/")
+    """
+    import dask.array as da
+
+    # ---- Validate filtering parameters ------------------------------------
+    if overlap is None:
+        overlap = int(min(np.ceil(window_size * 0.75), window_size - 1))
+    if window_size - overlap <= 0:
+        raise ValueError(
+            f"overlap ({overlap}) must be less than window_size ({window_size})"
+        )
+
+    # ---- Determine VRAM budget ---------------------------------------------
+    if max_vram_gb is None:
+        from s1proc.utils import _query_gpu_info
+
+        gpu_info = _query_gpu_info()
+        max_vram_gb = max(
+            gpu_info[i]["free_vram_gb"] for i in range(gpu_info["gpu_count"])
+        )
+
+    # ---- Load & chunk ------------------------------------------------------
+    ifg_stack = _load_as_dask_array(igrams, nrow, ncol, row_chunk=nrow)
+
+    # ---- Determine chunking ------------------------------------------------
+    _nrow, _ncol = int(ifg_stack.shape[1]), int(ifg_stack.shape[2])
+    nrow = nrow or _nrow
+    ncol = ncol or _ncol
+
+    if nrow <= 0 or ncol <= 0:
+        raise ValueError(
+            "Image dimensions are unknown.  Provide nrow/ncol explicitly, "
+            "or pass input with known shape (dask array or Zarr)."
+        )
+
+    time_chunk, row_chunk, col_chunk = get_goldstein_chunks(
+        nrow, ncol, window_size, overlap, max_vram_gb
+    )
+
+    ifg_stack = ifg_stack.rechunk({0: time_chunk, 1: row_chunk, 2: col_chunk})
+
+    # ---- GPU filtering -----------------------------------------------------
+    filtered_stack = da.map_blocks(
         run_batch_goldstein_filter,
         ifg_stack,
         dtype=np.complex64,
@@ -481,34 +662,126 @@ def goldstein_filter_wrapper(
         overlap=overlap,
     )
 
-    align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
+    return filtered_stack
 
-    # MultiBinaryFileWriter uses a pool of daemon writer threads behind a
-    # bounded queue.  __setitem__ is a fast queue.put() — the dask thread
-    # returns immediately and the writers flush to disk in the background.
-    # This keeps GPU compute and disk I/O fully overlapped.
-    #
-    # BinaryFileStore (a zarr v3 MemoryStore subclass) is an alternative
-    # that routes da.to_zarr writes to binary files.  It is architecturally
-    # cleaner but adds zarr codec-pipeline overhead per chunk (~60 ms).
-    # Uncomment the store + da.to_zarr lines below to try it.
-    multi_writer = MultiBinaryFileWriter(
-        file_map=output_routing_table,
-        single_file_shape=(nrow, ncol),
-        dtype=np.complex64,
-        nq=4,
-    )
-    try:
-        with ProgressBar():
-            da.store(
-                sources=align_dask_stack,
-                targets=multi_writer,
-                lock=False,
-                compute=True,
+
+# ---------------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------------
+
+
+def save_filtered_stack(
+    filtered_stack: "da.Array",
+    file_paths: List[str | Path] | None = None,
+    out_path: str | Path | None = None,
+    out_suffix: str = ".filt",
+    nrow: int = 0,
+    ncol: int = 0,
+    output_format: str = "binary_files",
+) -> None:
+    """Write a filtered dask stack to disk.
+
+    Parameters
+    ----------
+    filtered_stack : da.Array
+        Lazy 3-D filtered array from :func:`goldstein_filter_wrapper`.
+    file_paths : list[str | Path] or None
+        Original input file paths (used to derive output filenames when
+        *output_format* is ``"binary_files"``).  Ignored for zarr output.
+    out_path : str, Path, or None
+        Output directory or Zarr path.  When ``None`` for binary files,
+        outputs are placed alongside the inputs.
+    out_suffix : str
+        Suffix inserted before ``.int`` in each output filename.  Default
+        ``".filt"``, producing e.g. ``20210104_20210116.int.filt``.
+    nrow : int
+        Rows per output image (must match the source).  Required for the
+        ``"binary_files"`` format.
+    ncol : int
+        Columns per output image (must match the source).  Required for
+        the ``"binary_files"`` format.
+    output_format : str
+        ``"binary_files"`` (default) writes one flat ``complex64`` binary
+        per interferogram via ``MultiBinaryFileWriter``.
+        ``"zarr"`` writes a single Zarr v3 dataset via ``da.to_zarr``.
+
+    Raises
+    ------
+    ValueError
+        If *output_format* is unrecognised or required args are missing.
+    """
+    import dask.array as da
+    from dask.diagnostics import ProgressBar
+
+    # ---- Validate ----------------------------------------------------------
+    if output_format not in ("binary_files", "zarr"):
+        raise ValueError(
+            f"output_format must be 'binary_files' or 'zarr', got {output_format!r}"
+        )
+
+    if output_format == "binary_files":
+        if file_paths is None:
+            raise ValueError("file_paths is required for output_format='binary_files'")
+        if nrow <= 0 or ncol <= 0:
+            raise ValueError(
+                "nrow and ncol are required for output_format='binary_files'"
             )
-    finally:
-        logger.info("Waiting for background writer threads to flush to disk...")
-        multi_writer.notify_finished()
-        logger.info("Pipeline completed — all binary files flushed to disk.")
 
-    logger.info("Goldstein filtering complete: %d interferograms processed", B)
+    # ---- Rechunk for writing -----------------------------------------------
+    N = len(file_paths) if file_paths else int(filtered_stack.shape[0])
+    nrow = nrow or int(filtered_stack.shape[1])
+    ncol = ncol or int(filtered_stack.shape[2])
+
+    aligned = filtered_stack.rechunk({0: 1, 1: nrow, 2: ncol})
+
+    # ---- Write -------------------------------------------------------------
+    if output_format == "zarr":
+        out = Path(out_path) if out_path else Path("filtered.zarr")
+        logger.info("Writing filtered stack to Zarr: %s", out)
+        with ProgressBar():
+            da.to_zarr(
+                aligned,
+                url=str(out),
+                compute=True,
+                compressors=None,
+                overwrite=True,
+            )
+
+    elif output_format == "binary_files":
+        if out_path is not None:
+            out_dir = Path(out_path)
+            out_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            out_dir = Path(file_paths[0]).parent
+
+        output_paths = [
+            out_dir / (Path(f).stem + f".int{out_suffix}") for f in file_paths
+        ]
+        output_routing = dict(zip(range(N), output_paths))
+
+        writer = MultiBinaryFileWriter(
+            file_map=output_routing,
+            single_file_shape=(nrow, ncol),
+            dtype=np.complex64,
+            nq=4,
+        )
+        try:
+            with ProgressBar():
+                da.store(
+                    sources=aligned,
+                    targets=writer,
+                    lock=False,
+                    compute=True,
+                )
+        finally:
+            logger.info("Waiting for background writer threads to flush to disk...")
+            writer.notify_finished()
+            logger.info("Pipeline completed — all binary files flushed to disk.")
+
+    logger.info(
+        "Filtering result saved: %d images, %dx%d, format=%s",
+        N,
+        nrow,
+        ncol,
+        output_format,
+    )

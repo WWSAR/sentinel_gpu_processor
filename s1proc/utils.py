@@ -804,16 +804,23 @@ def _detect_gpu_count() -> int:
     """
     Detect the number of available CUDA-capable GPUs on the system.
 
-    Queries ``nvidia-smi`` first; falls back to counting devices listed in
-    the ``CUDA_VISIBLE_DEVICES`` environment variable.  Returns 1 when
-    neither method succeeds so that callers can always proceed with at least
-    one logical device.
+    Tries ``pynvml`` first, then ``nvidia-smi``; falls back to counting
+    devices listed in ``CUDA_VISIBLE_DEVICES``.  Returns 1 when no method
+    succeeds so that callers can always proceed with at least one logical
+    device.
 
     Returns
     -------
     int
         Number of available GPUs (minimum 1).
     """
+    # 1. pynvml (most reliable).
+    try:
+        return _query_gpu_info()["gpu_count"]
+    except (ImportError, RuntimeError):
+        pass
+
+    # 2. nvidia-smi.
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
@@ -844,6 +851,68 @@ def _detect_gpu_count() -> int:
         "Set CUDA_VISIBLE_DEVICES to override."
     )
     return 1
+
+
+def _query_gpu_info() -> dict:
+    """
+    Query GPU count, total VRAM, and free VRAM via the NVIDIA Management
+    Library (pynvml / nvidia-ml-py).
+
+    Returns a dictionary keyed by zero-based GPU index.  Each value is a
+    dict with keys ``"name"`` (str), ``"total_vram_gb"`` (float), and
+    ``"free_vram_gb"`` (float).  An extra key ``"gpu_count"`` holds the
+    total number of devices.
+
+    Returns
+    -------
+    dict
+        ``{"gpu_count": int, 0: {"name": str, "total_vram_gb": float,
+        "free_vram_gb": float}, ...}``
+
+    Raises
+    ------
+    RuntimeError
+        If pynvml is not installed or cannot initialise.
+    """
+    try:
+        from pynvml import (
+            nvmlDeviceGetCount,
+            nvmlDeviceGetHandleByIndex,
+            nvmlDeviceGetMemoryInfo,
+            nvmlDeviceGetName,
+            nvmlInit,
+            nvmlShutdown,
+        )
+    except ImportError:
+        raise RuntimeError(
+            "pynvml (nvidia-ml-py) is not installed. "
+            "Install it with: pip install nvidia-ml-py"
+        ) from None
+
+    try:
+        nvmlInit()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to initialise NVML: {exc}") from exc
+
+    try:
+        gpu_count = nvmlDeviceGetCount()
+        info: dict = {"gpu_count": gpu_count}
+
+        for i in range(gpu_count):
+            handle = nvmlDeviceGetHandleByIndex(i)
+            mem = nvmlDeviceGetMemoryInfo(handle)
+            name = nvmlDeviceGetName(handle)
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            info[i] = {
+                "name": name,
+                "total_vram_gb": mem.total / 1024**3,
+                "free_vram_gb": mem.free / 1024**3,
+            }
+
+        return info
+    finally:
+        nvmlShutdown()
 
 
 def _get_mask_chunk(
