@@ -1,7 +1,5 @@
 import os
-import subprocess
 
-from s1proc import get_bin_path
 from s1proc._log import set_logging_level, setup_logger
 from s1proc.tropo import _era5_correction, tropo_preproc
 from s1proc.utils import get_files
@@ -70,16 +68,13 @@ def phase_correction(
         output_files = ifg_files
     if cfg.filter.enable:
         fcfg = cfg.filter
-        temp_dir = "temp_filter"
-        os.makedirs(temp_dir, exist_ok=True)
-        ifglist_file = os.path.join(temp_dir, "ifg_list")
-        with open(ifglist_file, "w") as f:
-            f.write("\n".join(output_files))
-        goldstein = get_bin_path("goldstein")
-        command = (
-            f"{goldstein} {ifglist_file} {nrow} {ncol} "
-            + f"{fcfg.parameters.window_size} "
-            + f"{fcfg.parameters.goldstein_alpha}"
+        from s1proc.goldstein import goldstein_filter_wrapper
+
+        goldstein_filter_wrapper(
+            file_paths=output_files,
+            out_path=None,
+            nrow=nrow,
+            ncol=ncol,
+            alpha=fcfg.parameters.goldstein_alpha,
+            window_size=fcfg.parameters.window_size,
         )
-        logger.info(command)
-        subprocess.check_call(command, shell=True)

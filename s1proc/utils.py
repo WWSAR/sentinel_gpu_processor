@@ -670,8 +670,8 @@ class IfgList:
             basename = os.path.basename(imgfile)
             basename = os.path.splitext(basename)[0]
             words = basename.split("_")
-            ref_date.append(words[0])
-            sec_date.append(words[1])
+            ref_date.append(words[0][0:8])
+            sec_date.append(words[1][0:8])
             _ref_date = datetime.strptime(ref_date[-1], "%Y%m%d")
             _sec_date = datetime.strptime(sec_date[-1], "%Y%m%d")
             tempbl.append((_sec_date - _ref_date).days)
@@ -780,6 +780,25 @@ class IfgList:
             B[i, idx1:idx2] = days[idx1:idx2]
         return B
 
+    def ref_sec_indices(self) -> Tuple[NDArray[np.int32], NDArray[np.int32]]:
+        """
+        Get the indices of reference and secondary dates for each interferogram
+
+        Returns
+        -------
+        ref_indices: NDArray[np.int32]
+            Indices of reference dates
+        sec_indices: NDArray[np.int32]
+            Indices of secondary dates
+        """
+        ref_indices = np.array(
+            [self.datedict[date] for date in self.df["date1"]], dtype=int
+        )
+        sec_indices = np.array(
+            [self.datedict[date] for date in self.df["date2"]], dtype=int
+        )
+        return ref_indices, sec_indices
+
 
 def _detect_gpu_count() -> int:
     """
@@ -825,3 +844,17 @@ def _detect_gpu_count() -> int:
         "Set CUDA_VISIBLE_DEVICES to override."
     )
     return 1
+
+
+def _get_mask_chunk(
+    block_info: dict | None,
+    mask: NDArray[np.bool_] | None,
+    default_shape: Tuple[int, int],
+) -> NDArray[np.bool_]:
+    """Slice the full mask to match the current dask chunk extent."""
+    if block_info is None or mask is None:
+        return np.ones(default_shape, dtype=np.bool_)
+    array_loc = block_info[0]["array-location"]
+    row_slice = slice(int(array_loc[1][0]), int(array_loc[1][1]))
+    col_slice = slice(int(array_loc[2][0]), int(array_loc[2][1]))
+    return mask[row_slice, col_slice]
