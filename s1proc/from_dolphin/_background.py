@@ -272,15 +272,15 @@ class BackgroundReader(BackgroundWorker):
 
 
 class MultiBinaryFileWriter:
-    """Multi-file routing writer for ``da.store`` — writes directly to raw binaries.
+    """Multi-file parallel writer for ``da.store``.
 
-    Writes each Dask chunk immediately from the calling dask worker thread.
-    This avoids the serialisation bottleneck of a single background-writer
-    thread while still allowing dask's own scheduler to parallelise I/O across
-    independent files.
+    Writes are dispatched to a pool of background writer threads via a bounded
+    queue.  ``__setitem__`` returns as soon as the chunk is queued, freeing the
+    calling dask thread to submit the next GPU task.  The bounded queue provides
+    natural backpressure when I/O outruns compute.
 
     Per-file locks guard against concurrent writes to the same file during
-    spatial chunking; the common full-frame fast path uses lock-free ``tofile``.
+    spatial chunking; the common full-frame fast path writes lock-free.
     """
 
     def __init__(
@@ -290,6 +290,7 @@ class MultiBinaryFileWriter:
         dtype: DTypeLike,
         nq: int = 2,
         timeout: float = _DEFAULT_TIMEOUT,
+        n_writers: int = 4,
     ) -> None:
         self.file_map = {k: Path(v) for k, v in file_map.items()}
         self.rows, self.cols = single_file_shape
@@ -301,28 +302,39 @@ class MultiBinaryFileWriter:
         first = next(iter(self.file_map.values()))
         first.parent.mkdir(parents=True, exist_ok=True)
 
-        # Per-file locks only matter for spatial chunking (partial writes).
+        # Per-file locks only needed for spatial-chunking (partial-write) path.
         self._locks: Dict[int, threading.Lock] = {
             idx: threading.Lock() for idx in self.file_map
         }
 
+        # Bounded queue feeding a pool of writer threads.
+        max_pending = max(1, nq * n_writers)
+        self._queue: Queue = Queue(maxsize=max_pending)
+        self._n_writers = n_writers
+        self._writers: list[Thread] = []
+        for i in range(n_writers):
+            t = Thread(target=self._write_loop, daemon=True, name=f"mbfw-{i}")
+            t.start()
+            self._writers.append(t)
+
     # ------------------------------------------------------------------
-    # Dask store protocol
+    # Writer thread loop
     # ------------------------------------------------------------------
 
-    def __setitem__(
-        self,
-        key: tuple[slice, slice, slice],
-        data: np.ndarray,
-    ) -> None:
-        """Write the chunk to disk immediately from the calling thread."""
-        self.write(key, data)
+    def _write_loop(self) -> None:
+        """Drain the queue, writing chunks until a sentinel is received."""
+        while True:
+            item = self._queue.get()
+            if item is None:  # shutdown sentinel
+                break
+            key, data = item
+            self._write_impl(key, data)
 
     # ------------------------------------------------------------------
     # Core write logic
     # ------------------------------------------------------------------
 
-    def write(
+    def _write_impl(
         self,
         key: tuple[slice, slice, slice],
         data: np.ndarray,
@@ -365,7 +377,7 @@ class MultiBinaryFileWriter:
             else:
                 offset = r_start * self.row_stride + c_start * self.dtype.itemsize
                 with self._locks[global_band_idx]:
-                    # Lazily create & size the file on first partial write.
+                    # Lazy-create and size the file on first partial write.
                     if not target_file.exists():
                         with open(target_file, "wb") as f:
                             f.truncate(self.single_file_size)
@@ -374,11 +386,34 @@ class MultiBinaryFileWriter:
                         f.write(band_data.tobytes())
 
     # ------------------------------------------------------------------
+    # Dask store protocol
+    # ------------------------------------------------------------------
+
+    def __setitem__(
+        self,
+        key: tuple[slice, slice, slice],
+        data: np.ndarray,
+    ) -> None:
+        """Enqueue the chunk for asynchronous write.
+
+        Blocks only when the queue is full (backpressure).
+        """
+        self._queue.put((key, data))
+
+    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def notify_finished(self, timeout: float | None = None) -> None:
-        """All writes are synchronous — nothing to drain."""
+        """Signal writer threads to shut down and wait for completion."""
+        for _ in range(self._n_writers):
+            self._queue.put(None)  # sentinel
+        for t in self._writers:
+            t.join(timeout)
 
     def __del__(self) -> None:
-        pass
+        for _ in range(getattr(self, "_n_writers", 0)):
+            try:
+                self._queue.put_nowait(None)
+            except Full:
+                pass

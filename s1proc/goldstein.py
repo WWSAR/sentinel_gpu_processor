@@ -481,7 +481,7 @@ def goldstein_filter_wrapper(
         overlap=overlap,
     )
 
-    # align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
+    align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
 
     from s1proc.from_dolphin._background import MultiBinaryFileWriter
 
@@ -495,14 +495,11 @@ def goldstein_filter_wrapper(
     try:
         with ProgressBar():
             da.store(
-                sources=filtered_dask_stack,
+                sources=align_dask_stack,
                 targets=multi_writer,
                 lock=False,
                 compute=True,
             )
-            # filtered_dask_stack.to_zarr(
-            #    "E:\\houston_test\\ascending\\path_34\\goldstein1\\test.zarr"
-            # )
     finally:
         logger.info("Waiting for background writer threads to flush to disk...")
         multi_writer.notify_finished()
