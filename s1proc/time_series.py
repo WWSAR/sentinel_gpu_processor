@@ -13,7 +13,8 @@ from matplotlib import pyplot as plt
 from numpy.typing import NDArray
 
 from s1proc._log import setup_logger
-from s1proc.utils import IfgList
+from s1proc.sario import _store_attr
+from s1proc.utils import IfgList, _get_mask_chunk
 
 plt.rcParams["image.interpolation"] = "none"
 
@@ -283,20 +284,6 @@ def _weighted_l1_admm(
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
-
-
-def _get_mask_chunk(
-    block_info: dict | None,
-    mask: NDArray[np.bool_] | None,
-    default_shape: Tuple[int, int],
-) -> NDArray[np.bool_]:
-    """Slice the full mask to match the current dask chunk extent."""
-    if block_info is None or mask is None:
-        return np.ones(default_shape, dtype=np.bool_)
-    array_loc = block_info[0]["array-location"]
-    row_slice = slice(int(array_loc[1][0]), int(array_loc[1][1]))
-    col_slice = slice(int(array_loc[2][0]), int(array_loc[2][1]))
-    return mask[row_slice, col_slice]
 
 
 def _phase_to_displacement(
@@ -860,6 +847,7 @@ def time_series_solver(
     ]
     unw_dask_slices = [da.from_array(m, chunks=(nrow, ncol)) for m in ifg_memmaps]
     unw_stack = da.stack(unw_dask_slices, axis=0)  # (nifg, nrow, ncol)
+    logger.info(f"Total Chunks/Tasks: {unw_stack.npartitions}")
 
     # Load mask
     logger.info("Load mask from %s", mask_file)
@@ -874,6 +862,8 @@ def time_series_solver(
     if col_chunk_size is None:
         col_chunk_size = int(np.minimum(128, ncol))
     unw_stack = unw_stack.rechunk({0: -1, 1: row_chunk_size, 2: col_chunk_size})
+    logger.info(f"Total Chunks/Tasks: {unw_stack.npartitions}")
+    exit()
     logger.info(
         "Rechunked dask stack: row_chunk=%d, col_chunk=%d",
         row_chunk_size,
@@ -998,16 +988,6 @@ def time_series_solver(
         root.attrs["total_days"] = total_days
 
     logger.info("Time series computation complete.")
-
-
-def _store_attr(group: zarr.hierarchy.Group, key: str, value: Any) -> None:
-    """Write a metadata value to a zarr group, handling non-scalar types."""
-    if isinstance(value, (np.ndarray, list)):
-        group.attrs[key] = value
-    elif isinstance(value, Path):
-        group.attrs[key] = str(value)
-    else:
-        group.attrs[key] = value
 
 
 # ---------------------------------------------------------------------------
