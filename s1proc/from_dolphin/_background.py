@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import abc
-import concurrent.futures
 import threading
 from pathlib import Path
 from queue import Empty, Full, Queue
@@ -273,16 +272,15 @@ class BackgroundReader(BackgroundWorker):
 
 
 class MultiBinaryFileWriter:
-    """Multi-file parallel routing writer for ``da.store``.
+    """Multi-file routing writer for ``da.store`` — writes directly to raw binaries.
 
-    Routes and writes incoming Dask chunks into multiple independent flat binary
-    files concurrently using a thread pool.  Each chunk's band dimension is
-    unpacked and each band is written to the corresponding file via a dedicated
-    writer thread.
+    Writes each Dask chunk immediately from the calling dask worker thread.
+    This avoids the serialisation bottleneck of a single background-writer
+    thread while still allowing dask's own scheduler to parallelise I/O across
+    independent files.
 
-    A bounded semaphore provides backpressure so that GPU computation does not
-    outrun disk I/O by an unbounded margin.  Per-file locks guard against
-    concurrent writes to the same file that can occur during spatial chunking.
+    Per-file locks guard against concurrent writes to the same file during
+    spatial chunking; the common full-frame fast path uses lock-free ``tofile``.
     """
 
     def __init__(
@@ -290,7 +288,7 @@ class MultiBinaryFileWriter:
         file_map: Dict[int, Path],
         single_file_shape: Tuple[int, int],
         dtype: DTypeLike,
-        nq: int = 4,
+        nq: int = 2,
         timeout: float = _DEFAULT_TIMEOUT,
     ) -> None:
         self.file_map = {k: Path(v) for k, v in file_map.items()}
@@ -299,80 +297,36 @@ class MultiBinaryFileWriter:
         self.row_stride = self.cols * self.dtype.itemsize
         self.single_file_size = self.rows * self.cols * self.dtype.itemsize
 
-        # Pre-allocate all output files to final size so that partial spatial
-        # writes can seek into an existing file without a create-or-open race.
-        for path in self.file_map.values():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists() or path.stat().st_size != self.single_file_size:
-                with open(path, "wb") as f:
-                    f.truncate(self.single_file_size)
+        # Ensure output directory exists.
+        first = next(iter(self.file_map.values()))
+        first.parent.mkdir(parents=True, exist_ok=True)
 
-        # One worker per file, capped so we don't oversubscribe the disk.
-        n_workers = min(len(self.file_map), 8)
-        self._executor: concurrent.futures.ThreadPoolExecutor = (
-            concurrent.futures.ThreadPoolExecutor(max_workers=n_workers)
-        )
-
-        # Backpressure: block __setitem__ once too many writes are in flight.
-        # The semaphore value is (nq × workers) so the user can tune the queue
-        # depth independently of the worker count.
-        self._max_pending = max(1, nq * n_workers)
-        self._write_sem: threading.BoundedSemaphore = threading.BoundedSemaphore(
-            self._max_pending,
-        )
-
-        # Per-file locks serialise writes to the same file when multiple spatial
-        # chunks target the same band (spatial chunking mode).
-        self._file_locks: Dict[int, threading.Lock] = {
+        # Per-file locks only matter for spatial chunking (partial writes).
+        self._locks: Dict[int, threading.Lock] = {
             idx: threading.Lock() for idx in self.file_map
         }
-
-        self._futures: list[concurrent.futures.Future] = []
-        self._futures_lock: threading.Lock = threading.Lock()
-        self.timeout = timeout
-
-        logger.debug(
-            "MultiBinaryFileWriter initialised: %d workers, max %d in-flight writes",
-            n_workers,
-            self._max_pending,
-        )
 
     # ------------------------------------------------------------------
     # Dask store protocol
     # ------------------------------------------------------------------
 
-    def __setitem__(self, key: tuple[slice, slice, slice], data: np.ndarray) -> None:
-        """Dask entry point: ``target[key] = data``.
-
-        Submits the write to the thread pool and returns immediately so that
-        GPU computation can proceed.  If the in-flight write limit is reached
-        the calling thread blocks here, providing natural backpressure.
-        """
-        self._write_sem.acquire()
-        try:
-            future: concurrent.futures.Future = self._executor.submit(
-                self._write_with_cleanup, key, data
-            )
-            with self._futures_lock:
-                self._futures.append(future)
-        except Exception:
-            self._write_sem.release()
-            raise
-
-    def _write_with_cleanup(
-        self, key: tuple[slice, slice, slice], data: np.ndarray
+    def __setitem__(
+        self,
+        key: tuple[slice, slice, slice],
+        data: np.ndarray,
     ) -> None:
-        """Wrapper that releases the backpressure semaphore after write."""
-        try:
-            self.write(key, data)
-        finally:
-            self._write_sem.release()
+        """Write the chunk to disk immediately from the calling thread."""
+        self.write(key, data)
 
     # ------------------------------------------------------------------
     # Core write logic
     # ------------------------------------------------------------------
 
-    def write(self, key: tuple[slice, slice, slice], data: np.ndarray) -> None:
+    def write(
+        self,
+        key: tuple[slice, slice, slice],
+        data: np.ndarray,
+    ) -> None:
         """Route chunk bands to target files and write them to disk.
 
         Parameters
@@ -398,39 +352,33 @@ class MultiBinaryFileWriter:
         )
 
         for local_idx, global_band_idx in enumerate(range(b_start, b_stop)):
-            target_file = self.file_map.get(global_band_idx)
-            single_band_data = data[local_idx, :, :]
+            target_file = self.file_map[global_band_idx]
+            band_data = data[local_idx, :, :]
 
-            if not single_band_data.flags["C_CONTIGUOUS"]:
-                single_band_data = np.ascontiguousarray(single_band_data)
+            if not band_data.flags["C_CONTIGUOUS"]:
+                band_data = np.ascontiguousarray(band_data)
 
-            with self._file_locks[global_band_idx]:
-                if is_full:
-                    # Fast path: single contiguous write of the full image.
-                    single_band_data.tofile(str(target_file))
-                else:
-                    spatial_offset = (
-                        r_start * self.row_stride + c_start * self.dtype.itemsize
-                    )
+            if is_full:
+                # Fast path: full-frame contiguous write.  ``tofile`` creates
+                # (or overwrites) the file in a single OS-level write.
+                band_data.tofile(str(target_file))
+            else:
+                offset = r_start * self.row_stride + c_start * self.dtype.itemsize
+                with self._locks[global_band_idx]:
+                    # Lazily create & size the file on first partial write.
+                    if not target_file.exists():
+                        with open(target_file, "wb") as f:
+                            f.truncate(self.single_file_size)
                     with open(target_file, "r+b") as f:
-                        f.seek(spatial_offset)
-                        f.write(single_band_data.tobytes())
+                        f.seek(offset)
+                        f.write(band_data.tobytes())
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def notify_finished(self, timeout: float | None = None) -> None:
-        """Block until all queued writes have been flushed to disk."""
-        if timeout is None:
-            timeout = getattr(self, "timeout", None)
-        with self._futures_lock:
-            futures_snapshot = list(self._futures)
-        if futures_snapshot:
-            concurrent.futures.wait(futures_snapshot, timeout=timeout)
-        self._executor.shutdown(wait=True)
-        logger.debug("MultiBinaryFileWriter: all writes flushed, executor shut down.")
+        """All writes are synchronous — nothing to drain."""
 
     def __del__(self) -> None:
-        if hasattr(self, "_executor"):
-            self._executor.shutdown(wait=False)
+        pass
