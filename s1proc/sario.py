@@ -1,14 +1,14 @@
+import json
 import os
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Sequence, Tuple
+from typing import Any, List, Literal, Sequence
 
+import fsspec
 import numpy as np
 import zarr
 from matplotlib import pyplot as plt
-from matplotlib.colors import ListedColormap
-from numcodecs import Blosc
 from numpy.typing import DTypeLike
 from tqdm import tqdm
 
@@ -17,7 +17,6 @@ from s1proc._log import setup_logger
 logger = setup_logger(__name__, level="INFO")
 
 NHEAD = 64
-BLOCK = 512
 
 
 class CroppedImage:
@@ -498,95 +497,139 @@ def read_orbit(orbfile: str) -> np.ndarray:
     return orb
 
 
-def bwr_cmap(n):
-    x = np.array([-1, 0, 1])
-    y = np.array([[1, 0, 0], [1, 1, 1], [0, 0, 1]])
-    c = np.ones((n, 4))
-    xval = np.linspace(-1, 1, n)
-    for i in range(3):
-        c[:, i] = np.interp(xval, x, y[:, i])
-    return c
+def _store_attr(group: zarr.Group, key: str, value: Any) -> None:
+    """Write a metadata value to a zarr group, handling non-scalar types."""
+    if isinstance(value, (np.ndarray, list)):
+        group.attrs[key] = value
+    elif isinstance(value, Path):
+        group.attrs[key] = str(value)
+    else:
+        group.attrs[key] = value
 
 
-bwrcmap = ListedColormap(bwr_cmap(256))
+def _nearest_divisor(n: int, target: int) -> int:
+    """Return the divisor of *n* closest to *target*.
+
+    When the closest divisor would lead to an impractically large number of
+    chunks (more than *n* // 2), the function returns *n* itself so that each
+    file contributes a single chunk.
+    """
+    if target <= 0 or n <= 0:
+        return 1
+    divisors: list[int] = []
+    limit = int(n**0.5)
+    for i in range(1, limit + 1):
+        if n % i == 0:
+            divisors.append(i)
+            if i != n // i:
+                divisors.append(n // i)
+    best = min(divisors, key=lambda d: abs(d - target))
+    # If the best divisor is tiny (1 or 2) and target was substantially
+    # larger, prefer full-file chunks over many tiny ones.
+    if best <= 2 and target > best * 2:
+        return n
+    return best
 
 
-def img2zarr(
-    input_files: Sequence[str],
-    load_function: Callable,
-    output_file: Path | str,
+def create_virtual_stack(
+    img_files: Sequence[Path | str],
+    dtype: DTypeLike,
     nrow: int,
     ncol: int,
-    dtype: DTypeLike,
-    attrs: Dict[str, Any],
-    chunks: Tuple[int, int, int] | None = None,
-):
-    nimg = len(input_files)
-    # create a data set
-    if chunks is None:
-        chunk_nrow = np.minimum(512, nrow)
-        chunk_ncol = np.minimum(512, ncol)
-        chunks = (1, chunk_nrow, chunk_ncol)
-    z = zarr.open(
-        output_file,
-        mode="w",
-        shape=(nimg, nrow, ncol),
-        chunks=chunks,
-        dtype=dtype,
-        compressor=Blosc(cname="zstd", clevel=3),
-        zarr_format=2,
-    )
+    row_chunk: int,
+    new_axis: Literal[0, 2] = 0,
+) -> fsspec.mapping.FSMap:
+    """Create a virtual 3-D dataset from a list of raw binary interferograms.
 
-    # copy attrs
-    for key in attrs:
-        z.attrs[key] = attrs[key]
+    Builds a `fsspec` ``"reference"`` filesystem that maps byte ranges of the
+    source binary files into a single virtual Zarr v2 array with shape
+    ``(nimg, nrow, ncol)`` if ``new_axis = 0`` or ``(nrow, ncol, nimg)`` if
+    ``new_axis = 2``. No data are copied — each chunk stores pointers
+    to contiguous runs of rows within one file so that reads are efficient.
 
-    for i, input_file in tqdm(enumerate(input_files), total=nimg, desc="reading data"):
-        img = load_function(input_file, nrow, ncol)
-        z[i, :, :] = img
+    Parameters
+    ----------
+    img_files : Sequence[Path | str]
+        Paths to the raw binary image files (complex64, C order).
+    dtype : DTypeLike
+        NumPy dtype of the image values (e.g. ``np.complex64``).
+    nrow : int
+        Number of rows in each image.
+    ncol : int
+        Number of columns in each image.
+    row_chunk: int
+        Number of rows of each chunk.
+    new_axis: Literal[0, 2]
+        Where to put the new time axis.
+        0: The shape of the stack will be [nimg, nrow, ncol]
 
+    Returns
+    -------
+    fsspec.mapping.FSMap
+        A virtual filesystem mapping rooted at the ``"data"`` Zarr group.
+        Pass to ``dask.array.from_zarr`` to obtain a lazy 3-D array.
 
-def load_unwrapped_interferograms(
-    ifg_path: str | Path | None = None, config: str = "config.yaml"
-):
-    from s1proc._config import load_config
-    from s1proc.geocoordinates import GeoCoordinates
-    from s1proc.sario import img2zarr, readc
-    from s1proc.utils import IfgList, get_files
+    Raises
+    ------
+    ValueError
+        If *img_files* is empty.
+    """
+    if not img_files:
+        raise ValueError("The provided image list 'img_files' is empty.")
 
-    cfg = load_config(config)
-    icfg = cfg.io
+    nimg = len(img_files)
+    dtype_obj = np.dtype(dtype)
+    bytes_per_elem = dtype_obj.itemsize
 
-    if ifg_path is None:
-        ifg_path = icfg.unw_path
+    # ---- Build kerchunk-style reference dictionary ------------------------
+    refs: dict[str, str | list] = {}
 
-    ifg_files = get_files(ifg_path, "unw")
-    nifg = len(ifg_files)
-    logger.debug(f"Number of interferograms: {nifg}")
+    # Root group
+    refs[".zgroup"] = '{"zarr_format": 2}'
 
-    rsc = GeoCoordinates(icfg.multilook_rsc_file)
-    nrow, ncol = rsc.nlat, rsc.nlon
-    logger.debug(f"Image shape: {nrow} x {ncol}")
+    # "data" array group
+    refs["data/.zgroup"] = '{"zarr_format": 2}'
+    refs["data/.zattrs"] = json.dumps({})
 
-    ifg_list = IfgList(ifg_files)
+    if new_axis == 0:
+        shape_3d = [nimg, nrow, ncol]
+        chunk_3d = [1, row_chunk, ncol]
+        key_format = "data/{k}.0.{i}"
+    else:
+        shape_3d = [nrow, ncol, nimg]
+        chunk_3d = [row_chunk, ncol, 1]
+        key_format = "data/{i}.0.{k}"
 
-    attrs = {
-        "name": "unwrapped interferograms",
-        "date1": ifg_list.df["date1"].tolist(),
-        "date2": ifg_list.df["date2"].tolist(),
-        "tempbl": ifg_list.df["tempbl"].tolist(),
-    }
+    refs["data/.zarray"] = json.dumps({
+        "zarr_format": 2,
+        "shape": shape_3d,
+        "chunks": chunk_3d,
+        "dtype": dtype_obj.str,
+        "order": "C",
+        "compressor": None,
+        "fill_value": None,
+        "filters": None,
+    })
 
-    def load_function(input_file: str, nrow: int, ncol: int):
-        img = readc(input_file, ncol)
-        return img.imag
+    chunk_nbytes = row_chunk * ncol * bytes_per_elem
+    n_chunk_row = (nrow + row_chunk - 1) // row_chunk
+    for k, file_path in enumerate(img_files):
+        abs_path = str(Path(file_path).resolve())
 
-    img2zarr(
-        ifg_files,
-        load_function,
-        "unwrapped_interferograms.zarr",
-        nrow,
-        ncol,
-        np.float32,
-        attrs,
-    )
+        for i in range(n_chunk_row - 1):
+            key = key_format.format(i, k)
+            offset = i * chunk_nbytes
+            refs[key] = [abs_path, offset, chunk_nbytes]
+        # In case that chunk_row is not a divisor of nrow, we need to reduce row_start
+        # for the last chunk such that it has the same shape (size) as other chunks.
+        key = key_format.format(i=n_chunk_row - 1, k=k)
+        row_start = nrow - row_chunk
+        offset = row_start * ncol * bytes_per_elem
+
+        refs[key] = [abs_path, offset, chunk_nbytes]
+
+    # Wrap the reference dict in a virtual filesystem, rooted at "data"
+    # so that dask.array.from_zarr sees the array directly.
+    fs = fsspec.filesystem("reference", fo=refs)
+    mapper = fs.get_mapper("data")
+    return mapper
