@@ -483,26 +483,21 @@ def goldstein_filter_wrapper(
 
     align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
 
-    from s1proc.from_dolphin._background import MultiBinaryFileWriter
+    from s1proc.from_dolphin._background import BinaryFileStore
 
-    multi_writer = MultiBinaryFileWriter(
+    store = BinaryFileStore(
         file_map=output_routing_table,
         single_file_shape=(nrow, ncol),
         dtype=np.complex64,
-        nq=4,
-        timeout=2,
     )
     try:
         with ProgressBar():
-            da.store(
-                sources=align_dask_stack,
-                targets=multi_writer,
-                lock=False,
+            da.to_zarr(
+                align_dask_stack,
+                url=store,
                 compute=True,
             )
     finally:
-        logger.info("Waiting for background writer threads to flush to disk...")
-        multi_writer.notify_finished()
         logger.info("Pipeline completed — all binary files flushed to disk.")
 
     logger.info("Goldstein filtering complete: %d interferograms processed", B)

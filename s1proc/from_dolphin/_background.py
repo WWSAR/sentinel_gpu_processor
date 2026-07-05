@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import abc
+import json
 import threading
+from collections.abc import MutableMapping
 from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Event, Thread, main_thread
@@ -417,3 +419,98 @@ class MultiBinaryFileWriter:
                 self._queue.put_nowait(None)
             except Full:
                 pass
+
+
+class BinaryFileStore(MutableMapping):
+    """A ``MutableMapping`` that routes zarr chunk writes to flat binary files.
+
+    Stores zarr v2 metadata (``.zarray``, ``.zgroup``, ``.zattrs``) in
+    memory and routes chunk writes directly to individual binary files at
+    the correct byte offsets.  Designed to be passed as the ``url`` argument
+    to ``da.to_zarr``, inheriting its native parallel I/O path.
+
+    Chunk keys are parsed as ``"band.row.col"`` — the band index selects
+    the target file from *file_map*, and the row/col indices determine the
+    in-file byte offset for spatial chunking.
+    """
+
+    def __init__(
+        self,
+        file_map: Dict[int, Path],
+        single_file_shape: Tuple[int, int],
+        dtype: DTypeLike,
+    ) -> None:
+        self.file_map = {k: Path(v) for k, v in file_map.items()}
+        self.rows, self.cols = single_file_shape
+        self.dtype = np.dtype(dtype)
+        self.bytes_per_elem = self.dtype.itemsize
+        nimg = len(file_map)
+
+        # Pre-populate zarr v2 metadata so da.to_zarr sees a compatible
+        # array.  Chunking is fixed at 1 per band / full frame — this
+        # MUST match the dask array chunking after the final rechunk.
+        self._store: Dict[str, object] = {}
+        self._store[".zgroup"] = json.dumps({"zarr_format": 2})
+        self._store[".zarray"] = json.dumps({
+            "zarr_format": 2,
+            "shape": [nimg, self.rows, self.cols],
+            "chunks": [1, self.rows, self.cols],
+            "dtype": self.dtype.str,
+            "order": "C",
+            "compressor": None,
+            "fill_value": None,
+            "filters": None,
+        })
+        self._store[".zattrs"] = json.dumps({})
+
+        # Chunk dimensions (cached for offset calculation).
+        self._chunk_rows = self.rows
+        self._chunk_cols = self.cols
+
+        # Ensure the output directory exists.
+        first = next(iter(self.file_map.values()))
+        first.parent.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # MutableMapping protocol
+    # ------------------------------------------------------------------
+
+    def __getitem__(self, key: str) -> object:
+        return self._store[key]
+
+    def __setitem__(self, key: str, value: object) -> None:
+        if key.startswith("."):
+            # Metadata: store in memory.
+            self._store[key] = value
+            return
+
+        # Chunk key: "band.row.col" — route bytes to the target file.
+        band_idx, row_chunk_idx, _col_chunk_idx = (int(p) for p in key.split("."))
+        target_file = self.file_map[band_idx]
+
+        if not isinstance(value, bytes):
+            raise TypeError(
+                f"Expected bytes for chunk key {key}, got {type(value).__name__}"
+            )
+
+        if self._chunk_rows == self.rows:
+            # Full-frame fast path: overwrite the entire file.
+            target_file.write_bytes(value)
+        else:
+            # Spatial chunk: seek to the correct row offset.
+            offset = row_chunk_idx * self._chunk_rows * self.cols * self.bytes_per_elem
+            if not target_file.exists():
+                with open(target_file, "wb") as f:
+                    f.truncate(self.rows * self.cols * self.bytes_per_elem)
+            with open(target_file, "r+b") as f:
+                f.seek(offset)
+                f.write(value)
+
+    def __delitem__(self, key: str) -> None:
+        del self._store[key]
+
+    def __iter__(self):
+        return iter(self._store)
+
+    def __len__(self) -> int:
+        return len(self._store)
