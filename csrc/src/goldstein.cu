@@ -254,9 +254,14 @@ batched_overlap_add_kernel(const cufftComplex *__restrict__ d_filtered_patches,
       int target_y = i1 + ty;
       int target_x = j1 + tx;
 
-      float wx = (tx < n_win / 2) ? tx : (n_win - 1 - tx);
-      float wy = (ty < n_win / 2) ? ty : (n_win - 1 - ty);
-      float weight = wx + wy;
+      // 2D separable Hamming window: w(n) = 0.54 - 0.46*cos(2πn/(N-1))
+      // This eliminates the sharp derivative discontinuities of the old
+      // triangular weight, producing smooth phase transitions across patches.
+      const float TWO_PI = 6.283185307179586f;
+      float win_denom = (float)(n_win - 1);
+      float hamming_x = 0.54f - 0.46f * __cosf(TWO_PI * tx / win_denom);
+      float hamming_y = 0.54f - 0.46f * __cosf(TWO_PI * ty / win_denom);
+      float weight = hamming_x * hamming_y;
 
       int src_offset = patch_idx * n_win * n_win + ty * n_win + tx;
       cufftComplex val = d_filtered_patches[src_offset];
@@ -322,6 +327,18 @@ __global__ void extract_patches_kernel(const cufftComplex *__restrict__ d_in,
   }
 }
 
+__global__ void apply_mask(cufftComplex *__restrict__ d_out_ph,
+                           const cufftComplex *__restrict__ d_in_ph,
+                           const std::size_t n) {
+  std::size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+  if (d_in_ph[idx].x == 0.0f) {
+    cufftComplex zero = make_cuComplex(0.0f, 0.0f);
+    d_out_ph[idx] = zero;
+  }
+}
+
 /**
  * Host function to perform Goldstein filtering on the input image.
  */
@@ -360,7 +377,6 @@ void goldstein_filter_cuda_host(cufftComplex *d_in, cufftComplex *d_out,
   gaussian_filter_kernel<<<grid_filter, block_filter>>>(
       d_patch_buffer, d_spec_magnitude, n_win, total_patches);
   CUDA_CHECK_LAST_ERROR();
-  CHECK_CUDA(cudaDeviceSynchronize());
 
   // 4. Compute the patchwise mean of spectrum magnitude
   int patch_size = n_win * n_win;
@@ -376,13 +392,11 @@ void goldstein_filter_cuda_host(cufftComplex *d_in, cufftComplex *d_out,
         d_spec_magnitude, n_win, total_patches);
   }
   CUDA_CHECK_LAST_ERROR();
-  CHECK_CUDA(cudaDeviceSynchronize());
 
   // 5. Multiply the spectrum by the filtering factor
   spectrum_enhancement<<<grid_filter, block_filter>>>(
       d_patch_buffer, d_spec_magnitude, alpha, patch_elements);
   CUDA_CHECK_LAST_ERROR();
-  CHECK_CUDA(cudaDeviceSynchronize());
 
   // 6. Apply Inverse FFT to get the filtered patches back in spatial domain
   CHECK_CUFFT(
@@ -394,7 +408,6 @@ void goldstein_filter_cuda_host(cufftComplex *d_in, cufftComplex *d_out,
       d_patch_buffer, d_out, d_weight_buffer, n_win, n_inc, n_win_i, n_win_j,
       nrow, ncol);
   CUDA_CHECK_LAST_ERROR();
-  CHECK_CUDA(cudaDeviceSynchronize());
 
   // 8. Normalize the output by dividing by the accumulated weights
   int total_pixels = nrow * ncol;
@@ -402,6 +415,10 @@ void goldstein_filter_cuda_host(cufftComplex *d_in, cufftComplex *d_out,
   int grid_norm = (total_pixels + 255) / 256;
   normalize_output_kernel<<<grid_norm, block_norm>>>(d_out, d_weight_buffer,
                                                      total_pixels);
+  CUDA_CHECK_LAST_ERROR();
+
+  // 9. Apply mask to set output pixels to zero where input pixels are zero
+  apply_mask<<<grid_norm, block_norm>>>(d_out, d_in, total_pixels);
   CUDA_CHECK_LAST_ERROR();
   CHECK_CUDA(cudaDeviceSynchronize());
   CHECK_CUDA(cudaMemcpy(out, d_out, img_bytes, cudaMemcpyDeviceToHost));
@@ -471,6 +488,8 @@ void goldstein_filter(const std::string &in_str, const std::string &out_str,
     if (is_ifg) {
       if (out_str.empty()) {
         out_ifg_file = std::string("filtered.int");
+      } else {
+        out_ifg_file = out_str;
       }
     } else {
       if (out_str.empty()) {
