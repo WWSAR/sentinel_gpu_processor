@@ -25,15 +25,15 @@ from typing import List
 import cupy as cp
 import numpy as np
 
+from s1proc._background import MultiBinaryFileWriter
 from s1proc._log import setup_logger
 from s1proc.utils import _detect_gpu_count
 
 logger = setup_logger(__name__, level="INFO")
 
 
-# from cupyx.scipy.ndimage import convolve1d
 GPU_POOL = queue.Queue()
-for gpu_id in np.arange(_detect_gpu_count()):  # 如果你有4张卡，这里就写 [0, 1, 2, 3]
+for gpu_id in np.arange(_detect_gpu_count()):
     GPU_POOL.put(gpu_id)
 
 
@@ -483,10 +483,6 @@ def goldstein_filter_wrapper(
 
     align_dask_stack = filtered_dask_stack.rechunk({0: 1, 1: nrow, 2: ncol})
 
-    from s1proc.from_dolphin._background import (
-        MultiBinaryFileWriter,
-    )
-
     # MultiBinaryFileWriter uses a pool of daemon writer threads behind a
     # bounded queue.  __setitem__ is a fast queue.put() — the dask thread
     # returns immediately and the writers flush to disk in the background.
@@ -501,7 +497,6 @@ def goldstein_filter_wrapper(
         single_file_shape=(nrow, ncol),
         dtype=np.complex64,
         nq=4,
-        timeout=2,
     )
     try:
         with ProgressBar():
