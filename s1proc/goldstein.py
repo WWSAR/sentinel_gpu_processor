@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import queue
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Literal, Sequence, Tuple
 
 import cupy as cp
 import numpy as np
@@ -28,9 +28,11 @@ import numpy as np
 if TYPE_CHECKING:
     import dask.array as da
 
+    FilterInputType = da.Array | Path | str | Sequence[Path | str]
+
 from s1proc._background import MultiBinaryFileWriter
 from s1proc._log import setup_logger
-from s1proc.utils import _detect_gpu_count
+from s1proc.utils import IfgList, _detect_gpu_count
 
 logger = setup_logger(__name__, level="INFO")
 
@@ -102,7 +104,7 @@ def batch_goldstein_filter(
     Parameters
     ----------
     igrams : cp.ndarray
-        Input interferogram stack of shape ``(B, H, W)`` and dtype
+        Input interferogram stack of shape ``(H, W, B)`` and dtype
         ``complex64``.  Zeros indicate masked pixels and are preserved in the
         output.
     alpha : float
@@ -119,7 +121,7 @@ def batch_goldstein_filter(
     Returns
     -------
     cp.ndarray
-        Filtered interferograms of shape ``(B, H, W)`` and dtype
+        Filtered interferograms of shape ``(H, W, B)`` and dtype
         ``complex64``.
 
     Notes
@@ -144,7 +146,7 @@ def batch_goldstein_filter(
     """
     with cp.cuda.Device(gpu_id):
         d_igrams = cp.array(igrams)
-        B, H_orig, W_orig = igrams.shape
+        H_orig, W_orig, B = igrams.shape
         stride = window_size - overlap
 
         # ---- 1. Pad so windows tile evenly across the image -----------------------
@@ -160,19 +162,19 @@ def batch_goldstein_filter(
         pad_w = min_pad_w + (stride - (W_min - window_size) % stride) % stride
 
         if pad_h > 0 or pad_w > 0:
-            padded = cp.pad(d_igrams, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
+            padded = cp.pad(d_igrams, ((0, pad_h), (0, pad_w), (0, 0)), mode="edge")
         else:
             padded = d_igrams
-        H_pad, W_pad = padded.shape[1], padded.shape[2]
+        H_pad, W_pad = padded.shape[0], padded.shape[1]
 
         # ---- 2. Zero-copy patch extraction ---------------------------------------
         # sliding_window_view produces a 5-D view; striding selects patches at the
         # requested overlap interval.
         patches: cp.ndarray = cp.lib.stride_tricks.sliding_window_view(
-            padded, (window_size, window_size), axis=(1, 2)
+            padded, (window_size, window_size), axis=(0, 1)
         )
-        patches = patches[:, ::stride, ::stride, :, :]  # (B, nwy, nwx, W, W)
-        _, nwy, nwx, win_h, win_w = patches.shape
+        patches = patches[::stride, ::stride, :, :, :]  # (nwy, nwx, B, W, W)
+        nwy, nwx, _, win_h, win_w = patches.shape
         assert win_h == win_w == window_size, "Window dimension mismatch"
 
         # ---- 3. Hamming window ---------------------------------------------------
@@ -183,7 +185,7 @@ def batch_goldstein_filter(
         patches = cp.fft.fft2(patches, axes=(-2, -1))
 
         # ---- 5. Amplitude spectrum -----------------------------------------------
-        amplitude = cp.abs(patches)  # (B, nwy, nwx, W, W), float32
+        amplitude = cp.abs(patches)  # (nwy, nwx, B, W, W), float32
 
         # ---- 6. Gaussian smoothing in frequency domain ---------------------------
         # has very small impact on final filtered image quality, just skip this step
@@ -206,7 +208,7 @@ def batch_goldstein_filter(
         elif alpha == 1.0:
             patches *= amplitude
         else:
-            patches *= cp.power(amplitude, alpha)
+            patches *= cp.power(amplitude, float(alpha))
 
         # ---- 9. Batch inverse FFT ------------------------------------------------
         patches = cp.fft.ifft2(patches, axes=(-2, -1))
@@ -217,8 +219,8 @@ def batch_goldstein_filter(
         # patches.  Each iteration performs a single strided-slice accumulation
         # that updates all patches in parallel on the GPU.  For a 32×32 window
         # this is 1024 fast GPU dispatches — no per-patch Python loop.
-        output = cp.zeros((B, H_pad, W_pad), dtype=cp.complex64)
-        weight = cp.zeros((B, H_pad, W_pad), dtype=cp.float32)
+        output = cp.zeros((H_pad, W_pad, B), dtype=cp.complex64)
+        weight = cp.zeros((H_pad, W_pad, B), dtype=cp.float32)
 
         # The analysis window (Hamming) is applied before the FFT and the same
         # window serves as the synthesis weight during overlap-add.  To achieve
@@ -229,8 +231,8 @@ def batch_goldstein_filter(
             for dx in range(window_size):
                 x_slice = slice(dx, dx + nwx * stride, stride)
                 w = hamming_2d[dy, dx]
-                output[:, y_slice, x_slice] += patches[:, :, :, dy, dx] * w
-                weight[:, y_slice, x_slice] += w
+                output[y_slice, x_slice, :] += patches[:, :, :, dy, dx] * w
+                weight[y_slice, x_slice, :] += w
 
         # ---- 11. Normalise by accumulated weights --------------------------------
         valid = weight > 0.0
@@ -238,7 +240,7 @@ def batch_goldstein_filter(
 
         # ---- 12. Crop back to original dimensions --------------------------------
         if pad_h > 0 or pad_w > 0:
-            output = output[:, :H_orig, :W_orig]
+            output = output[:H_orig, :W_orig, :]
 
         # ---- 13. Preserve input mask (zero → zero) -------------------------------
         input_mask = igrams == cp.complex64(0.0 + 0.0j)
@@ -249,15 +251,42 @@ def batch_goldstein_filter(
         return cp.asnumpy(output)
 
 
-def run_batch_goldstein_filter(*args, **kw):
+def run_batch_goldstein_filter(
+    igrams: np.ndarray,
+    nrow: int,
+    ncol: int,
+    row_chunk: int,
+    alpha: float,
+    window_size: int,
+    overlap: int,
+):
     """
     Get an available GPU device for running goldstein filter
     """
     assigned_gpu = GPU_POOL.get()
 
     try:
-        result = batch_goldstein_filter(*args, **kw, gpu_id=assigned_gpu)
-        return result
+        if row_chunk < nrow:
+            valid_row_chunk = row_chunk - overlap
+            row_start_indices = np.arange(0, nrow - row_chunk + 1, valid_row_chunk)
+            nimg = igrams.shape[2]
+            filtered_ifg = np.zeros((nrow, ncol, nimg), dtype=np.complex64)
+            for row_start in row_start_indices:
+                filtered_chunk = batch_goldstein_filter(
+                    igrams[row_start : row_start + row_chunk, :, :],
+                    alpha,
+                    window_size,
+                    overlap,
+                    gpu_id=assigned_gpu,
+                )
+                filtered_ifg[row_start : row_start + valid_row_chunk, :, :] = (
+                    filtered_chunk[0:valid_row_chunk, :, :]
+                )
+        else:
+            filtered_ifg = batch_goldstein_filter(
+                igrams, alpha, window_size, overlap, gpu_id=assigned_gpu
+            )
+        return filtered_ifg
 
     finally:
         GPU_POOL.put(assigned_gpu)
@@ -385,12 +414,12 @@ def get_goldstein_chunks(
         window_size).
     max_vram_gb : float | None
         Maximum GPU VRAM budget in gigabytes.  When *None*, queries
-        ``pynvml`` for the free VRAM of the GPU with the most headroom.
+        ``pynvml`` for the total VRAM of the GPU with the most headroom.
 
     Returns
     -------
     Tuple[int, int, int]
-        ``(time_chunk, row_chunk, col_chunk)`` for the dask array.
+        ``(img_chunk, row_chunk, col_chunk)`` for the dask array.
     """
     from s1proc.utils import _query_gpu_info
 
@@ -400,7 +429,7 @@ def get_goldstein_chunks(
     if max_vram_gb is None:
         gpu_info = _query_gpu_info()
         max_vram_gb = max(
-            gpu_info[i]["free_vram_gb"] for i in range(gpu_info["gpu_count"])
+            gpu_info[i]["total_vram_gb"] for i in range(gpu_info["gpu_count"])
         )
 
     max_vram_bytes = int(max_vram_gb * 1024**3)
@@ -412,10 +441,11 @@ def get_goldstein_chunks(
     )
 
     if image_vram > max_vram_bytes:
-        time_chunk = 1
+        img_chunk = 1
         row_chunk = _compute_spatial_row_chunk(
             nrow, ncol, window_size - overlap, window_size, max_vram_bytes
         )
+        row_chunk = max(window_size + overlap, row_chunk // window_size * window_size)
         logger.info(
             "Spatial chunking enabled: %d rows per chunk (image: %d rows)",
             row_chunk,
@@ -423,19 +453,15 @@ def get_goldstein_chunks(
         )
     else:
         batch_size = max(1, int(max_vram_bytes / image_vram))
-        time_chunk = batch_size
+        img_chunk = batch_size
         row_chunk = nrow
         logger.info("Batch size: %d interferograms per GPU call", batch_size)
-    return (time_chunk, row_chunk, ncol)
+    return (img_chunk, row_chunk, ncol)
 
 
 # ---------------------------------------------------------------------------
 # Type dispatcher helpers
 # ---------------------------------------------------------------------------
-
-
-# Union type accepted by the unified entry point.
-FilterInputType = str | Path | List[str | Path] | "da.Array"
 
 
 def _is_zarr_path(path: Path) -> bool:
@@ -454,7 +480,7 @@ def _load_as_dask_array(
     ncol: int,
     row_chunk: int,
 ) -> "da.Array":
-    """Normalise *igrams* to a ``dask.array.Array`` with shape ``(N, H, W)``.
+    """Normalise *igrams* to a ``dask.array.Array`` with shape ``(H, W, N)``.
 
     Parameters
     ----------
@@ -472,7 +498,7 @@ def _load_as_dask_array(
     Returns
     -------
     da.Array
-        3-D dask array of shape ``(N, nrow, ncol)`` and dtype
+        3-D dask array of shape ``(nrow, ncol, N)`` and dtype
         ``complex64``.
 
     Raises
@@ -503,7 +529,7 @@ def _load_as_dask_array(
     # ---- 3. List of paths ---------------------------------------------------
     if isinstance(igrams, list):
         if len(igrams) == 0:
-            return da.zeros((0, nrow, ncol), dtype=np.complex64, chunks=(1, nrow, ncol))
+            return da.zeros((nrow, ncol, 0), dtype=np.complex64, chunks=(nrow, ncol, 1))
 
         first = Path(igrams[0])
         if _is_zarr_path(first):
@@ -527,7 +553,7 @@ def _load_as_dask_array(
             nrow,
             ncol,
             row_chunk,
-            new_axis=0,
+            new_axis=2,
         )
         return da.from_zarr(mapper)
 
@@ -550,6 +576,7 @@ def goldstein_filter_wrapper(
     window_size: int = 32,
     overlap: int | None = None,
     max_vram_gb: float | None = None,
+    img_chunk: int | None = None,
 ) -> "da.Array":
     """Apply the Goldstein filter to a stack of wrapped interferograms.
 
@@ -583,12 +610,14 @@ def goldstein_filter_wrapper(
     max_vram_gb : float or None
         Maximum GPU VRAM budget in GB.  ``None`` (default) auto-detects
         the free VRAM on the most available GPU via ``pynvml``.
+    img_chunk: int | None
+        Number of images to process as a batch
 
     Returns
     -------
     da.Array
         Lazy 3-D dask array of filtered interferograms with shape
-        ``(N, nrow, ncol)`` and dtype ``complex64``.  Call ``.compute()``
+        ``(nrow, ncol, N)`` and dtype ``complex64``.  Call ``.compute()``
         or pass to :func:`save_filtered_stack` to write to disk.
 
     Raises
@@ -609,8 +638,9 @@ def goldstein_filter_wrapper(
     >>> from s1proc.goldstein import goldstein_filter_wrapper, save_filtered_stack
     >>> from s1proc.utils import get_files
     >>> files = get_files("ifg/", "int")
+    >>> out_files = [Path("ifg_corrected") / Path(f).basename for f in files]
     >>> filtered = goldstein_filter_wrapper(files, nrow=2400, ncol=3200)
-    >>> save_filtered_stack(filtered, files, out_dir="filtered/")
+    >>> save_filtered_stack(filtered, out_path = out_files)
     """
     import dask.array as da
 
@@ -622,20 +652,11 @@ def goldstein_filter_wrapper(
             f"overlap ({overlap}) must be less than window_size ({window_size})"
         )
 
-    # ---- Determine VRAM budget ---------------------------------------------
-    if max_vram_gb is None:
-        from s1proc.utils import _query_gpu_info
-
-        gpu_info = _query_gpu_info()
-        max_vram_gb = max(
-            gpu_info[i]["free_vram_gb"] for i in range(gpu_info["gpu_count"])
-        )
-
     # ---- Load & chunk ------------------------------------------------------
     ifg_stack = _load_as_dask_array(igrams, nrow, ncol, row_chunk=nrow)
 
     # ---- Determine chunking ------------------------------------------------
-    _nrow, _ncol = int(ifg_stack.shape[1]), int(ifg_stack.shape[2])
+    _nrow, _ncol = int(ifg_stack.shape[0]), int(ifg_stack.shape[1])
     nrow = nrow or _nrow
     ncol = ncol or _ncol
 
@@ -645,11 +666,12 @@ def goldstein_filter_wrapper(
             "or pass input with known shape (dask array or Zarr)."
         )
 
-    time_chunk, row_chunk, col_chunk = get_goldstein_chunks(
+    _img_chunk, row_chunk, _ = get_goldstein_chunks(
         nrow, ncol, window_size, overlap, max_vram_gb
     )
+    img_chunk = img_chunk or _img_chunk
 
-    ifg_stack = ifg_stack.rechunk({0: time_chunk, 1: row_chunk, 2: col_chunk})
+    ifg_stack = ifg_stack.rechunk({0: nrow, 1: ncol, 2: img_chunk})
 
     # ---- GPU filtering -----------------------------------------------------
     filtered_stack = da.map_blocks(
@@ -657,12 +679,120 @@ def goldstein_filter_wrapper(
         ifg_stack,
         dtype=np.complex64,
         chunks=ifg_stack.chunks,
+        nrow=nrow,
+        ncol=ncol,
+        row_chunk=row_chunk,
         alpha=alpha,
         window_size=window_size,
         overlap=overlap,
     )
 
     return filtered_stack
+
+
+def goldstein_interpolation(
+    opt_phase_path: Path | str,
+    ifg_list: IfgList,
+    gamma_threshold: float = 0.8,
+    window_size: int = 32,
+    overlap: int | None = None,
+    alpha: float = 1.0,
+) -> "da.Array":
+    """Reconstruct and Goldstein-interpolate interferograms from optimised phase.
+
+    Implements the second-round filter of the EMI/EigenSAR pipeline: the
+    optimised phase vector produced by phase linking is used to rebuild the
+    stack of wrapped interferograms, the Goldstein filter is applied to
+    interpolate over low-coherence pixels, and high-coherence pixels are then
+    restored to their unfiltered reconstructed values so that reliable phase
+    is not smeared by the filter.
+
+    The reconstruction per interferogram ``(ref, sec)`` is
+
+    .. math::
+
+        \\mathrm{igram} = \\exp\\!\\bigl(j\\,(\\varphi_\\mathrm{ref}
+            - \\varphi_\\mathrm{sec})\\bigr),
+
+    and the final blend is
+
+    .. math::
+
+        \\mathrm{out} = \\begin{cases}
+          \\mathrm{igram}_\\mathrm{recon} & \\gamma \\ge \\gamma_\\mathrm{thr} \\\\
+          \\mathrm{igram}_\\mathrm{filtered} & \\gamma < \\gamma_\\mathrm{thr}
+        \\end{cases}
+
+    This preserves the layout
+    :math:`(\\mathrm{nrow}, \\mathrm{ncol}, \\mathrm{nimg})` end-to-end: no
+    transposes are performed on the reconstructed stack.
+
+    Parameters
+    ----------
+    opt_phase_path : Path or str
+        Path to the Zarr group written by phase linking, containing the
+        ``opt_phase`` array of shape ``(nrow, ncol, ndate)`` (float32) and the
+        ``gamma`` array of shape ``(nrow, ncol)`` (float32).
+    ifg_list : IfgList
+        Interferogram list, used to obtain ``(ref, sec)`` index pairs into the
+        ``ndate`` axis.  Only ``ref_sec_indices()`` is used.
+    gamma_threshold : float
+        Coherence above or equal to this value keeps the unfiltered
+        reconstructed complex value.  Default 0.8.
+    window_size : int
+        Goldstein processing window side length in pixels.  Default 32.
+    overlap : int or None
+        Overlap between adjacent Goldstein windows in pixels.  ``None``
+        (default) selects 75 % of *window_size*.
+    alpha : float
+        Goldstein filter strength (``0.0`` = no filtering, ``1.0`` = maximum).
+        Default 1.0 — strong smoothing so the filter fills decorrelated pixels.
+    max_vram_gb : float or None
+        GPU VRAM budget in GB forwarded to :func:`goldstein_filter_wrapper`.
+        ``None`` (default) auto-detects via ``pynvml``.
+
+    Returns
+    -------
+    da.Array
+        Lazy 3-D dask array of blended interferograms with shape
+        ``(nrow, ncol, nifg)`` and dtype ``complex64``.  Pass to
+        :func:`save_filtered_stack` to write to disk.
+
+    Raises
+    ------
+    ValueError
+        If *opt_phase_path* is not a Zarr dataset.
+    """
+    import dask.array as da
+
+    opt_phase_path = Path(opt_phase_path)
+    if not _is_zarr_path(opt_phase_path):
+        raise ValueError(f"{opt_phase_path} is not a Zarr dataset")
+
+    # ---- Load optimised phase and coherence --------------------------------
+    opt_phase = da.from_zarr(str(opt_phase_path), component="opt_phase")
+    gamma = da.from_zarr(str(opt_phase_path), component="gamma")  # (nrow, ncol)
+    nrow, ncol = gamma.shape
+
+    # ---- Reconstruct interferograms from the optimised phase vector --------
+    ref_indices, sec_indices = ifg_list.ref_sec_indices()
+    ref_phase = opt_phase[:, :, ref_indices]  # (nrow, ncol, nifg)
+    sec_phase = opt_phase[:, :, sec_indices]  # (nrow, ncol, nifg)
+    recon_stack = da.exp(1j * (ref_phase - sec_phase))  # (nrow, ncol, nifg)
+
+    # ---- Goldstein-filter the reconstructed stack --------------------------
+    filtered_stack = goldstein_filter_wrapper(
+        recon_stack, window_size=window_size, overlap=overlap, alpha=alpha
+    )  # (nrow, ncol, nifg), complex64
+
+    # ---- Blend by coherence ------------------------------------------------
+    # High-coherence pixels keep the unfiltered reconstructed value; low-
+    # coherence pixels take the Goldstein-interpolated value.  Broadcast
+    # gamma over the interferogram (last) axis.
+    keep_unfiltered = (gamma >= gamma_threshold)[:, :, None]
+    interpolated = da.where(keep_unfiltered, recon_stack, filtered_stack)
+
+    return interpolated
 
 
 # ---------------------------------------------------------------------------
@@ -672,12 +802,8 @@ def goldstein_filter_wrapper(
 
 def save_filtered_stack(
     filtered_stack: "da.Array",
-    file_paths: List[str | Path] | None = None,
-    out_path: str | Path | None = None,
-    out_suffix: str = ".filt",
-    nrow: int = 0,
-    ncol: int = 0,
-    output_format: str = "binary_files",
+    out_path: Sequence[str | Path] | str | Path,
+    output_format: Literal["binary", "zarr"] = "binary",
 ) -> None:
     """Write a filtered dask stack to disk.
 
@@ -685,23 +811,10 @@ def save_filtered_stack(
     ----------
     filtered_stack : da.Array
         Lazy 3-D filtered array from :func:`goldstein_filter_wrapper`.
-    file_paths : list[str | Path] or None
-        Original input file paths (used to derive output filenames when
-        *output_format* is ``"binary_files"``).  Ignored for zarr output.
-    out_path : str, Path, or None
-        Output directory or Zarr path.  When ``None`` for binary files,
-        outputs are placed alongside the inputs.
-    out_suffix : str
-        Suffix inserted before ``.int`` in each output filename.  Default
-        ``".filt"``, producing e.g. ``20210104_20210116.int.filt``.
-    nrow : int
-        Rows per output image (must match the source).  Required for the
-        ``"binary_files"`` format.
-    ncol : int
-        Columns per output image (must match the source).  Required for
-        the ``"binary_files"`` format.
-    output_format : str
-        ``"binary_files"`` (default) writes one flat ``complex64`` binary
+    out_path : Sequence[str | Path], str, Path,
+        Output binary files or Zarr path.
+    output_format : Literal["zarr", "binary"]
+        ``"binary"`` (default) writes one flat ``complex64`` binary
         per interferogram via ``MultiBinaryFileWriter``.
         ``"zarr"`` writes a single Zarr v3 dataset via ``da.to_zarr``.
 
@@ -713,26 +826,10 @@ def save_filtered_stack(
     import dask.array as da
     from dask.diagnostics import ProgressBar
 
-    # ---- Validate ----------------------------------------------------------
-    if output_format not in ("binary_files", "zarr"):
-        raise ValueError(
-            f"output_format must be 'binary_files' or 'zarr', got {output_format!r}"
-        )
-
-    if output_format == "binary_files":
-        if file_paths is None:
-            raise ValueError("file_paths is required for output_format='binary_files'")
-        if nrow <= 0 or ncol <= 0:
-            raise ValueError(
-                "nrow and ncol are required for output_format='binary_files'"
-            )
-
     # ---- Rechunk for writing -----------------------------------------------
-    N = len(file_paths) if file_paths else int(filtered_stack.shape[0])
-    nrow = nrow or int(filtered_stack.shape[1])
-    ncol = ncol or int(filtered_stack.shape[2])
-
-    aligned = filtered_stack.rechunk({0: 1, 1: nrow, 2: ncol})
+    N = int(filtered_stack.shape[2])
+    nrow = int(filtered_stack.shape[0])
+    ncol = int(filtered_stack.shape[1])
 
     # ---- Write -------------------------------------------------------------
     if output_format == "zarr":
@@ -740,24 +837,15 @@ def save_filtered_stack(
         logger.info("Writing filtered stack to Zarr: %s", out)
         with ProgressBar():
             da.to_zarr(
-                aligned,
+                filtered_stack,
                 url=str(out),
                 compute=True,
                 compressors=None,
                 overwrite=True,
             )
 
-    elif output_format == "binary_files":
-        if out_path is not None:
-            out_dir = Path(out_path)
-            out_dir.mkdir(parents=True, exist_ok=True)
-        else:
-            out_dir = Path(file_paths[0]).parent
-
-        output_paths = [
-            out_dir / (Path(f).stem + f".int{out_suffix}") for f in file_paths
-        ]
-        output_routing = dict(zip(range(N), output_paths))
+    elif output_format == "binary":
+        output_routing = dict(zip(range(N), out_path))
 
         writer = MultiBinaryFileWriter(
             file_map=output_routing,
@@ -768,7 +856,7 @@ def save_filtered_stack(
         try:
             with ProgressBar():
                 da.store(
-                    sources=aligned,
+                    sources=filtered_stack,
                     targets=writer,
                     lock=False,
                     compute=True,

@@ -38,13 +38,16 @@ proc:
                      # should be greater than gpu_workers * streams_per_gpu
 
 # Wrapped interferogram processing
-# Interferogram filtering, for the moment, only Goldstein filter is implemented
+# Interferogram filtering
 filter:
     enable: false
-    method: "goldstein"
+    method: "goldstein" # select between [eigensar (recommended) and goldstein]
+    # if eigensar is used, the window_size and goldstein_alpha correspond to the
+    # parameters for the first-round goldstein-filter.
     parameters:
         window_size: 32
         goldstein_alpha: 0.5
+        eigensar_gamma: 0.8
 
 # Tropospheric delay correction, for the moment, era5 is the only allowed option
 tropo:

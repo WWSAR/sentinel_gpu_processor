@@ -88,14 +88,14 @@ class MultiBinaryFileWriter:
         Parameters
         ----------
         key : tuple of slice
-            Global 3-D slice ``(band_slice, row_slice, col_slice)``.
+            Global 3-D slice ``(row_slice, col_slice, band_slice)``.
         data : np.ndarray
-            3-D block of shape ``(N_bands, chunk_rows, chunk_cols)``.
+            3-D block of shape ``(chunk_rows, chunk_cols, N_bands)``.
         """
-        b_slice, r_slice, c_slice = key
+        r_slice, c_slice, b_slice = key
 
         b_start = b_slice.start if b_slice.start is not None else 0
-        b_stop = b_slice.stop if b_slice.stop is not None else data.shape[0]
+        b_stop = b_slice.stop if b_slice.stop is not None else data.shape[2]
 
         r_start = r_slice.start if r_slice.start is not None else 0
         c_start = c_slice.start if c_slice.start is not None else 0
@@ -103,13 +103,13 @@ class MultiBinaryFileWriter:
         is_full = (
             r_start == 0
             and c_start == 0
-            and data.shape[1] == self.rows
-            and data.shape[2] == self.cols
+            and data.shape[0] == self.rows
+            and data.shape[1] == self.cols
         )
 
         for local_idx, global_band_idx in enumerate(range(b_start, b_stop)):
             target_file = self.file_map[global_band_idx]
-            band_data = data[local_idx, :, :]
+            band_data = data[:, :, local_idx]
 
             if not band_data.flags["C_CONTIGUOUS"]:
                 band_data = np.ascontiguousarray(band_data)
@@ -173,9 +173,10 @@ class BinaryFileStore(MemoryStore):
     ``zarr.create_array`` / ``da.to_zarr``, inheriting zarr's native
     parallel I/O path.
 
-    Chunk keys are of the form ``"c/{band}/{row}/{col}"`` (zarr v3
-    default).  The band index selects the target file from *file_map*;
-    row/col indices determine the in-file byte offset for spatial chunking.
+    Chunk keys are of the form ``"c/{row}/{col}/{band}"`` (zarr v3
+    default for a ``(nrow, ncol, nimg)`` array).  The band index selects
+    the target file from *file_map*; row/col indices determine the in-file
+    byte offset for spatial chunking.
     """
 
     def __init__(
@@ -218,8 +219,8 @@ class BinaryFileStore(MemoryStore):
             await super().set(key, value, byte_range)
             return
 
-        # Parse "c/{band}/{row}/{col}".
-        _prefix, band_str, row_str, _col_str = key.split("/")
+        # Parse "c/{row}/{col}/{band}".
+        _prefix, row_str, _col_str, band_str = key.split("/")
         band_idx = int(band_str)
         row_chunk_idx = int(row_str)
         target_file = self.file_map[band_idx]

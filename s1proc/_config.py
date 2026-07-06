@@ -71,12 +71,13 @@ class ProcessingConfig:
 class FilteringParams:
     window_size: int = 32
     goldstein_alpha: float = 0.5
+    eigensar_gamma: float = 0.8
 
 
 @dataclass
 class FilteringConfig:
     enable: bool = False
-    method: Literal["goldstein"] = "goldstein"
+    method: Literal["goldstein", "eigensar"] = "goldstein"
     parameters: FilteringParams = field(default_factory=FilteringParams)
 
 
