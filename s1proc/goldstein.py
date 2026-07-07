@@ -2,11 +2,7 @@
 
 This module provides a GPU-accelerated implementation of the Goldstein
 filter [Goldstein1998]_ that processes multiple interferograms simultaneously
-via a queue-based producer-consumer pipeline:
-
-1. **Background readers** read interferogram binary files into numpy arrays.
-2. **GPU processing** applies :func:`batch_goldstein_filter` on CuPy.
-3. **Background writers** write filtered results to disk.
+via a dask+cupy pipline.
 
 References
 ----------
