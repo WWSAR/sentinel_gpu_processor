@@ -21,4 +21,5 @@ zarr>=2.18.3
 dacite>=1.9.2
 ruamel.yaml>=0.18.0
 platformdirs>=4.0
-fsspec >=2024.6.0,<2027.0.0
+fsspec>=2024.6.0,<2027.0.0
+nvidia-ml-py>=12.535.0,<14.0.0
