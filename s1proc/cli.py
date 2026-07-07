@@ -19,6 +19,7 @@ def main() -> int:
     from s1proc.interfere import run_interfere
     from s1proc.phase_correction import phase_correction
     from s1proc.preproc import preprocess
+    from s1proc.run import run
     from s1proc.sentinel_stack import run_stack
     from s1proc.time_series import run_time_series
     from s1proc.unwrap import batch_unwrap
@@ -37,6 +38,7 @@ def main() -> int:
         "coh": run_coherence,
         "phasecorr": phase_correction,
         "timeseries": run_time_series,
+        "run": run,
     })
     return os.EX_OK
 
