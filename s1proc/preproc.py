@@ -105,7 +105,7 @@ def download_vrt_file():
     logger.info("cop_global.vrt is successfully downloaded.")
 
 
-def _compute_frames_bbox(features):
+def _compute_frames_polygons(features):
     """
     Compute the bounding box enclosing all frame footprints.
 
@@ -116,46 +116,36 @@ def _compute_frames_bbox(features):
 
     Returns
     -------
-    bbox : tuple of (west, south, east, north) or None
+    frame_polygons : List of tuple (west, south, east, north) or None
         Returns ``None`` if *features* is empty or no valid coordinates
         are found.
     """
     if not features:
         return None
 
-    all_lons = []
-    all_lats = []
-
+    frame_polygons = []
     for feat in features:
         geom = feat.get("geometry", {})
-        geom_type = geom.get("type")
-        coords = geom.get("coordinates", [])
+        # geom_type = geom.get("type")
+        coords = geom.get("coordinates", [])[0]
 
-        if geom_type == "Polygon":
-            rings = coords
-        elif geom_type == "MultiPolygon":
-            rings = [ring for poly in coords for ring in poly]
-        else:
-            continue
+        frame_polygons.append(coords)
 
-        for ring in rings:
-            for lon, lat in ring:
-                all_lons.append(lon)
-                all_lats.append(lat)
-
-    if not all_lons:
+    if not frame_polygons:
         return None
 
-    return (min(all_lons), min(all_lats), max(all_lons), max(all_lats))
+    return frame_polygons
 
 
-def _intersect_bbox(bbox1, bbox2):
+def _intersect_bbox(frame_polygons, bbox):
     """
-    Intersect two ``(west, south, east, north)`` bounding boxes.
+    Intersect frame polygons with ``(west, south, east, north)`` bounding boxe.
 
     Parameters
     ----------
-    bbox1, bbox2 : tuple of float
+    frame_polygons: List[Tuple]
+        Polygons of Sentinel-1 frames.
+    bbox : tuple of float
         Bounding boxes as ``(west, south, east, north)``.
 
     Returns
@@ -164,14 +154,20 @@ def _intersect_bbox(bbox1, bbox2):
         Intersection bounding box, or ``None`` if the boxes do not
         overlap.
     """
-    west = max(bbox1[0], bbox2[0])
-    south = max(bbox1[1], bbox2[1])
-    east = min(bbox1[2], bbox2[2])
-    north = min(bbox1[3], bbox2[3])
+    from s1proc.sentinel_scene import clip_polygon_with_rect
 
-    if west < east and south < north:
-        return (west, south, east, north)
-    return None
+    all_lats = []
+    all_lons = []
+    for poly in frame_polygons:
+        clipped_poly = clip_polygon_with_rect(poly, bbox[0], bbox[1], bbox[2], bbox[3])
+        for coords in clipped_poly:
+            all_lons.append(coords[0])
+            all_lats.append(coords[1])
+
+    if not all_lats:
+        return None
+
+    return min(all_lons), min(all_lats), max(all_lons), max(all_lats)
 
 
 def _download_dem(
@@ -320,20 +316,19 @@ def preprocess(config_file="config.yaml"):
             logger.info(f"Write filtered Sentinel-1 metalinks to {metalink_file}")
 
             # Compute study area bounds
-            frames_bbox = _compute_frames_bbox(s1_data["features"])
-            if frames_bbox is None:
+            frames_polygons = _compute_frames_polygons(s1_data["features"])
+            if frames_polygons is None:
                 raise RuntimeError(
                     "No frame footprints found — cannot determine study area"
                 )
 
-            logger.info("Frames bounding box: %s", frames_bbox)
+            logger.info("User input bbox: %s", bbox)
 
             bbox_tuple = (bbox[0], bbox[1], bbox[2], bbox[3])
-            study_bbox = _intersect_bbox(frames_bbox, bbox_tuple)
+            study_bbox = _intersect_bbox(frames_polygons, bbox_tuple)
             if study_bbox is None:
                 raise RuntimeError(
-                    f"Frame footprints {frames_bbox} do not overlap with area.bbox "
-                    + f" {bbox_tuple}"
+                    "Frame footprints do not overlap with area.bbox " + f" {bbox_tuple}"
                 )
             logger.info("Study area (intersection): %s", study_bbox)
             bbox = study_bbox
