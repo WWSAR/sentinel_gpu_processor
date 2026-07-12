@@ -18,6 +18,11 @@ logger = setup_logger(__name__, level="INFO")
 
 NHEAD = 64
 
+# Sentinel for on-disk complex-int16 SLC files produced by geo2rdr.
+# Pass this as *dtype* to :class:`CroppedImage` when the file stores
+# interleaved int16 I/Q pairs (4 bytes per complex element).
+COMPLEX_INT16 = "complexint16"
+
 
 class CroppedImage:
     def __init__(
@@ -29,7 +34,7 @@ class CroppedImage:
         right: int,
         bottom: int,
         data: np.ndarray | None | str,
-        dtype: type = np.complex64,
+        dtype: type | str = np.complex64,
     ):
         """
         Initialize a Cropped Image object
@@ -45,8 +50,13 @@ class CroppedImage:
             np.ndarray: fully loaded cropped image
             str: filename of the cropped image
             None: placeholder
-        dtype: type
-            Type of the image data
+        dtype: type | str
+            On-disk element type of the image.
+            ``np.complex64`` (default): 8-byte float32 I/Q pairs.
+            ``COMPLEX_INT16`` (the string ``"complexint16"``):
+            4-byte int16 I/Q pairs (interleaved).
+            In-memory data are always stored as ``np.complex64`` regardless
+            of the on-disk format.
         """
         self.nrow0 = nrow0
         self.ncol0 = ncol0
@@ -59,9 +69,32 @@ class CroppedImage:
         self.ncol = right - left
         self.dtype = dtype
 
+    @property
+    def _disk_element_bytes(self) -> int:
+        """Bytes per complex element on disk."""
+        if self.dtype == COMPLEX_INT16:
+            return 4  # two int16 values per complex element
+        return np.dtype(self.dtype).itemsize
+
+    @staticmethod
+    def _read_complex_from_file(f, n_elements: int, dtype: type | str) -> np.ndarray:
+        """Read *n_elements* complex values from file object *f*.
+
+        When *dtype* is ``COMPLEX_INT16``, reads interleaved int16 I/Q pairs
+        and converts them to ``np.complex64``.  For other dtypes the data are
+        read directly via :func:`np.fromfile`.
+        """
+        if dtype == COMPLEX_INT16:
+            raw = np.fromfile(f, count=n_elements * 2, dtype=np.int16)
+            # interleaved I/Q: [re0, im0, re1, im1, ...]
+            raw = raw.reshape(-1, 2)
+            return (raw[:, 0] + 1j * raw[:, 1]).astype(np.complex64)
+        data = np.fromfile(f, count=n_elements, dtype=dtype)
+        return data
+
     @classmethod
     def from_file(
-        cls, filename: str, load_data: bool = False, dtype: type = np.complex64
+        cls, filename: str, load_data: bool = False, dtype: type | str = np.complex64
     ):
         """
         Initialize from a file
@@ -73,8 +106,11 @@ class CroppedImage:
         load_data: bool
             If true, load all data to the data field. Otherwise, the data
             field is set to `filename`
-        dtype: type
-            Type of the image data
+        dtype: type | str
+            On-disk element type of the image data.
+            ``np.complex64`` (default): 8-byte float32 I/Q pairs.
+            ``COMPLEX_INT16`` (the string ``"complexint16"``):
+            4-byte int16 I/Q pairs.
 
         Returns
         -------
@@ -89,7 +125,7 @@ class CroppedImage:
             nrow = bottom - top
             ncol = right - left
             if load_data:
-                data = np.fromfile(f, count=nrow * ncol, dtype=dtype)
+                data = cls._read_complex_from_file(f, nrow * ncol, dtype)
                 data = np.reshape(data, (nrow, ncol))
             else:
                 data = filename
@@ -169,15 +205,10 @@ class CroppedImage:
                 overlap_bottom = np.minimum(bottom, self.bottom)
                 f.seek(
                     NHEAD * 4
-                    + (overlap_top - self.top)
-                    * self.ncol
-                    * np.dtype(self.dtype).itemsize
+                    + (overlap_top - self.top) * self.ncol * self._disk_element_bytes
                 )
-                d = np.fromfile(
-                    f,
-                    count=(overlap_bottom - overlap_top) * self.ncol,
-                    dtype=self.dtype,
-                )
+                n_elements = (overlap_bottom - overlap_top) * self.ncol
+                d = self._read_complex_from_file(f, n_elements, self.dtype)
                 d = np.reshape(d, (overlap_bottom - overlap_top, self.ncol))
             if (
                 left == self.left

@@ -83,19 +83,19 @@ template <typename T> void read_binary_stdin(const std::size_t n, T *img) {
  * stride over columns; a block-wide reduction determines whether the row has a
  * non-zero element.  Thread 0 atomically updates global min/max row indices.
  */
-__global__ void find_first_last_nonzero_rows_kernel(const float2 *d_data,
+__global__ void find_first_last_nonzero_rows_kernel(const ComplexInt16 *d_data,
                                                     int rows, int cols,
                                                     int *d_first, int *d_last) {
   int row = blockIdx.x;
   int tid = threadIdx.x;
   int stride = blockDim.x; // 256
 
-  const float2 *row_ptr = d_data + (size_t)row * cols;
+  const ComplexInt16 *row_ptr = d_data + (size_t)row * cols;
 
   bool has_nonzero = false;
   for (int c = tid; c < cols; c += stride) {
-    float2 val = row_ptr[c];
-    if (val.x != 0.0f || val.y != 0.0f) {
+    ComplexInt16 val = row_ptr[c];
+    if (val.x != 0 || val.y != 0) {
       has_nonzero = true;
       break;
     }
@@ -169,9 +169,9 @@ __global__ void deramp_burst(double *kt, double *eta, double *etaref,
  */
 __global__ void
 reproject(const short int *dem, const Complex *burstdata,
-          Complex *__restrict__ outdata, double *tt, double *xx, double *vv,
-          const std::size_t nstatvec, const double tmid, double *xmid,
-          double *vmid, const double latmax, const double lonmin,
+          ComplexInt16 *__restrict__ outdata, double *tt, double *xx,
+          double *vv, const std::size_t nstatvec, const double tmid,
+          double *xmid, double *vmid, const double latmax, const double lonmin,
           const double dlat, const double dlon, const std::size_t nlon,
           const double rngstart, const double tstart, const double dmrg,
           const double dtaz, const int nrange, const int lines_per_burst,
@@ -188,7 +188,8 @@ reproject(const short int *dem, const Complex *burstdata,
   std::size_t idx1, idx2, idx3, idx4;
   double tline, rngpix, rgoff, azoff, fracr, fraca, llh[3], xyz[3], dr[3];
   double resx, resy, cosphase, sinphase, phase, reramp;
-  Complex cpx1, cpx2, burst1, burst2, burst3, burst4, res, zero;
+  Complex cpx1, cpx2, burst1, burst2, burst3, burst4;
+  ComplexInt16 zero;
   zero.x = 0;
   zero.y = 0;
   for (std::size_t i = index; i < n; i += stride) {
@@ -238,9 +239,8 @@ reproject(const short int *dem, const Complex *burstdata,
       phase = 4.0 * M_PI / wvl * rngpix - reramp;
       cosphase = cos(phase);
       sinphase = sin(phase);
-      res.x = resx * cosphase - resy * sinphase;
-      res.y = resx * sinphase + resy * cosphase;
-      outdata[i] = res;
+      outdata[i].x = (short)(resx * cosphase - resy * sinphase);
+      outdata[i].y = (short)(resx * sinphase + resy * cosphase);
     } else {
       outdata[i] = zero;
     }
@@ -270,8 +270,9 @@ reproject(const short int *dem, const Complex *burstdata,
  *
  * Return: true if at least one non-zero row exists.
  */
-bool find_nonzero_rows(const float2 *d_data, int rows, int cols, int *d_first,
-                       int *d_last, int &first_idx, int &last_idx_excl) {
+bool find_nonzero_rows(const ComplexInt16 *d_data, int rows, int cols,
+                       int *d_first, int *d_last, int &first_idx,
+                       int &last_idx_excl) {
   if (d_data == nullptr || rows <= 0 || cols <= 0) {
     first_idx = 0;
     last_idx_excl = 0;
@@ -420,11 +421,11 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     ncoli = int((lonmax - lonmin) / demrsc.dlon + 1);
     ncol_buffer = std::max(ncoli, ncol_buffer);
   }
-  buffer_size = sizeof(Complex) * nrow_buffer * ncol_buffer;
+  buffer_size = sizeof(ComplexInt16) * nrow_buffer * ncol_buffer;
 
   // ---- Phase 6: Pre-allocate host memory ----
   Complex *burst = (Complex *)malloc(sizeof(Complex) * burstsize);
-  Complex *outdata = (Complex *)malloc(buffer_size);
+  ComplexInt16 *outdata = (ComplexInt16 *)malloc(buffer_size);
   short int *dem =
       (short int *)malloc(sizeof(short int) * nrow_buffer * ncol_buffer);
   double *kt = (double *)malloc(sizeof(double) * nrange);
@@ -437,7 +438,8 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
   // ---- Phase 7: Pre-allocate device memory (once, reused across bursts) ----
   double *d_tt, *d_xx, *d_vv, *d_xmid, *d_vmid;
   double *d_kt, *d_eta, *d_etaref;
-  Complex *d_burstdata, *d_outdata;
+  Complex *d_burstdata;
+  ComplexInt16 *d_outdata;
   short int *d_dem;
   int *d_first, *d_last; // pre-allocated for find_nonzero_rows
 
@@ -450,7 +452,8 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
   cudaMalloc((void **)&d_eta, sizeof(double) * lines_per_burst);
   cudaMalloc((void **)&d_etaref, sizeof(double) * nrange);
   cudaMalloc((void **)&d_burstdata, sizeof(Complex) * burstsize);
-  cudaMalloc((void **)&d_outdata, buffer_size);
+  cudaMalloc((void **)&d_outdata,
+             sizeof(ComplexInt16) * nrow_buffer * ncol_buffer);
   cudaMalloc((void **)&d_dem, sizeof(short int) * nrow_buffer * ncol_buffer);
   cudaMalloc((void **)&d_first, sizeof(int));
   cudaMalloc((void **)&d_last, sizeof(int));
@@ -634,7 +637,7 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
 
     // --- 8k. Copy valid output rows to host and save ---
     cudaMemcpy(outdata, d_outdata + first_non_zero_row * ncol,
-               sizeof(Complex) * (last_non_zero_row - first_non_zero_row) *
+               sizeof(ComplexInt16) * (last_non_zero_row - first_non_zero_row) *
                    ncol,
                cudaMemcpyDeviceToHost);
 
@@ -645,7 +648,7 @@ int geo2rdr(const std::string &dbname, const std::string &slcoutfile,
     header[3] = top + first_non_zero_row;
     header[4] = right;
     header[5] = top + last_non_zero_row;
-    save_binary<Complex>(
+    save_binary<ComplexInt16>(
         outdata, (last_non_zero_row - first_non_zero_row) * ncol, header,
         NHEADER, slcoutfile + "_burst_" + std::to_string(iburst) + ".gslc");
   }

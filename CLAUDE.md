@@ -90,3 +90,10 @@ f = open(filename)
 | `query.py` | ASF data discovery API client |
 | `_log.py` | Logging setup via `logging.config.dictConfig` |
 | `preproc.py` | generate metalinks for Sentinel-1 data downloading, download DEM |
+
+### Compilation
+1. Lauch x64_x86 Cross Tools Command Prompt for VS Insiders
+2. In the launched prompt, run "D:\visual_studio\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.44.35207
+3. Activate s1build conda environment
+4. run "cmake -S csrc -B csrc\build -G Ninja -DCMAKE_INSTALL_PREFIX=s1proc -DCMAKE_BUILD_TYPE=Release"
+5. run "cmake --build csrc\build --target install

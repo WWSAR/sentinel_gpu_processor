@@ -11,6 +11,7 @@
 #include <vector>
 
 typedef float2 Complex;
+typedef short2 ComplexInt16;
 const int NHEADER = 64;
 
 // io functions
@@ -413,6 +414,9 @@ rsc readrsc(const std::string &rscfile);
 
 __global__ void conj_mul(Complex *a, Complex *b, Complex *c,
                          const std::size_t n);
+
+__global__ void conj_mul_int16(ComplexInt16 *a, ComplexInt16 *b, Complex *c,
+                               const std::size_t n);
 
 __global__ void point_power(Complex *a, float *b, const std::size_t n);
 

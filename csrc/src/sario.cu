@@ -210,6 +210,21 @@ __global__ void conj_mul(Complex *a, Complex *b, Complex *c,
   }
 }
 
+__global__ void conj_mul_int16(ComplexInt16 *a, ComplexInt16 *b, Complex *c,
+                               const std::size_t n) {
+  std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  std::size_t stride = blockDim.x * gridDim.x;
+  float aix, aiy, bix, biy;
+  for (std::size_t i = index; i < n; i += stride) {
+    aix = (float)a[i].x;
+    aiy = (float)a[i].y;
+    bix = (float)b[i].x;
+    biy = (float)b[i].y;
+    c[i].x = aix * bix + aiy * biy;
+    c[i].y = aix * biy - aiy * bix;
+  }
+}
+
 __global__ void point_power(Complex *a, float *b, const std::size_t n) {
   std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
   std::size_t stride = blockDim.x * gridDim.x;

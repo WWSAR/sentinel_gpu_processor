@@ -128,8 +128,8 @@ struct RawBuffer {
   int id;
 
   // -- Pinned host buffers (pre-allocated, sized to max_raw_elements) --
-  Complex *ref_data;
-  Complex *sec_data;
+  ComplexInt16 *ref_data;
+  ComplexInt16 *sec_data;
 
   // -- Task identity --
   Task task;
@@ -186,8 +186,8 @@ struct TaskSlot {
   int id;
 
   // -- Pinned host buffers (pre-allocated, sized to max_elements) --
-  Complex *ref_data;
-  Complex *sec_data;
+  ComplexInt16 *ref_data;
+  ComplexInt16 *sec_data;
 
   // -- Pinned host result staging (D2H target, sized to max_elements_sm) --
   Complex *result_cpx;
@@ -252,8 +252,8 @@ struct GpuTaskSlot {
   cudaStream_t stream;
 
   // -- Device buffers (sized to max dimensions) --
-  Complex *d_slc1;
-  Complex *d_slc2;
+  ComplexInt16 *d_slc1;
+  ComplexInt16 *d_slc2;
   Complex *d_ifg;
   Complex *d_ifg_collook;
   Complex *d_ifglook;
@@ -344,7 +344,8 @@ struct DaemonContext {
   std::condition_variable cache_cv;
   std::string cached_path;
   bool cache_is_loading = false;
-  Complex *global_buffer = nullptr; // pinned, sized max_src_nrow * max_src_ncol
+  ComplexInt16 *global_buffer =
+      nullptr; // pinned, sized max_src_nrow * max_src_ncol
 
   // -- Progress & termination --
   std::atomic<size_t> next_task_id{0};
@@ -504,9 +505,9 @@ static void read_file_rows(const std::string &filename, char *raw_buffer,
  *
  * Parameters
  * ----------
- * src : const Complex*
+ * src : const ComplexInt16*
  *     Uncropped source rows (raw disk read result).
- * dst : Complex*
+ * dst : ComplexInt16*
  *     Destination buffer (TaskSlot cropped region).
  * src_w : int
  *     Full width of the source image (in elements).
@@ -517,13 +518,13 @@ static void read_file_rows(const std::string &filename, char *raw_buffer,
  * src_col0 : int
  *     Starting column offset within the source row.
  */
-static void crop_memory_buffer(const Complex *src, Complex *dst, int src_w,
-                               int dst_w, int dst_h, int src_col0) {
+static void crop_memory_buffer(const ComplexInt16 *src, ComplexInt16 *dst,
+                               int src_w, int dst_w, int dst_h, int src_col0) {
   for (int r = 0; r < dst_h; ++r) {
-    const Complex *src_row =
+    const ComplexInt16 *src_row =
         src + static_cast<std::size_t>(r) * src_w + src_col0;
-    Complex *dst_row = dst + static_cast<std::size_t>(r) * dst_w;
-    std::memcpy(dst_row, src_row, dst_w * sizeof(Complex));
+    ComplexInt16 *dst_row = dst + static_cast<std::size_t>(r) * dst_w;
+    std::memcpy(dst_row, src_row, dst_w * sizeof(ComplexInt16));
   }
 }
 
@@ -720,7 +721,7 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
             std::size_t copy_elems =
                 static_cast<std::size_t>(src_w) * (bottom - top);
             std::memcpy(raw.ref_data, ctx.global_buffer + row_offset,
-                        copy_elems * sizeof(Complex));
+                        copy_elems * sizeof(ComplexInt16));
           }
           if (sec_cache_hit) {
             int src_w = right2 - left2;
@@ -729,7 +730,7 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
             std::size_t copy_elems =
                 static_cast<std::size_t>(src_w) * (bottom - top);
             std::memcpy(raw.sec_data, ctx.global_buffer + row_offset,
-                        copy_elems * sizeof(Complex));
+                        copy_elems * sizeof(ComplexInt16));
           }
         }
       } // lock is released
@@ -743,16 +744,16 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
         // global_buffer is loading, no one else will try to read it
         read_file_rows(target_path, reinterpret_cast<char *>(ctx.global_buffer),
                        static_cast<std::size_t>(src_w), 0,
-                       static_cast<std::size_t>(src_h), sizeof(Complex));
+                       static_cast<std::size_t>(src_h), sizeof(ComplexInt16));
 
         int t_top = (target_path == task.ref_slc) ? top1 : top2;
-        Complex *dst_ptr =
+        ComplexInt16 *dst_ptr =
             (target_path == task.ref_slc) ? raw.ref_data : raw.sec_data;
         std::size_t row_offset = static_cast<std::size_t>(top - t_top) * src_w;
         std::size_t copy_elems =
             static_cast<std::size_t>(src_w) * (bottom - top);
         std::memcpy(dst_ptr, ctx.global_buffer + row_offset,
-                    copy_elems * sizeof(Complex));
+                    copy_elems * sizeof(ComplexInt16));
 
         // Cache is loaded
         {
@@ -769,7 +770,8 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
         read_file_rows(task.ref_slc, reinterpret_cast<char *>(raw.ref_data),
                        static_cast<std::size_t>(right1 - left1),
                        static_cast<std::size_t>(top - top1),
-                       static_cast<std::size_t>(bottom - top), sizeof(Complex));
+                       static_cast<std::size_t>(bottom - top),
+                       sizeof(ComplexInt16));
       }
 
       if (!sec_cache_hit) {
@@ -778,7 +780,8 @@ static void producer_worker_thread(DaemonContext &ctx, int worker_id) {
         read_file_rows(task.sec_slc, reinterpret_cast<char *>(raw.sec_data),
                        static_cast<std::size_t>(right2 - left2),
                        static_cast<std::size_t>(top - top2),
-                       static_cast<std::size_t>(bottom - top), sizeof(Complex));
+                       static_cast<std::size_t>(bottom - top),
+                       sizeof(ComplexInt16));
       }
     } catch (const std::exception &e) {
       std::cerr << "[crossmul_daemon] FAIL " << task.out_ifg
@@ -921,17 +924,17 @@ static void cpu_worker_thread(DaemonContext &ctx, int worker_id) {
 static void launch_async_pipeline(DaemonContext &ctx, GpuTaskSlot &lane,
                                   TaskSlot &slot) {
   int blockSize = 256;
-  std::size_t elem_bytes = sizeof(Complex) * slot.nrow * slot.ncol;
+  std::size_t elem_bytes = sizeof(ComplexInt16) * slot.nrow * slot.ncol;
 
-  // -- Async H2D from TaskSlot --
+  // -- Async H2D from TaskSlot (int16 data) --
   CHECK_CUDA(cudaMemcpyAsync(lane.d_slc1, slot.ref_data, elem_bytes,
                              cudaMemcpyHostToDevice, lane.stream));
   CHECK_CUDA(cudaMemcpyAsync(lane.d_slc2, slot.sec_data, elem_bytes,
                              cudaMemcpyHostToDevice, lane.stream));
 
-  // -- conj_mul kernel --
+  // -- conj_mul_int16 kernel (converts int16→float32 inline) --
   int numBlocks = (slot.nrow * slot.ncol + blockSize - 1) / blockSize;
-  conj_mul<<<numBlocks, blockSize, 0, lane.stream>>>(
+  conj_mul_int16<<<numBlocks, blockSize, 0, lane.stream>>>(
       lane.d_slc1, lane.d_slc2, lane.d_ifg, slot.nrow * slot.ncol);
 
   // Track which device pointer holds the current pipeline stage output
@@ -1279,11 +1282,11 @@ static void scan_max_dimensions(DaemonContext &ctx) {
             << max_ncol << "  (looked: " << ctx.max_nrow_sm << " x "
             << ctx.max_ncol_sm << ")" << std::endl;
   std::cerr << "[crossmul_daemon] TaskSlot size per slot: "
-            << (ctx.max_elements * sizeof(Complex) * 2 / (1024 * 1024))
+            << (ctx.max_elements * sizeof(ComplexInt16) * 2 / (1024 * 1024))
             << " MB (ref+sec)" << std::endl;
   std::cerr << "[crossmul_daemon] Max raw read: " << max_raw_elements
             << " elements ("
-            << (max_raw_elements * sizeof(Complex) / (1024 * 1024))
+            << (max_raw_elements * sizeof(ComplexInt16) / (1024 * 1024))
             << " MB per image)" << std::endl;
 }
 
@@ -1298,14 +1301,14 @@ static void allocate_raw_buffers(DaemonContext &ctx) {
     RawBuffer &rb = ctx.raw_buffers[i];
     rb.id = i;
     CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&rb.ref_data),
-                              sizeof(Complex) * ctx.max_raw_elements));
+                              sizeof(ComplexInt16) * ctx.max_raw_elements));
     CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&rb.sec_data),
-                              sizeof(Complex) * ctx.max_raw_elements));
+                              sizeof(ComplexInt16) * ctx.max_raw_elements));
     ctx.raw_free_queue.push(i);
   }
   std::cerr << "[crossmul_daemon] Allocated " << ctx.raw_slots
             << " RawBuffers ("
-            << (ctx.max_raw_elements * sizeof(Complex) * 2 / (1024 * 1024))
+            << (ctx.max_raw_elements * sizeof(ComplexInt16) * 2 / (1024 * 1024))
             << " MB each)." << std::endl;
 }
 
@@ -1321,10 +1324,10 @@ static void allocate_global_cache(DaemonContext &ctx) {
   std::size_t n_elements =
       static_cast<std::size_t>(ctx.max_src_nrow) * ctx.max_src_ncol;
   CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ctx.global_buffer),
-                            sizeof(Complex) * n_elements));
+                            sizeof(ComplexInt16) * n_elements));
   ctx.cached_path.clear();
   std::cerr << "[crossmul_daemon] Allocated global reference cache: "
-            << (sizeof(Complex) * n_elements / (1024 * 1024)) << " MB."
+            << (sizeof(ComplexInt16) * n_elements / (1024 * 1024)) << " MB."
             << std::endl;
 }
 
@@ -1335,9 +1338,9 @@ static void allocate_task_slots(DaemonContext &ctx) {
     TaskSlot &ts = ctx.task_slots[i];
     ts.id = i;
     CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.ref_data),
-                              sizeof(Complex) * ctx.max_elements));
+                              sizeof(ComplexInt16) * ctx.max_elements));
     CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.sec_data),
-                              sizeof(Complex) * ctx.max_elements));
+                              sizeof(ComplexInt16) * ctx.max_elements));
     if (ctx.out_float) {
       CHECK_CUDA(cudaMallocHost(reinterpret_cast<void **>(&ts.result_float),
                                 sizeof(float) * ctx.max_elements_sm));
@@ -1351,7 +1354,7 @@ static void allocate_task_slots(DaemonContext &ctx) {
   }
   std::cerr << "[crossmul_daemon] Allocated " << ctx.task_slots_count
             << " TaskSlots ("
-            << (ctx.max_elements * sizeof(Complex) * 2 / (1024 * 1024))
+            << (ctx.max_elements * sizeof(ComplexInt16) * 2 / (1024 * 1024))
             << " MB data + "
             << (ctx.max_elements_sm *
                 (ctx.out_float ? sizeof(float) : sizeof(Complex)) /
@@ -1379,7 +1382,8 @@ static void allocate_gpu_contexts(DaemonContext &ctx) {
     g.lanes.resize(ctx.streams_per_gpu);
 
     std::size_t dev_mb_per_lane =
-        (sizeof(Complex) * ctx.max_elements * 3 +
+        (sizeof(ComplexInt16) * ctx.max_elements * 2 +
+         sizeof(Complex) * ctx.max_elements +
          sizeof(Complex) * ctx.max_nrow * ctx.max_ncol_sm +
          sizeof(Complex) * ctx.max_nrow_sm * ctx.max_ncol_sm) /
         (1024 * 1024);
@@ -1394,9 +1398,9 @@ static void allocate_gpu_contexts(DaemonContext &ctx) {
 
       // Device buffers
       CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_slc1),
-                            sizeof(Complex) * ctx.max_elements));
+                            sizeof(ComplexInt16) * ctx.max_elements));
       CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_slc2),
-                            sizeof(Complex) * ctx.max_elements));
+                            sizeof(ComplexInt16) * ctx.max_elements));
       CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&lane.d_ifg),
                             sizeof(Complex) * ctx.max_elements));
       if (ctx.collook > 1) {
@@ -1608,13 +1612,13 @@ static void auto_tune_parameters(DaemonContext &ctx) {
 
   // ---- Step 0: Task dimension constants ----
 
-  // S_raw  = max_src_nrow * max_src_ncol * sizeof(Complex) * 2 (Ref + Sec)
+  // S_raw  = max_src_nrow * max_src_ncol * sizeof(ComplexInt16) * 2 (Ref + Sec)
   std::size_t S_raw = static_cast<std::size_t>(ctx.max_src_nrow) *
-                      ctx.max_src_ncol * sizeof(Complex) * 2;
+                      ctx.max_src_ncol * sizeof(ComplexInt16) * 2;
 
-  // S_crop = max_nrow * max_ncol * sizeof(Complex) * 2 (Ref + Sec)
+  // S_crop = max_nrow * max_ncol * sizeof(ComplexInt16) * 2 (Ref + Sec)
   std::size_t S_crop = static_cast<std::size_t>(ctx.max_nrow) * ctx.max_ncol *
-                       sizeof(Complex) * 2;
+                       sizeof(ComplexInt16) * 2;
 
   std::cerr << "[crossmul_daemon|auto-tune] Hardware telemetry:" << std::endl;
   std::cerr << "  CPU SMT threads                = " << T_hw << std::endl;
@@ -1681,7 +1685,7 @@ static void auto_tune_parameters(DaemonContext &ctx) {
   //   Phase 2. If still over-budget, reduce ngpus (fewer GPU lanes
   //            → fewer slots → lower host footprint).
   std::size_t S_ref_single = static_cast<std::size_t>(ctx.max_src_nrow) *
-                             ctx.max_src_ncol * sizeof(Complex);
+                             ctx.max_src_ncol * sizeof(ComplexInt16);
   std::size_t M_total_predict =
       (static_cast<std::size_t>(max_slots) * S_crop) +
       (static_cast<std::size_t>(cpu_workers + 2) * S_raw) + S_ref_single;

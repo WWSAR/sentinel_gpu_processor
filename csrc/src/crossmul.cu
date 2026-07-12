@@ -91,8 +91,10 @@ int crossmul(const std::string &input_file, const int rowlook,
              const int collook, const int out_float) {
   // delcaration
   std::int32_t header1[NHEADER], header2[NHEADER], ifg_header[NHEADER];
-  Complex *slc1, *slc2, *ifglook;
-  Complex *d_slc1, *d_slc2, *d_ifg, *d_ifg_collook, *d_ifglook;
+  ComplexInt16 *slc1, *slc2;
+  Complex *ifglook;
+  ComplexInt16 *d_slc1, *d_slc2;
+  Complex *d_ifg, *d_ifg_collook, *d_ifglook;
   float *phase, *d_phase;
   int nrow_sm, ncol_sm;
   int blockSize = 256, numBlocks;
@@ -151,8 +153,8 @@ int crossmul(const std::string &input_file, const int rowlook,
   ncol_sm = max_ncol / collook;
   max_elements = std::size_t(max_nrow) * max_ncol;
 
-  slc1 = (Complex *)malloc(sizeof(Complex) * max_elements);
-  slc2 = (Complex *)malloc(sizeof(Complex) * max_elements);
+  slc1 = (ComplexInt16 *)malloc(sizeof(ComplexInt16) * max_elements);
+  slc2 = (ComplexInt16 *)malloc(sizeof(ComplexInt16) * max_elements);
   if (out_float) {
     phase = (float *)malloc(sizeof(float) * nrow_sm * ncol_sm);
     CHECK_CUDA(
@@ -160,8 +162,8 @@ int crossmul(const std::string &input_file, const int rowlook,
   } else {
     ifglook = (Complex *)malloc(sizeof(Complex) * nrow_sm * ncol_sm);
   }
-  CHECK_CUDA(cudaMalloc((void **)&d_slc1, sizeof(Complex) * max_elements));
-  CHECK_CUDA(cudaMalloc((void **)&d_slc2, sizeof(Complex) * max_elements));
+  CHECK_CUDA(cudaMalloc((void **)&d_slc1, sizeof(ComplexInt16) * max_elements));
+  CHECK_CUDA(cudaMalloc((void **)&d_slc2, sizeof(ComplexInt16) * max_elements));
   CHECK_CUDA(cudaMalloc((void **)&d_ifg, sizeof(Complex) * max_elements));
   if (collook > 1) {
     CHECK_CUDA(cudaMalloc((void **)&d_ifg_collook,
@@ -215,16 +217,17 @@ int crossmul(const std::string &input_file, const int rowlook,
     // std::fill_n(slc1, max_elements, zero);
     // std::fill_n(slc2, max_elements, zero);
     // std::fill_n(ifglook, max_elements_sm, zero);
-    read_and_resample<Complex>(slc_pair[0], slc1, left, top, right, bottom, 0,
-                               bottom1 - top1);
-    read_and_resample<Complex>(slc_pair[1], slc2, left, top, right, bottom, 0,
-                               bottom2 - top2);
-    CHECK_CUDA(cudaMemcpy(d_slc1, slc1, sizeof(Complex) * nrow * ncol,
+    read_and_resample<ComplexInt16>(slc_pair[0], slc1, left, top, right, bottom,
+                                    0, bottom1 - top1);
+    read_and_resample<ComplexInt16>(slc_pair[1], slc2, left, top, right, bottom,
+                                    0, bottom2 - top2);
+    CHECK_CUDA(cudaMemcpy(d_slc1, slc1, sizeof(ComplexInt16) * nrow * ncol,
                           cudaMemcpyHostToDevice));
-    CHECK_CUDA(cudaMemcpy(d_slc2, slc2, sizeof(Complex) * nrow * ncol,
+    CHECK_CUDA(cudaMemcpy(d_slc2, slc2, sizeof(ComplexInt16) * nrow * ncol,
                           cudaMemcpyHostToDevice));
     numBlocks = (nrow * ncol + blockSize - 1) / blockSize;
-    conj_mul<<<numBlocks, blockSize>>>(d_slc1, d_slc2, d_ifg, nrow * ncol);
+    conj_mul_int16<<<numBlocks, blockSize>>>(d_slc1, d_slc2, d_ifg,
+                                             nrow * ncol);
     CHECK_CUDA(cudaDeviceSynchronize());
     numBlocks = (nrow * ncol_sm + blockSize - 1) / blockSize;
     std::cout << slc_pair[2] << std::endl;
