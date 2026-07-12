@@ -1,6 +1,8 @@
 import glob
 import json
 import os
+import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Sequence
@@ -29,6 +31,37 @@ def mark_processed(input_zip_path, status_dir, output_files_list):
     # Optionally write metadata like outputs, timestamp
     with open(status_file, "w") as f:
         json.dump({"processed_at": time.time(), "outputs": output_files_list}, f)
+
+
+def record_failure(input_zip_path, proc_dir, exc_info, call_kwargs):
+    """Persist a failure record so the scene can be re-run later.
+
+    Parameters
+    ----------
+    input_zip_path : str
+        Path to the zip file that failed.
+    proc_dir : str
+        Processing directory where the failure log lives.
+    exc_info : str
+        Formatted traceback string.
+    call_kwargs : dict
+        Keyword arguments passed to :func:`sentinel_scene` (for reproducibility).
+    """
+    input_name = Path(input_zip_path).stem
+    failure_file = Path(proc_dir) / f"{input_name}.failed"
+    record = {
+        "failed_at": time.time(),
+        "zip_file": str(input_zip_path),
+        "exception": exc_info,
+        "call_kwargs": call_kwargs,
+    }
+    with open(failure_file, "w") as f:
+        json.dump(record, f, indent=2, default=str)
+    logger.error(
+        "Failure recorded for %s — see %s for details",
+        input_zip_path,
+        failure_file,
+    )
 
 
 def parse_orbitfilename(orbitfilelist):
@@ -133,21 +166,47 @@ def stack(
         hmax = dem.max() + 100
         logger.info(f"Minimum elevation: {hmin} m, Maximum elevation: {hmax} m")
         del dem
-        slc_files = sentinel_scene(
-            zip_file,
-            demfile,
-            rscfile,
-            orbitfilename,
-            polarization,
-            subswath_list,
-            proc_dir,
-            slc_dir,
-            rm_zipfile,
-            rm_folder,
-            hmin,
-            hmax,
-            verbose=verbose,
-        )
+        slc_files = None
+        try:
+            slc_files = sentinel_scene(
+                zip_file,
+                demfile,
+                rscfile,
+                orbitfilename,
+                polarization,
+                subswath_list,
+                proc_dir,
+                slc_dir,
+                rm_zipfile,
+                rm_folder,
+                hmin,
+                hmax,
+                verbose=verbose,
+            )
+        except Exception:
+            tb = traceback.format_exc()
+            call_kwargs = {
+                "zip_file": zip_file,
+                "demfile": demfile,
+                "rscfile": rscfile,
+                "eof_file": orbitfilename,
+                "polarization": polarization,
+                "subswath_list": subswath_list,
+                "proc_dir": proc_dir,
+                "slc_dir": slc_dir,
+                "rm_zipfile": rm_zipfile,
+                "rm_folder": rm_folder,
+                "hmin": hmin,
+                "hmax": hmax,
+                "verbose": verbose,
+            }
+            logger.error(
+                "Failed to process %s:\n%s",
+                zip_file,
+                tb,
+            )
+            record_failure(zip_file, proc_dir, tb, call_kwargs)
+            continue
         mark_processed(zip_file, proc_dir, slc_files)
     logger.info("Loop over scenes complete.")
 
