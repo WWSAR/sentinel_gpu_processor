@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 from s1proc._log import setup_logger
-from s1proc.sario import CroppedImage, powlooks, savec
+from s1proc.sario import COMPLEX_INT16, CroppedImage, powlooks, savec
 
 logger = setup_logger(name=__name__, level="INFO")
 
@@ -28,7 +28,7 @@ def multilook(slc_list: Sequence[str], outfile: str, rowlook: int, collook: int)
     """
     mmap_arr = None
     for i in range(len(slc_list)):
-        ci = CroppedImage.from_file(slc_list[i], load_data=True)
+        ci = CroppedImage.from_file(slc_list[i], dtype=COMPLEX_INT16, load_data=True)
         left_sm = (ci.left + collook - 1) // collook
         top_sm = (ci.top + rowlook - 1) // rowlook
         right_sm = ci.right // collook
