@@ -36,3 +36,6 @@ def setup_logger(name, level="INFO"):
 # Create a method to change the logging level dynamically
 def set_logging_level(logger, level):
     logger.setLevel(level.upper())  # Set the new logging level
+
+
+logger = setup_logger("s1proc")
