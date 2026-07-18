@@ -1,7 +1,9 @@
+import datetime
 import glob
 import os
 import subprocess
-from typing import List, Optional, Tuple
+import traceback
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from tqdm.auto import tqdm
@@ -11,6 +13,10 @@ from s1proc._log import set_logging_level, setup_logger
 from s1proc.sario import BurstGroup, CroppedImage, Subswath
 
 logger = setup_logger(name=__name__, level="INFO")
+
+# Failed stitches are appended to this file, created next to the output
+# interferograms
+STITCH_FAILURE_LOG_NAME = "stitch_failures.log"
 
 
 def match_bursts(
@@ -145,27 +151,30 @@ def stitch_subswath(burst_ifgs, out_float):
     ifg = CroppedImage(
         subswath.nrow0, subswath.ncol0, left, top, right, bottom, ifg_data
     )
-    for burst_ifg in burst_ifgs:
-        os.remove(burst_ifg)
     return ifg
 
 
-def stitch(burst_pairs, outfile, out_float):
-    subswath_ifgs = []
-    for i in range(1, 4):
-        _burst_pairs = [b for b in burst_pairs if (f"iw{i}" in b) and os.path.exists(b)]
-        if len(_burst_pairs) > 0:
-            subswath_ifgs.append(stitch_subswath(_burst_pairs, out_float))
-    if len(subswath_ifgs) == 0:
-        logger.warning(f"Empty subswaths for {outfile}")
-        return
+def _write_stitched(
+    subswath_ifgs: List[CroppedImage], outfile: str, out_float: bool
+) -> None:
+    """
+    Write stitched subswath images into a single memory-mapped file.
+
+    The memory map is released when this function returns, so `outfile`
+    can be renamed or removed afterwards (Windows locks mapped files).
+
+    Parameters
+    ----------
+    subswath_ifgs : List[CroppedImage]
+        Stitched subswath interferograms with loaded data.
+    outfile : str
+        Path of the output file.
+    out_float : bool
+        Whether images contain float (phase-only) rather than complex data.
+    """
     nrow0, ncol0 = subswath_ifgs[0].nrow0, subswath_ifgs[0].ncol0
-    if out_float:
-        mmap_arr = np.memmap(outfile, dtype=np.float32, mode="w+", shape=(nrow0, ncol0))
-    else:
-        mmap_arr = np.memmap(
-            outfile, dtype=np.complex64, mode="w+", shape=(nrow0, ncol0)
-        )
+    dtype = np.float32 if out_float else np.complex64
+    mmap_arr = np.memmap(outfile, dtype=dtype, mode="w+", shape=(nrow0, ncol0))
     for subswath_ifg in subswath_ifgs:
         old_data = mmap_arr[
             subswath_ifg.top : subswath_ifg.bottom,
@@ -178,6 +187,116 @@ def stitch(burst_pairs, outfile, out_float):
             replace_mask = new_data.real != 0
         old_data[replace_mask] = new_data[replace_mask]
     mmap_arr.flush()
+
+
+def _record_stitch_failure(outfile: str, message: str) -> None:
+    """
+    Append a failed interferogram and its error message to the failure log.
+
+    The log file `STITCH_FAILURE_LOG_NAME` is created in the directory of
+    `outfile`.
+
+    Parameters
+    ----------
+    outfile : str
+        Path of the interferogram that failed to stitch.
+    message : str
+        Error message describing the failure.
+    """
+    log_file = os.path.join(os.path.dirname(outfile) or ".", STITCH_FAILURE_LOG_NAME)
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(f"[{timestamp}] {outfile}\n{message}\n")
+
+
+def stitch(burst_pairs: List[str], outfile: str, out_float: bool) -> bool:
+    """
+    Merge per-burst interferograms into one stitched interferogram.
+
+    The stitched image is first written to a temporary file and renamed to
+    `outfile` only on success, so a failure leaves no partial output on
+    disk.  The per-burst interferograms are removed only after `outfile`
+    has been written, keeping them available for a retry.  Failures are
+    logged and appended to `STITCH_FAILURE_LOG_NAME` in the directory of
+    `outfile` instead of raising, so one bad interferogram does not stop
+    batch processing.
+
+    Parameters
+    ----------
+    burst_pairs : List[str]
+        Paths of the per-burst interferograms belonging to `outfile`.
+    outfile : str
+        Path of the final stitched interferogram.
+    out_float : bool
+        Whether images contain float (phase-only) rather than complex data.
+
+    Returns
+    -------
+    bool
+        True if `outfile` was written, False if stitching failed.
+    """
+    tmpfile = outfile + ".tmp"
+    error_msg = None
+    burst_ifgs = []
+    try:
+        subswath_ifgs = []
+        for i in range(1, 4):
+            _burst_pairs = [
+                b for b in burst_pairs if (f"iw{i}" in b) and os.path.exists(b)
+            ]
+            if len(_burst_pairs) > 0:
+                subswath_ifgs.append(stitch_subswath(_burst_pairs, out_float))
+                burst_ifgs.extend(_burst_pairs)
+        if len(subswath_ifgs) == 0:
+            raise RuntimeError("No per-burst interferograms found for any subswath")
+        _write_stitched(subswath_ifgs, tmpfile, out_float)
+        os.replace(tmpfile, outfile)
+    except Exception:
+        error_msg = traceback.format_exc()
+    if error_msg is not None:
+        # the exception and its frames are released once the except block
+        # ends, closing the memory map of the temporary file so that the
+        # file can be removed here
+        if os.path.exists(tmpfile):
+            os.remove(tmpfile)
+        logger.error("Stitching failed for %s:\n%s", outfile, error_msg)
+        _record_stitch_failure(outfile, error_msg)
+        return False
+    # remove the per-burst interferograms only after the stitched result is
+    # safely on disk, so a failed stitch can be retried
+    for burst_ifg in burst_ifgs:
+        try:
+            os.remove(burst_ifg)
+        except OSError as e:
+            logger.warning("Could not remove burst interferogram %s: %s", burst_ifg, e)
+    return True
+
+
+def _stitch_all(burst_pair_map: Dict[str, List[str]], out_float: bool) -> None:
+    """
+    Stitch every interferogram in `burst_pair_map`, tolerating failures.
+
+    Parameters
+    ----------
+    burst_pair_map : Dict[str, List[str]]
+        Mapping from each output interferogram to its per-burst
+        interferograms.
+    out_float : bool
+        Whether images contain float (phase-only) rather than complex data.
+    """
+    n_failed = 0
+    for outfile in tqdm(burst_pair_map, desc="stitching"):
+        if not stitch(burst_pair_map[outfile], outfile, out_float):
+            n_failed += 1
+    if n_failed > 0:
+        logger.warning(
+            "%d of %d interferograms failed to stitch; see %s for details.",
+            n_failed,
+            len(burst_pair_map),
+            STITCH_FAILURE_LOG_NAME,
+        )
+    else:
+        logger.info("All interferograms are generated.")
 
 
 def interfere_single_scene(
@@ -640,10 +759,9 @@ def interfere(
     if n_pair == 0:
         logger.warning("Did not find any burst pairs.")
         if n_ifg > 0:
+            _stitch_all(burst_pair_map, out_float)
+        else:
             logger.info("All burst-pair interferograms already exist; nothing to do.")
-            for outfile in tqdm(burst_pair_map, desc="stitching"):
-                stitch(burst_pair_map[outfile], outfile, out_float)
-            logger.info("All interferograms are generated.")
         return
     logger.info("Found %d burst pairs in %d interferograms.", n_pair, n_ifg)
 
@@ -699,9 +817,7 @@ def interfere(
         )
 
     # -- Stitch per-burst interferograms into full subswath images --
-    for outfile in tqdm(burst_pair_map, desc="stitching"):
-        stitch(burst_pair_map[outfile], outfile, out_float)
-    logger.info("All interferograms are generated.")
+    _stitch_all(burst_pair_map, out_float)
 
 
 def run_interfere(
