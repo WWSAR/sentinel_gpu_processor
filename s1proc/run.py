@@ -433,7 +433,7 @@ def _run_integrity(config: str) -> None:
     """Thin wrapper around :func:`s1proc.utils.run_check_integrity`."""
     from s1proc.utils import run_check_integrity
 
-    run_check_integrity(config=config)
+    run_check_integrity(config=config, movedata=True)
 
 
 def _run_slcpairs(config: str) -> None:
