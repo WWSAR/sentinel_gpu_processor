@@ -337,13 +337,13 @@ def tcnbasis_vec(pos, vel, look_dir="RIGHT", r_a=RA, r_e2=RE2):
     return r_t, r_c, r_n
 
 
-def enu2xyz(xyz, lat, lon):
+def enu2xyz(enu, lat, lon):
     R1 = rotation3(-(90 - lat), 1)
     R3 = rotation3(-(90 + lon), 3)
-    return np.dot(np.matmul(R3, R1), xyz)
+    return np.dot(np.matmul(R3, R1), enu)
 
 
-def xyz2enu(enu, lat, lon):
+def xyz2enu(xyz, lat, lon):
     """
     transform a vector in ECEF coordinate to an ENU
     coordinate with latitude=lat, longitude=lon
@@ -353,4 +353,4 @@ def xyz2enu(enu, lat, lon):
     """
     R1 = rotation3(90 - lat, 1)
     R3 = rotation3(90 + lon, 3)
-    return np.dot(np.matmul(R1, R3), enu)
+    return np.dot(np.matmul(R1, R3), xyz)
