@@ -8,8 +8,6 @@ from typing import Dict, Tuple
 
 import numpy as np
 from numpy.typing import DTypeLike
-from zarr.core.buffer.core import Buffer
-from zarr.storage import MemoryStore
 
 from s1proc._log import setup_logger
 
@@ -161,80 +159,3 @@ class MultiBinaryFileWriter:
                 self._queue.put_nowait(None)
             except Full:
                 pass
-
-
-class BinaryFileStore(MemoryStore):
-    """A zarr v3 ``Store`` that routes chunk writes to flat binary files.
-
-    Inherits from :class:`zarr.storage.MemoryStore` so that zarr v3
-    metadata (``zarr.json``) lives in memory, but chunk data is written
-    directly to individual flat binary files instead of being buffered in
-    RAM.  Designed to be passed as the ``store`` argument to
-    ``zarr.create_array`` / ``da.to_zarr``, inheriting zarr's native
-    parallel I/O path.
-
-    Chunk keys are of the form ``"c/{row}/{col}/{band}"`` (zarr v3
-    default for a ``(nrow, ncol, nimg)`` array).  The band index selects
-    the target file from *file_map*; row/col indices determine the in-file
-    byte offset for spatial chunking.
-    """
-
-    def __init__(
-        self,
-        file_map: Dict[int, Path],
-        single_file_shape: Tuple[int, int],
-        dtype: DTypeLike,
-        read_only: bool = False,
-    ) -> None:
-        super().__init__(read_only=read_only)
-        self.file_map = {k: Path(v) for k, v in file_map.items()}
-        self.rows, self.cols = single_file_shape
-        self.dtype = np.dtype(dtype)
-        self.bytes_per_elem = self.dtype.itemsize
-        self._chunk_rows = self.rows  # may differ under spatial chunking
-        self._chunk_cols = self.cols
-
-        # Ensure the output directory exists.
-        first = next(iter(self.file_map.values()))
-        first.parent.mkdir(parents=True, exist_ok=True)
-
-    # ------------------------------------------------------------------
-    # Overrides: route chunk data to files
-    # ------------------------------------------------------------------
-
-    async def set(
-        self,
-        key: str,
-        value: Buffer,
-        byte_range: tuple[int, int] | None = None,
-    ) -> None:
-        """Store a (key, value) pair.
-
-        Metadata keys (``zarr.json``) are stored in the parent
-        ``MemoryStore``.  Chunk keys (``c/...``) are written directly
-        to the target flat binary file, then cached in ``_store_dict``
-        so that ``exists()`` and ``list()`` work without disk reads.
-        """
-        if not key.startswith("c/"):
-            await super().set(key, value, byte_range)
-            return
-
-        # Parse "c/{row}/{col}/{band}".
-        _prefix, row_str, _col_str, band_str = key.split("/")
-        band_idx = int(band_str)
-        row_chunk_idx = int(row_str)
-        target_file = self.file_map[band_idx]
-        data = value.to_bytes()
-
-        if self._chunk_rows == self.rows:
-            target_file.write_bytes(data)
-        else:
-            offset = row_chunk_idx * self._chunk_rows * self.cols * self.bytes_per_elem
-            if not target_file.exists():
-                with open(target_file, "wb") as f:
-                    f.truncate(self.rows * self.cols * self.bytes_per_elem)
-            with open(target_file, "r+b") as f:
-                f.seek(offset)
-                f.write(data)
-
-        self._store_dict[key] = value
