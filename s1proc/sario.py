@@ -490,7 +490,7 @@ def multilooks(
     npatch = int(np.ceil(nr / nrpatch))
     with open(outfile, "wb") as fout:
         with open(imgfile, "rb") as f:
-            for i in tqdm(range(npatch), desc="multilook dem"):
+            for i in tqdm(range(npatch), desc="multilook"):
                 line_start = nrpatch * i
                 line_end = line_start + nrpatch
                 line_end = np.minimum(line_end, nr)
@@ -648,7 +648,7 @@ def create_virtual_stack(
         abs_path = str(Path(file_path).resolve())
 
         for i in range(n_chunk_row - 1):
-            key = key_format.format(i, k)
+            key = key_format.format(i=i, k=k)
             offset = i * chunk_nbytes
             refs[key] = [abs_path, offset, chunk_nbytes]
         # In case that chunk_row is not a divisor of nrow, we need to reduce row_start

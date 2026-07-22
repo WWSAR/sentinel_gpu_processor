@@ -5,12 +5,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Tuple
 
 import cupy as cp
-import dask
 import dask.array as da
 import numpy as np
 import zarr
 from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
+
+from s1proc.utils import get_gpu_pool
 
 if TYPE_CHECKING:
     IfgInputType = da.Array | Path | str | Sequence[Path | str]
@@ -22,6 +23,7 @@ from s1proc.sario import _store_attr
 from s1proc.utils import IfgList, get_files
 
 logger = setup_logger(__name__, level="INFO")
+GPU_POOL = get_gpu_pool()
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +72,7 @@ def eigensar_block(
         array_loc[0][0] : array_loc[0][1], array_loc[1][0] : array_loc[1][1]
     ]
     if np.all(mask_chunk == 0):
-        return (np.zeros((chunk_row, chunk_col, ndate + 1), dtype=np.float32),)
+        return np.zeros((chunk_row, chunk_col, ndate + 1), dtype=np.float32)
 
     npixels = chunk_row * chunk_col
     d_ifg_chunk = cp.array(ifg_chunk.reshape(-1, nifg))  # npixels, nifg
@@ -117,6 +119,33 @@ def eigensar_block(
     combined_output = np.concatenate([phase_np, gamma_np], axis=2)
 
     return combined_output
+
+
+def eigensar_block_wrapper(
+    ifg_chunk: NDArray[np.complex64],  # (row_chunk, col_chunk, nifg)
+    ref_indices: NDArray[np.int_],  # (nifg,)
+    sec_indices: NDArray[np.int_],  # (nifg,)
+    ndate: int,
+    mask: NDArray[np.bool_] = None,
+    correlation_vector: NDArray[np.float32] = None,  # (nifg,)
+    block_info: dict = None,
+) -> NDArray[np.float32]:  # (row_chunk, col_chunk, ndate+1)
+    assigned_gpu = GPU_POOL.get()
+    try:
+        res = eigensar_block(
+            ifg_chunk,
+            ref_indices,
+            sec_indices,
+            ndate,
+            mask,
+            correlation_vector,
+            block_info,
+        )
+        return res
+    except Exception as e:
+        logger.debug(e)
+    finally:
+        GPU_POOL.put(assigned_gpu)
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +206,7 @@ def get_eigensar_chunks(
     nifg: int,
     ndate: int,
     max_vram_gb: float | None = None,
-) -> Tuple[int, int]:
+) -> Tuple[int, int, int]:
     """Determine safe row-chunk size for EigenSAR phase linking.
 
     Parameters
@@ -241,6 +270,10 @@ def _is_zarr_path(path: Path) -> bool:
         if (path / ".zarray").exists():
             return True
         if (path / "zarr.json").exists():
+            return True
+        if (path / ".zgroup").exists():
+            return True
+        if len(list(path.glob("*"))) == 0:
             return True
     return False
 
@@ -344,16 +377,17 @@ def phase_linking_solver(
     mask_file: Path | str | None,
     nrow: int = 0,
     ncol: int = 0,
-    solver_func: Callable = eigensar_block,
+    solver_func: Callable = eigensar_block_wrapper,
     row_chunk: int | None = None,
     max_vram_gb: float | None = None,
     ifg_list: IfgList | None = None,
-) -> Tuple["da.Array", "da.Array", IfgList]:
+) -> Tuple["da.Array", IfgList]:
     """Run phase linking on a stack of wrapped interferograms.
 
     Accepts binary files, Zarr datasets, or ``dask.array.Array`` as input
-    and returns the optimised phase and temporal coherence as lazy dask
-    arrays.  Use :func:`save_phase_linking_results` to write them to disk.
+    and returns a single lazy dask array containing both the optimised
+    phase and temporal coherence.  Use :func:`save_phase_linking_results`
+    to write to disk and :func:`load_phase_linking_results` to read back.
 
     Parameters
     ----------
@@ -377,7 +411,7 @@ def phase_linking_solver(
         Number of image columns.  Required when *igrams* is a file list.
     solver_func : Callable
         Per-chunk solver (a dask ``map_blocks``-compatible function).
-        Defaults to :func:`eigensar_block`.
+        Defaults to :func:`eigensar_block_wrapper`.
     row_chunk : int or None
         Row chunk size for the dask array.  When *None*, automatically
         determined from available GPU VRAM.
@@ -391,11 +425,12 @@ def phase_linking_solver(
 
     Returns
     -------
-    Tuple[da.Array, da.Array, IfgList]
-        ``(opt_phase, gamma, ifg_list)`` — lazy dask arrays with shapes
-        ``(nrow, ncol, ndate)`` (float32) and ``(nrow, ncol)`` (float32),
-        plus the :class:`IfgList` metadata (pass to
-        :func:`save_phase_linking_results`).
+    Tuple[da.Array, IfgList]
+        ``(res, ifg_list)`` — a single lazy dask array of shape
+        ``(nrow, ncol, ndate + 1)`` and dtype ``float32``.  The first
+        ``ndate`` slices along axis 2 are the optimised phase; the last
+        slice is the temporal coherence (gamma).  Use the helper
+        :func:`load_phase_linking_results` to split on read.
 
     Raises
     ------
@@ -450,7 +485,7 @@ def phase_linking_solver(
 
     # ---- Auto-determine row_chunk from VRAM ---------------------------------
     if row_chunk is None:
-        row_chunk, _ = get_eigensar_chunks(
+        row_chunk, _, _ = get_eigensar_chunks(
             nrow, ncol, ifg_list.nifg, ifg_list.ndate, max_vram_gb
         )
     logger.info("Using row_chunk=%d, col_chunk=%d for dask array", row_chunk, ncol)
@@ -458,7 +493,6 @@ def phase_linking_solver(
     # ---- Load & chunk -------------------------------------------------------
     ifg_stack = _load_ifg_as_dask(igrams, nrow, ncol, row_chunk)
     ifg_stack = ifg_stack.rechunk({0: row_chunk, 1: ncol, 2: -1})
-    logger.info("Total Chunks/Tasks: %d", ifg_stack.npartitions)
 
     # ---- Load mask -----------------------------------------------------------
     if mask_file is not None:
@@ -472,7 +506,7 @@ def phase_linking_solver(
 
     # ---- Run the dask computation -------------------------------------------
     ndate = ifg_list.ndate
-    result_chunks = (*ifg_stack.chunks[0:2], ndate + 1)
+    result_chunks = (ifg_stack.chunks[0], ifg_stack.chunks[1], ndate + 1)
     res = da.map_blocks(
         solver_func,
         ifg_stack,
@@ -486,11 +520,8 @@ def phase_linking_solver(
         sec_indices=sec_indices,
     )  # (nrow, ncol, ndate+1)
 
-    opt_phase = res[:, :, :-1]  # (nrow, ncol, ndate)
-    gamma = res[:, :, -1]  # (nrow, ncol)
-
     logger.info("Phase linking computation graph built (lazy).")
-    return opt_phase, gamma, ifg_list
+    return res, ifg_list
 
 
 # ---------------------------------------------------------------------------
@@ -499,23 +530,29 @@ def phase_linking_solver(
 
 
 def save_phase_linking_results(
-    opt_phase: "da.Array",
-    gamma: "da.Array",
+    res: "da.Array",
     out_path: Path | str,
     ifg_list: IfgList | None = None,
     metadata: Dict[str, Any] | None = None,
-    compute: bool = True,
-):
-    """Write optimised phase and gamma arrays to a Zarr dataset.
+) -> None:
+    """Write phase-linking results to a single Zarr dataset.
+
+    The array has shape ``(nrow, ncol, ndate + 1)``.  The first
+    ``ndate`` slices along axis 2 are the optimised phase; the final
+    slice is the temporal coherence (gamma).  ``ndate`` is stored as a
+    zarr attribute so that :func:`load_phase_linking_results` can split
+    correctly on read.
+
+    Writing proceeds in spatial batches via ``da.to_zarr(region=...)``
+    so that the dask task graph stays small and the store-map
+    :func:`~dask.array.core.concatenate3` path is never exercised on the
+    entire array at once.
 
     Parameters
     ----------
-    opt_phase : da.Array
-        Lazy dask array of optimised phase with shape
-        ``(nrow, ncol, ndate)`` and dtype ``float32``.
-    gamma : da.Array
-        Lazy dask array of temporal coherence with shape
-        ``(nrow, ncol)`` and dtype ``float32``.
+    res : da.Array
+        Lazy dask array of shape ``(nrow, ncol, ndate + 1)`` and dtype
+        ``float32``, as returned by :func:`phase_linking_solver`.
     out_path : Path or str
         Output Zarr directory.
     ifg_list : IfgList or None
@@ -524,16 +561,9 @@ def save_phase_linking_results(
         by *metadata*).
     metadata : dict or None
         Attributes stored on the output zarr group.
-    compute : bool
-        If *True* (default), trigger computation and write to disk.
-        If *False*, return the two delayed ``da.to_zarr`` tasks.
-
-    Returns
-    -------
-    list of dask.delayed or None
-        When *compute* is *False*, returns ``[write_phase_task,
-        write_gamma_task]``.  When *compute* is *True*, returns *None*.
     """
+    import gc
+
     out_path = Path(out_path)
     if out_path.exists():
         if _is_zarr_path(out_path):
@@ -542,22 +572,34 @@ def save_phase_linking_results(
             raise RuntimeError(f"{out_path} exists and is not a zarr path")
     out_path.mkdir(parents=True, exist_ok=True)
 
-    write_phase_task = da.to_zarr(
-        opt_phase, out_path, component="opt_phase", overwrite=True, compute=False
-    )
-    write_gamma_task = da.to_zarr(
-        gamma, out_path, component="gamma", overwrite=True, compute=False
-    )
+    ndate = int(res.shape[2]) - 1
+    nrow, ncol = int(res.shape[0]), int(res.shape[1])
+    row_chunk = res.chunks[0][0]
 
-    if not compute:
-        logger.info(
-            "Phase linking write tasks created (not computed). "
-            "Call dask.compute() on the returned tasks."
-        )
-        return [write_phase_task, write_gamma_task]
-
-    with ProgressBar():
-        dask.compute(write_phase_task, write_gamma_task)
+    # Create the empty zarr array with the same chunk shape as res
+    z = zarr.open(
+        str(out_path),
+        mode="w",
+        shape=(nrow, ncol, ndate + 1),
+        chunks=(res.chunks[0][0], res.chunks[1][0], res.chunks[2][0]),
+        dtype=np.float32,
+    )
+    for row_start in range(0, nrow, row_chunk):
+        row_end = min(row_start + row_chunk, nrow)
+        logger.debug("Writing rows [%d:%d] to zarr", row_start, row_end)
+        sub_da = res[row_start:row_end, :, :]
+        with ProgressBar():
+            da.to_zarr(
+                sub_da,
+                z,
+                region=(
+                    slice(row_start, row_end),
+                    slice(None),
+                    slice(None),
+                ),
+            )
+        del sub_da
+        gc.collect()
 
     # Write metadata to zarr group
     root = zarr.open(out_path, mode="a")
@@ -565,11 +607,46 @@ def save_phase_linking_results(
         for key, value in metadata.items():
             _store_attr(root, key, value)
 
+    _store_attr(root, "ndate", ndate)
+
     if ifg_list is not None and "date" not in (metadata or {}):
         _store_attr(root, "date", list(ifg_list.dates))
 
     logger.info("Phase linking results saved to %s", out_path)
     return None
+
+
+def load_phase_linking_results(
+    path: Path | str,
+) -> Tuple["da.Array", "da.Array"]:
+    """Load phase-linking results from a Zarr dataset.
+
+    The on-disk array has shape ``(nrow, ncol, ndate + 1)``.  This
+    function splits it into the two logical components.
+
+    Parameters
+    ----------
+    path : Path or str
+        Path to the Zarr directory written by
+        :func:`save_phase_linking_results`.
+
+    Returns
+    -------
+    Tuple[da.Array, da.Array]
+        ``(opt_phase, gamma)`` — lazy dask arrays with shapes
+        ``(nrow, ncol, ndate)`` (float32) and ``(nrow, ncol)``
+        (float32).
+    """
+    import dask.array as da
+
+    path = Path(path)
+    if not _is_zarr_path(path):
+        raise ValueError(f"{path} is not a Zarr dataset")
+
+    res = da.from_zarr(str(path))
+    opt_phase = res[:, :, :-1]  # (nrow, ncol, ndate)
+    gamma = res[:, :, -1]  # (nrow, ncol)
+    return opt_phase, gamma
 
 
 # ---------------------------------------------------------------------------
@@ -627,17 +704,16 @@ def run_phase_linking(
         "method": "eigensar",
     }
 
-    opt_phase, gamma, ifg_list = phase_linking_solver(
+    res, ifg_list = phase_linking_solver(
         igrams=ifg_files,
         mask_file=icfg.mask_file,
         nrow=nrow,
         ncol=ncol,
-        solver_func=eigensar_block,
+        solver_func=eigensar_block_wrapper,
     )
 
     save_phase_linking_results(
-        opt_phase=opt_phase,
-        gamma=gamma,
+        res=res,
         out_path=out_path,
         ifg_list=ifg_list,
         metadata=metadata,
