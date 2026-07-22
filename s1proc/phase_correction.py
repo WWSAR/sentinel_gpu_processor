@@ -82,7 +82,6 @@ def phase_correction(
         logger.info("Tropospheric noise correction")
         tropo_output = ifg_corr_path / "tropo.zarr"
         if not tropo_output.exists():
-            exit()
             tropo_preproc(ifg_path, config, verbose)
             tropo_corrected_stack = batch_tropo_correction(
                 previous_output, cfg.tropo.parameters.delay_path, nrow, ncol

@@ -5,9 +5,13 @@ import glob
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import TYPE_CHECKING, Sequence, Tuple
 
 import numpy as np
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    import dask.array as da
 
 from s1proc import geocoordinates, sario
 from s1proc._config import TroposphericParams
@@ -219,6 +223,190 @@ def _era5_correction(
         else:
             ifg = ifg.real + 1j * (ifg.imag - aps)
         sario.savec(ifgcorr, output_file)
+
+
+def _tropo_block(
+    ifg_block: NDArray[np.complex64],
+    delay_block: NDArray[np.float32],
+    ref_idx: NDArray[np.int32],
+    sec_idx: NDArray[np.int32],
+    wvl: float,
+    flip_sign: bool,
+    block_info: list[dict] | None = None,
+) -> NDArray[np.complex64]:
+    """Per-chunk kernel for :func:`batch_tropo_correction`.
+
+    Each call receives **one** interferogram block (axis-2 size = 1) and
+    the full delay stack for the same spatial extent.  The interferogram
+    index is read from *block_info* so that only the two relevant delay
+    slices are selected from *delay_block*, keeping the per-chunk working
+    set as small as possible.
+
+    Parameters
+    ----------
+    ifg_block : ndarray, shape ``(row_chunk, ncol, 1)``
+        One interferogram, ``complex64``.
+    delay_block : ndarray, shape ``(row_chunk, ncol, ndate)``
+        All projected delays for this spatial block, ``float32``.
+    ref_idx : ndarray of int32, shape ``(nifg,)``
+    sec_idx : ndarray of int32, shape ``(nifg,)``
+    wvl : float
+    flip_sign : bool
+    block_info : list[dict] | None
+        Dask block metadata; ``block_info[0]['chunk-location'][2]``
+        gives the interferogram index.
+    """
+    if block_info is not None:
+        k = block_info[0]["chunk-location"][2]
+    else:
+        k = 0  # direct call fallback
+    r = int(ref_idx[k])
+    s = int(sec_idx[k])
+    aps = (delay_block[:, :, r] - delay_block[:, :, s]) * (4.0 * np.pi / wvl)
+    sign = 1j if flip_sign else -1j
+    return ifg_block[:, :, 0:1] * np.exp(sign * aps)[:, :, None]
+
+
+def batch_tropo_correction(
+    ifg_files: Sequence[str | Path],
+    delay_path: str | Path,
+    nrow: int,
+    ncol: int,
+    wvl: float = 0.055465763,
+    flip_sign: bool = False,
+    row_chunk: int | None = None,
+) -> "da.Array":
+    """Apply tropospheric phase correction to a stack of wrapped interferograms.
+
+    Interferograms and projected tropospheric delay maps are loaded as
+    virtual zarr arrays via :func:`sario.create_virtual_stack` (zero-copy).
+    The correction is applied with :func:`dask.array.map_blocks` so that
+    only one interferogram and the delay-date axis for one spatial block
+    are held in memory at any time.
+
+    Parameters
+    ----------
+    ifg_files : Sequence[str | Path]
+        Paths to wrapped interferograms (flat binary ``complex64``,
+        row-major).  Filenames must follow the ``YYYYMMDD_YYYYMMDD.int``
+        convention.
+    delay_path : str | Path
+        Directory containing per-date projected delay files named
+        ``{YYYYMMDD}.delay`` (flat binary ``float32``, row-major,
+        ``(nrow, ncol)`` elements).
+    nrow : int
+        Number of image rows.
+    ncol : int
+        Number of image columns.
+    wvl : float
+        Radar wavelength in metres (Sentinel-1 default: ~0.0555 m).
+    flip_sign : bool
+        If True, apply the correction with sign ``+j * APS`` instead of
+        ``-j * APS``.
+    row_chunk : int | None
+        Rows per chunk in the virtual stacks.  When ``None``, defaults
+        to *nrow* (one chunk per image).
+
+    Returns
+    -------
+    da.Array
+        Lazy 3-D dask array of corrected wrapped interferograms with
+        shape ``(nrow, ncol, nifg)`` and dtype ``complex64``.
+
+    Raises
+    ------
+    FileNotFoundError
+        If any required delay file is missing.  All delay files are
+        checked eagerly before lazy computation begins.
+    """
+    import dask.array as da
+
+    from s1proc.sario import create_virtual_stack
+
+    delay_path = Path(delay_path)
+
+    # -- Resolve IFG → date pairs ----------------------------------------------
+    ifg_list = IfgList([str(p) for p in ifg_files])
+    ref_indices, sec_indices = ifg_list.ref_sec_indices()
+    nifg = ifg_list.nifg
+    ndate = ifg_list.ndate
+    dates = list(ifg_list.dates)
+
+    if row_chunk is None:
+        row_chunk = nrow
+
+    logger.info(
+        "Batch tropo correction (map_blocks): %d ifgs, %d dates, "
+        "shape=(%d, %d), ifg_chunk=(%d, %d, 1)",
+        nifg,
+        ndate,
+        nrow,
+        ncol,
+        row_chunk,
+        ncol,
+    )
+
+    # -- Check all delay files exist before building the lazy graph ------------
+    delay_files: list[Path] = []
+    for d in dates:
+        df = delay_path / f"{d}.delay"
+        if not df.exists():
+            raise FileNotFoundError(
+                f"Delay file {df} is missing. Run tropo_preproc first."
+            )
+        delay_files.append(df)
+
+    # -- Virtual stacks (zero-copy) --------------------------------------------
+    # Interferogram stack: chunked (row_chunk, ncol, 1) — one ifg per chunk
+    ifg_mapper = create_virtual_stack(
+        [Path(p) for p in ifg_files],
+        np.complex64,
+        nrow,
+        ncol,
+        row_chunk,
+        new_axis=2,
+    )
+    ifg_stack = da.from_zarr(ifg_mapper)
+    ifg_stack = ifg_stack.rechunk({0: row_chunk, 1: ncol, 2: 1})
+
+    # Delay stack: chunked (row_chunk, ncol, -1) — all dates, one block
+    delay_mapper = create_virtual_stack(
+        delay_files,
+        np.float32,
+        nrow,
+        ncol,
+        row_chunk,
+        new_axis=2,
+    )
+    delay_stack = da.from_zarr(delay_mapper)
+    delay_stack = delay_stack.rechunk({0: row_chunk, 1: ncol, 2: -1})
+
+    # -- map_blocks ------------------------------------------------------------
+    # Dask broadcasts the single axis-2 block of `delay_stack` against the
+    # `nifg` axis-2 blocks of `ifg_stack`.  Each call to `_tropo_block`
+    # therefore receives:
+    #   ifg_block  : (row_chunk, ncol, 1)      complex64
+    #   delay_block: (row_chunk, ncol, ndate)  float32
+    # Peak memory per task is ~ row_chunk × ncol × (8 + 4·ndate + 12) bytes.
+    corrected = da.map_blocks(
+        _tropo_block,
+        ifg_stack,
+        delay_stack,
+        dtype=np.complex64,
+        chunks=ifg_stack.chunks,
+        ref_idx=ref_indices,
+        sec_idx=sec_indices,
+        wvl=wvl,
+        flip_sign=flip_sign,
+    )
+
+    logger.info(
+        "Batch tropo correction graph built (map_blocks): %d ifgs, "
+        "lazy result dtype=%s",
+        nifg,
+        corrected.dtype,
+    )
+    return corrected
 
 
 def tropo_proj(
