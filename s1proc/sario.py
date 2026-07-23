@@ -625,7 +625,7 @@ def create_virtual_stack(
     if new_axis == 0:
         shape_3d = [nimg, nrow, ncol]
         chunk_3d = [1, row_chunk, ncol]
-        key_format = "data/{k}.0.{i}"
+        key_format = "data/{k}.{i}.0"
     else:
         shape_3d = [nrow, ncol, nimg]
         chunk_3d = [row_chunk, ncol, 1]
