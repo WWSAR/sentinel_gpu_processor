@@ -436,4 +436,13 @@ __global__ void col_look(float *a, float *b, const int collook,
 __global__ void row_look(float *a, float *b, const int rowlook,
                          const std::size_t ncol, const std::size_t n);
 
+// Index array for spiral search
+struct IndexArray {
+  int2 *data;
+  size_t size;
+};
+
+IndexArray scan_array(const unsigned int rdmin, const unsigned int rdmax);
+void free_index_array(IndexArray *arr);
+
 #endif

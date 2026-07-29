@@ -336,3 +336,83 @@ __global__ void row_look(float *a, float *b, const int rowlook,
     b[i] = sum / rowlook;
   }
 }
+
+IndexArray scan_array(const unsigned int rdmin, const unsigned int rdmax) {
+  // estimate the maximum number of points to allocate memory
+  size_t max_points = 0;
+  for (unsigned int r = rdmin + 1; r < rdmax; ++r) {
+    max_points += 8 * r; // each radius contributes at most 8*r points
+  }
+  int2 *temp = (int2 *)malloc(max_points * sizeof(int2));
+  size_t count = 0;
+
+  // visited array: rdmax x rdmax, using char type (1 byte)
+  char *visited = (char *)calloc(rdmax * rdmax, sizeof(char));
+  visited[0 * rdmax + 0] = 1; // visited[0][0] = true
+
+  for (int r = 1; r < (int)rdmax; ++r) {
+    int x = r, y = 0;
+    int p = 1 - r;
+    if (r > (int)rdmin) {
+      // four axis points
+      temp[count++] = {r, 0};
+      temp[count++] = {-r, 0};
+      temp[count++] = {0, r};
+      temp[count++] = {0, -r};
+    }
+    visited[r * rdmax + 0] = 1;
+    visited[0 * rdmax + r] = 1;
+    int flag = 0;
+    while (x > y) {
+      if (flag == 0) {
+        y++;
+        if (p <= 0) {
+          p += 2 * y + 1;
+        } else {
+          x--;
+          p += 2 * y - 2 * x + 1;
+        }
+      } else {
+        flag--;
+      }
+      if (x < y)
+        break;
+      // move left until visited[x-1][y] is true
+      while (x - 1 >= 0 && y < (int)rdmax && !visited[(x - 1) * rdmax + y]) {
+        x--;
+        flag++;
+      }
+      visited[x * rdmax + y] = 1;
+      visited[y * rdmax + x] = 1;
+      if (r > (int)rdmin) {
+        temp[count++] = {x, y};
+        temp[count++] = {-x, -y};
+        temp[count++] = {x, -y};
+        temp[count++] = {-x, y};
+        if (x != y) {
+          temp[count++] = {y, x};
+          temp[count++] = {-y, -x};
+          temp[count++] = {y, -x};
+          temp[count++] = {-y, x};
+        }
+      }
+      if (flag > 0) {
+        x++;
+      }
+    }
+  }
+
+  free(visited);
+  // reallocate to the actual size and return
+  int2 *result = (int2 *)malloc(count * sizeof(int2));
+  memcpy(result, temp, count * sizeof(int2));
+  free(temp);
+  return {result, count};
+}
+
+void free_index_array(IndexArray *arr) {
+  if (arr->data)
+    free(arr->data);
+  arr->data = nullptr;
+  arr->size = 0;
+}

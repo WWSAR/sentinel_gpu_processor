@@ -49,12 +49,6 @@ if(DEFINED ENV{CONDA_PREFIX})
     endif()
 endif()
 
-message(STATUS "-------------------------------------------------")
-message(STATUS "[s1proc DEBUG] CUDA Include Dirs: ${CUDAToolkit_INCLUDE_DIRS}")
-message(STATUS "-------------------------------------------------")
-
-#set(CMAKE_INCLUDE_SYSTEM_FLAG_CUDA "-I")
-
 if(NOT TARGET SQLite::SQLite3 AND TARGET SQLite3::SQLite3)
     add_library(SQLite::SQLite3 ALIAS SQLite3::SQLite3)
 endif()
@@ -69,7 +63,8 @@ add_executable(geo2rdr src/geo2rdr.cu src/sql_mod.cpp
                src/orbit.cu src/sario.cu src/bounds.cu)
 add_executable(crossmul src/crossmul.cu src/sario.cu)
 add_executable(crossmul_daemon src/crossmul_daemon.cu src/sario.cu)
-add_executable(phase_similarity src/phase_similarity.cu)
+add_executable(phase_similarity src/phase_similarity.cu src/sario.cu)
+add_executable(phase_interp src/phase_interp.cu src/sario.cu)
 add_executable(goldstein src/goldstein.cu)
 
 set_target_properties(geo2rdr PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
@@ -79,6 +74,7 @@ target_include_directories(geo2rdr PRIVATE "include")
 target_include_directories(crossmul PRIVATE "include")
 target_include_directories(crossmul_daemon PRIVATE "include")
 target_include_directories(phase_similarity PRIVATE "include")
+target_include_directories(phase_interp PRIVATE "include")
 target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIRS})
 
 # Link libraries with platform-specific handling
@@ -86,7 +82,7 @@ target_link_libraries(geo2rdr SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
 
 # Install CUDA executables into the Python package: s1proc/bin/
-install(TARGETS geo2rdr crossmul crossmul_daemon phase_similarity goldstein
+install(TARGETS geo2rdr crossmul crossmul_daemon phase_similarity phase_interp goldstein
         RUNTIME DESTINATION bin
 )
 #install(TARGETS readgeotiff deramp_burst geo2rdr_reramp crossmul phase_similarity goldstein
