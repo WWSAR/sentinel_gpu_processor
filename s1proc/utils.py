@@ -695,7 +695,7 @@ class IfgList:
         return date_list
 
     def get_date_pair_list(self) -> List[str]:
-        return [row["date1"] + "_" + row["date2"] for _, row in self.df.interrows()]
+        return [row["date1"] + "_" + row["date2"] for _, row in self.df.iterrows()]
 
     def date2days(self) -> NDArray[np.float32]:
         """
