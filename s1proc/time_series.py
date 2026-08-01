@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -13,7 +14,7 @@ from matplotlib import pyplot as plt
 from numpy.typing import NDArray
 
 from s1proc._log import setup_logger
-from s1proc.sario import _store_attr
+from s1proc.sario import _store_attr, create_virtual_stack
 from s1proc.utils import IfgList, _get_mask_chunk
 
 plt.rcParams["image.interpolation"] = "none"
@@ -133,9 +134,9 @@ def _compute_ifg_outlier_mask(
     )  # (ndate - 1, npixels)
     d_v = numerator_v / (denominator_v + 1e-6)  # (ndate - 1, npixels)
 
-    d_medv = cp.median(cp.abs(d_v), axis=0)  # (npixels,)
+    d_medv = cp.nanmedian(cp.abs(d_v), axis=0)  # (npixels,)
     d_devv = cp.abs(d_v - d_medv[None, :])  # (ndate - 1, npixels)
-    d_madv = cp.median(d_devv, axis=0)  # (npixels,)
+    d_madv = cp.nanmedian(d_devv, axis=0)  # (npixels,)
 
     d_valid_mask = d_devv <= (d_madv[None, :] * mad_scalar)  # (ndate - 1, npixels)
 
@@ -644,19 +645,22 @@ def _sbas_l1_chunk(
 
 def _sbas_linear_block(
     unw_chunk: NDArray[np.float32],
-    G: NDArray[np.float32] = None,
-    B: NDArray[np.float32] = None,
-    ref_phase: NDArray[np.float32] = None,
-    wvl: float = 0.055465763,
-    days: NDArray[np.float32] = None,
-    mask: NDArray[np.bool_] = None,
+    G: NDArray[np.float32],
+    B: NDArray[np.float32],
+    ref_phase: NDArray[np.float32],
+    days: NDArray[np.float2] | None = None,
+    mask: NDArray[np.bool_] | None = None,
     mad_scalar: float = 0.0,
-    block_info: dict = None,
+    block_info: dict | None = None,
     regularization: float = 0.0,
+    wvl: float = 0.055465763,
     **kwargs: Any,
 ) -> NDArray[np.float32]:
     chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    if block_info is not None:
+        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    else:
+        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
     return _sbas_solver_chunk(
         unw_chunk,
         mask_chunk,
@@ -689,7 +693,10 @@ def _sbas_seasonal_block(
     **kwargs: Any,
 ) -> NDArray[np.float32]:
     chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    if block_info is not None:
+        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    else:
+        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
     return _sbas_solver_chunk(
         unw_chunk,
         mask_chunk,
@@ -722,7 +729,10 @@ def _sbas_ls_block(
     **kwargs: Any,
 ) -> NDArray[np.float32]:
     chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    if block_info is not None:
+        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
+    else:
+        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
     return _sbas_solver_chunk(
         unw_chunk,
         mask_chunk,
@@ -779,6 +789,171 @@ def _sbas_l1_block(
 
 
 # ---------------------------------------------------------------------------
+# Sequential time-series solver (no MAD, no 3-D stack)
+# ---------------------------------------------------------------------------
+
+
+def _sequential_time_series_2d(
+    unw_files: Sequence[str],
+    mask: NDArray[np.bool_],
+    out_path: Path,
+    nrow: int,
+    ncol: int,
+    ref_point: Tuple[int, int],
+    ref_win: Tuple[int, int],
+    temp_bl: NDArray[np.float32],
+    wvl: float,
+    method: Literal["stack", "sbas_linear"],
+    row_chunk_size: int | None = None,
+    metadata: Dict[str, Any] | None = None,
+) -> None:
+    """Compute mean velocity by sequentially reading unwrapped interferograms.
+
+    This avoids loading the full 3-D phase stack into memory and skips MAD
+    outlier filtering.  It is used when ``mad_scalar == 0`` and the time series
+    method is ``"stack"`` or ``"sbas_linear"`` — in both cases the per-pixel
+    solution reduces to a weighted sum and a scalar division, so a full
+    least-squares solve per pixel is unnecessary.
+
+    Parameters
+    ----------
+    unw_files : Sequence[str]
+        Paths to unwrapped interferograms (binary float32, shape ``(nrow, ncol)``).
+    mask : ndarray, shape ``(nrow, ncol)``
+        Boolean mask where ``True`` indicates a valid pixel.
+    out_path : Path
+        Output zarr directory.
+    nrow : int
+        Number of rows per interferogram.
+    ncol : int
+        Number of columns per interferogram.
+    ref_point : (row, col)
+        Reference pixel coordinates (0-indexed).
+    ref_win : (row_half, col_half)
+        Reference window half-sizes in pixels.
+    temp_bl : ndarray, shape ``(nifg,)``
+        Total temporal baseline (days) per interferogram — the sum of each
+        row of the velocity-integration matrix **B**.
+    wvl : float
+        Radar wavelength in meters.
+    method : ``"stack"`` | ``"sbas_linear"``
+        - ``"stack"``:  ``v = sum(phase_corrected) / sum(temp_bl)``
+        - ``"sbas_linear"``:  ``v = sum(temp_bl * phase_corrected) / sum(temp_bl²)``
+    row_chunk_size : int or None
+        Number of rows to process at a time.  If *None*, a chunk size is
+        chosen to keep the working set near 1 GB.
+    metadata : dict or None
+        Attributes stored on the output zarr group.
+    """
+    nifg = len(unw_files)
+
+    # --- Validate reference point -----------------------------------------
+    if (
+        ref_point[0] < 0
+        or ref_point[0] >= nrow
+        or ref_point[1] < 0
+        or ref_point[1] >= ncol
+    ):
+        raise ValueError(
+            f"Reference point ({ref_point[0]}, {ref_point[1]}) out of boundary."
+        )
+    if not mask[ref_point[0], ref_point[1]]:
+        raise RuntimeError(
+            f"Reference point ({ref_point[0]}, {ref_point[1]}) is on the masked area."
+        )
+    if ref_win[0] < 0 or ref_win[1] < 0:
+        raise ValueError("Reference window size must be positive.")
+
+    # --- Compute reference phase ------------------------------------------
+    half_row_win = (ref_win[0] + 1) // 2
+    half_col_win = (ref_win[1] + 1) // 2
+    top = int(np.maximum(0, ref_point[0] - half_row_win + 1))
+    bottom = int(np.minimum(nrow, ref_point[0] + half_row_win))
+    left = int(np.maximum(0, ref_point[1] - half_col_win + 1))
+    right = int(np.minimum(ncol, ref_point[1] + half_col_win))
+    logger.info(
+        "Reference window: left=%d, right=%d, top=%d, bottom=%d",
+        left,
+        right,
+        top,
+        bottom,
+    )
+    ref_win_mask = mask[top:bottom, left:right]
+
+    ref_phase = np.empty(nifg, dtype=np.float32)
+    for i, f in enumerate(unw_files):
+        data = np.memmap(f, dtype=np.float32, mode="r", shape=(nrow, ncol))
+        ref_tube = np.array(data[top:bottom, left:right])
+        ref_phase[i] = np.nanmean(ref_tube * ref_win_mask)
+
+    # --- Precompute denominator -------------------------------------------
+    if method == "stack":
+        denominator = float(np.sum(temp_bl.astype(np.float64)))
+    elif method == "sbas_linear":
+        denominator = float(np.sum(temp_bl.astype(np.float64) ** 2))
+    else:
+        raise ValueError(f"Unsupported method for sequential solver: {method!r}")
+
+    logger.info("Denominator: %.3f (method=%s)", denominator, method)
+
+    # --- Row chunk size ---------------------------------------------------
+    if row_chunk_size is None:
+        row_chunk_size = nrow
+    logger.info("Row chunk size: %d", row_chunk_size)
+
+    # --- Prepare output ---------------------------------------------------
+    out_path = Path(out_path)
+    if out_path.exists():
+        shutil.rmtree(out_path)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    root = zarr.open(
+        str(out_path),
+        mode="w",
+        shape=(nrow, ncol),
+        chunks=(row_chunk_size, ncol),
+        dtype=np.float32,
+    )
+
+    # --- Process row chunks -----------------------------------------------
+    scale = wvl / (4.0 * np.pi) * 365.25  # rad / day  ->  m / yr
+
+    for row_start in range(0, nrow, row_chunk_size):
+        row_end = min(row_start + row_chunk_size, nrow)
+        chunk_rows = row_end - row_start
+        logger.debug("Processing rows [%d:%d] of %d", row_start, row_end, nrow)
+
+        # Accumulate weighted phase in float64 to preserve precision
+        numerator = np.zeros((chunk_rows, ncol), dtype=np.float64)
+
+        for i, f in enumerate(unw_files):
+            data = np.memmap(f, dtype=np.float32, mode="r", shape=(nrow, ncol))
+            chunk = np.array(data[row_start:row_end, :])
+            chunk -= ref_phase[i]
+
+            if method == "stack":
+                numerator += chunk.astype(np.float64)
+            else:  # sbas_linear
+                numerator += temp_bl[i] * chunk.astype(np.float64)
+
+        # velocity in m / yr
+        velocity = (numerator / (denominator + 1e-6)) * scale
+
+        # Apply mask
+        chunk_mask = mask[row_start:row_end, :]
+        velocity[~chunk_mask] = np.nan
+
+        root[row_start:row_end, :] = velocity.astype(np.float32)
+
+    # --- Store metadata ---------------------------------------------------
+    if metadata:
+        for key, value in metadata.items():
+            _store_attr(root, key, value)
+
+    logger.info("Sequential time series computation complete.")
+
+
+# ---------------------------------------------------------------------------
 # Time-series orchestrator
 # ---------------------------------------------------------------------------
 
@@ -795,7 +970,6 @@ def time_series_solver(
     reference_win: Tuple[int, int] = (11, 11),
     output_dim: Literal["2d", "3d"] = "2d",
     row_chunk_size: int | None = None,
-    col_chunk_size: int | None = None,
     metadata: Dict[str, Any] | None = None,
 ) -> None:
     """Run the time-series computation and write results to zarr.
@@ -827,27 +1001,35 @@ def time_series_solver(
         Window radius for reference phase estimation.
     output_dim : ``"2d"`` | ``"3d"``
     row_chunk_size : int or None
-    col_chunk_size : int or None
     metadata : dict or None
         Attributes stored on the output zarr group.
     """
+    from dask.diagnostics import ProgressBar
+
     if solver_kwargs is None:
         solver_kwargs = {}
 
     unw_list = IfgList(unw_files)
+    nifg = unw_list.nifg
     logger.info(
         "Time series analysis with %d interferograms, %d unique dates",
         len(unw_files),
         unw_list.ndate,
     )
-    logger.info("Creating image stacks with dask")
 
-    ifg_memmaps = [
-        np.memmap(f, dtype="float32", mode="r", shape=(nrow, ncol)) for f in unw_files
-    ]
-    unw_dask_slices = [da.from_array(m, chunks=(nrow, ncol)) for m in ifg_memmaps]
-    unw_stack = da.stack(unw_dask_slices, axis=0)  # (nifg, nrow, ncol)
-    logger.info(f"Total Chunks/Tasks: {unw_stack.npartitions}")
+    if row_chunk_size is None:
+        byte_per_row = ncol * 4 * nifg
+        row_chunk_size = int(1e9 / byte_per_row)
+        row_chunk_size = int(max(min(row_chunk_size, nrow), 1))
+    col_chunk_size = ncol
+    logger.info(f"Row chunk size: {row_chunk_size}.")
+    logger.info(f"Column chunk size: {col_chunk_size}.")
+
+    logger.info("Creating a virtual Zarr stack")
+    mapper = create_virtual_stack(
+        unw_files, np.float32, nrow, ncol, row_chunk_size, new_axis=0
+    )
+    unw_stack = da.from_zarr(mapper)  # (nifg, nrow, ncol)
 
     # Load mask
     logger.info("Load mask from %s", mask_file)
@@ -856,20 +1038,7 @@ def time_series_solver(
     else:
         mask = np.ones((nrow, ncol), dtype=np.bool_)
 
-    # Rechunk
-    if row_chunk_size is None:
-        row_chunk_size = int(np.minimum(128, nrow))
-    if col_chunk_size is None:
-        col_chunk_size = int(np.minimum(128, ncol))
-    unw_stack = unw_stack.rechunk({0: -1, 1: row_chunk_size, 2: col_chunk_size})
-    logger.info(f"Total Chunks/Tasks: {unw_stack.npartitions}")
-    exit()
-    logger.info(
-        "Rechunked dask stack: row_chunk=%d, col_chunk=%d",
-        row_chunk_size,
-        col_chunk_size,
-    )
-
+    logger.info("Calculate reference phase")
     # --- Reference phase ----------------------------------------------------
     if (
         reference_point[0] < 0
@@ -905,7 +1074,7 @@ def time_series_solver(
     ref_win_mask = mask[top:bottom, left:right]
     # (nifg, win_rows, win_cols)
     ref_tube = unw_stack[:, top:bottom, left:right].compute()
-    ref_phase = np.mean(ref_tube * ref_win_mask[None, :, :], axis=(1, 2))  # (nifg,)
+    ref_phase = np.nanmean(ref_tube * ref_win_mask[None, :, :], axis=(1, 2))  # (nifg,)
 
     # --- Build common kwargs for map_blocks ---------------------------------
     common_kwargs = dict(
@@ -928,6 +1097,7 @@ def time_series_solver(
 
     # --- Run the dask computation -------------------------------------------
     if output_dim == "2d":
+        ndate_out = 1
         result = da.map_blocks(
             solver_func,
             unw_stack,
@@ -956,7 +1126,33 @@ def time_series_solver(
     # --- Write to zarr ------------------------------------------------------
     if output_dim == "2d":
         logger.info("Writing velocity to %s", out_path)
-        result.to_zarr(out_path, overwrite=True)
+        root = zarr.open(
+            str(out_path),
+            mode="w",
+            shape=(nrow, ncol),
+            chunks=(result.chunks[0][0], result.chunks[1][0]),
+            dtype=np.float32,
+        )
+
+        for start in range(0, nrow, row_chunk_size):
+            end = min(start + row_chunk_size, nrow)
+            logger.debug("Computing batch [%d:%d] of %d", start, end, nrow)
+            sub_da = result[start:end, :]
+
+            with ProgressBar():
+                da.to_zarr(
+                    sub_da,
+                    root,
+                    region=(
+                        slice(start, end),
+                        slice(None),
+                    ),
+                )
+
+            del sub_da
+            gc.collect()
+        del result
+        gc.collect()
 
         root = zarr.open(out_path, mode="a")
         if metadata:
@@ -968,18 +1164,46 @@ def time_series_solver(
         logger.info("Writing displacement time series to %s", out_path)
 
         # Write 3D displacement
-        da.to_zarr(result, store, component="displacement", overwrite=True)
-        # Derive cumulative deformation (final time step)
-        cumulative = result[-1]  # (nrow, ncol)
-        da.to_zarr(
-            cumulative,
-            store,
-            component="cumulative_deformation",
-            overwrite=True,
+        root = zarr.open(
+            str(out_path),
+            mode="w",
+            shape=(ndate_out, nrow, ncol),
+            chunks=(result.chunks[0][0], result.chunks[1][0], result.chunks[2][0]),
+            dtype=np.float32,
         )
-        # Derive mean velocity  v = disp_final / total_days * 365.25  (m / yr)
-        velocity = cumulative / total_days * 365.25  # (nrow, ncol)
-        da.to_zarr(velocity, store, component="velocity", overwrite=True)
+
+        for start in range(0, nrow, row_chunk_size):
+            end = min(start + row_chunk_size, nrow)
+            logger.debug("Computing batch [%d:%d] of %d", start, end, nrow)
+            sub_da = result[:, start:end, :]
+
+            with ProgressBar():
+                da.to_zarr(
+                    sub_da,
+                    root,
+                    region=(
+                        slice(None),
+                        slice(start, end),
+                        slice(None),
+                    ),
+                )
+
+            del sub_da
+            gc.collect()
+        del result
+        gc.collect()
+
+        # Derive cumulative deformation (final time step)
+        # cumulative = result[-1]  # (nrow, ncol)
+        # da.to_zarr(
+        #    cumulative,
+        #    store,
+        #    component="cumulative_deformation",
+        #    overwrite=True,
+        # )
+        ## Derive mean velocity  v = disp_final / total_days * 365.25  (m / yr)
+        # velocity = cumulative / total_days * 365.25  # (nrow, ncol)
+        # da.to_zarr(velocity, store, component="velocity", overwrite=True)
 
         root = zarr.open(store, mode="a")
         if metadata:
@@ -1076,6 +1300,49 @@ def run_time_series(
     reg_scale = float(np.mean(np.sum(B.astype(np.float64) ** 2)))
     logger.info(f"Scale factor for Tikhonov regularization: {reg_scale:5.3f}")
 
+    # --- Sequential fast path (no MAD, no 3-D stack) --------------------------
+    if method in ("stack", "sbas_linear") and mad_scalar == 0.0:
+        logger.info(
+            "Using sequential solver for %s (mad_scalar=0) — "
+            "skipping 3-D phase stack load.",
+            method,
+        )
+        # Load mask
+        if mask_file is not None:
+            mask = np.fromfile(mask_file, dtype=np.bool_).reshape(nrow, ncol)
+        else:
+            mask = np.ones((nrow, ncol), dtype=np.bool_)
+
+        temp_bl = B.sum(axis=1).astype(np.float32)
+
+        _sequential_time_series_2d(
+            unw_files=unw_files,
+            mask=mask,
+            out_path=Path(outpath) / "time_series.zarr",
+            nrow=nrow,
+            ncol=ncol,
+            ref_point=reference_point,
+            ref_win=reference_win,
+            temp_bl=temp_bl,
+            wvl=pcfg.wavelength,
+            method=method,
+            metadata={
+                "method": method,
+                "dates": list(unw_list.dates),
+                "mask_file": str(mask_file) if mask_file else "none",
+                "reference_point": list(reference_point),
+                "wavelength": float(pcfg.wavelength),
+                "seasonal_terms": int(tcfg.parameters.seasonal_terms),
+                "mad_scalar": 0.0,
+                "regularization": 0.0,
+                "reg_scale": float(reg_scale),
+                "l1_rho": float(tcfg.parameters.l1_rho),
+                "l1_alpha": float(tcfg.parameters.l1_alpha),
+                "l1_max_iter": int(tcfg.parameters.l1_max_iter),
+            },
+        )
+        return
+
     solver_kwargs: Dict[str, Any] = dict(
         wvl=pcfg.wavelength,
         days=unw_list.date2days().astype(np.float32),  # (ndate,)
@@ -1098,7 +1365,7 @@ def run_time_series(
         solver_func = _sbas_linear_block
         solver_kwargs["G"] = build_design_matrix_linear(unw_list)  # (nifg, 1)
         solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = unw_list.ndate
+        solver_kwargs["ndate_out"] = 1
         solver_kwargs["seasonal_terms"] = 0
         solver_kwargs["regularization"] = 0.0
         solver_kwargs["dt"] = unw_list.date_interval(

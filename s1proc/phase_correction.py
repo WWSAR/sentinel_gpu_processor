@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 import cupy as cp
+import numpy as np
 
 from s1proc._log import set_logging_level, setup_logger
 from s1proc.goldstein import (
@@ -27,6 +28,73 @@ def mark_processed(status_file):
 
     with open(status_file, "w") as f:
         json.dump({"processed_at": time.time()}, f)
+
+
+def _spiral_interpolation(
+    phase_opt_zarr: Path | str,
+    output_dir: Path | str,
+    ifg_list_file: Path | str,
+    valid_mask_file: Path | str,
+    gamma_threshold: float = 0.5,
+    nneighbor: int = 20,
+    rdmax: int = 101,
+    alpha: float = 1.0,
+    phase_jump_threshold: float = 0.785,
+):
+    """
+    Reconstruct interferograms from optimized InSAR phase and spiral interpolation
+
+    Parameters
+    ----------
+    phase_opt_zarr: Path | str
+        A zarray of optimized InSAR phase stack
+    output_dir: Path | str
+        Directory of output interferograms
+    ifg_list_file: Path | str
+        Text file containing list of interferograms to process
+    valid_mask_file: Path | str
+        Binary file of valid pixel mask (int32 format, 1 means valid, 0 means invalid)
+    gamma_threshold: float
+        Pixels with a gamma value > gamma_threshold will be used as seeds for phase
+        interpolation
+    """
+
+    import subprocess
+
+    import zarr
+
+    from s1proc import get_bin_path
+
+    binary_opt_phase_dir = Path(output_dir) / "opt_phase"
+    binary_opt_phase_dir.mkdir(exist_ok=True, parents=True)
+    seed_file = Path(output_dir, "seed.mask")
+    root = zarr.open(phase_opt_zarr, "r")
+    dates = root.attrs["date"]
+    for i, date in enumerate(dates):
+        opt_phase = root[:, :, i]
+        opt_phase.astype(np.float32).tofile(binary_opt_phase_dir / f"{date}.phase")
+    gamma = root[:, :, -1]
+    nrow, ncol = gamma.shape
+    (gamma > gamma_threshold).astype(np.int32).tofile(seed_file)
+    phase_interp_bin = get_bin_path("phase_interp")
+    command = [
+        phase_interp_bin,
+        "--batch",
+        str(binary_opt_phase_dir),
+        str(ifg_list_file),
+        str(output_dir),
+        str(seed_file),
+        str(nrow),
+        str(ncol),
+        str(nneighbor),
+        str(rdmax),
+        str(alpha),
+        "--mask",
+        str(valid_mask_file),
+        "--keep-orig",
+        phase_jump_threshold,
+    ]
+    subprocess.run(command)
 
 
 def phase_correction(
@@ -81,19 +149,18 @@ def phase_correction(
     if cfg.tropo.enable:
         logger.info("Tropospheric noise correction")
         tropo_output = ifg_corr_path / "tropo.zarr"
-        if not tropo_output.exists():
+        tropo_done = ifg_corr_path / "tropo.done"
+        if not tropo_done.exists():
             tropo_preproc(ifg_path, config, verbose)
-            tropo_corrected_stack = batch_tropo_correction(
-                previous_output, cfg.tropo.parameters.delay_path, nrow, ncol
-            )
-            save_filtered_stack(
-                tropo_corrected_stack,
+            batch_tropo_correction(
+                previous_output,
+                cfg.tropo.parameters.delay_path,
+                nrow,
+                ncol,
                 tropo_output,
-                output_format="zarr",
-                save_chunk_size=1,
+                flip_sign=cfg.tropo.parameters.flip_sign,
+                done_file=tropo_done,
             )
-            del tropo_corrected_stack
-            gc.collect()
         current_output = tropo_output
     else:
         current_output = previous_output
@@ -186,15 +253,37 @@ def phase_correction(
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             if not eigensar_second_round_done.exists():
-                filtered_stack = goldstein_interpolation(
-                    eigensar_opt_phase_output,
-                    ifg_list,
-                    window_size=fcfg.parameters.window_size * 2,
-                    alpha=min(1, fcfg.parameters.goldstein_alpha * 2),
+                interpolation_method = (
+                    cfg.filter.parameters.eigensar_interpolation_method.lower()
                 )
-                filtered_stack = filtered_stack.rechunk({0: nrow, 1: ncol, 2: 1})
-                save_filtered_stack(filtered_stack, out_path=final_output)
+                if interpolation_method == "goldstein":
+                    filtered_stack = goldstein_interpolation(
+                        eigensar_opt_phase_output,
+                        ifg_list,
+                        window_size=fcfg.parameters.window_size * 2,
+                        alpha=min(1, fcfg.parameters.goldstein_alpha * 2),
+                    )
+                    filtered_stack = filtered_stack.rechunk({0: nrow, 1: ncol, 2: 1})
+                    save_filtered_stack(filtered_stack, out_path=final_output)
+                    gc.collect()
+                    cp.get_default_memory_pool().free_all_blocks()
+                    cp.get_default_pinned_memory_pool().free_all_blocks()
+                elif interpolation_method == "spiral":
+                    valid_mask_file = ifg_corr_path / "valid_mask.bin"
+                    ifg_list_file = ifg_corr_path / "ifg_list.txt"
+                    valid_mask = np.fromfile(mask_file, dtype=bool)
+                    valid_mask.astype(np.int32).tofile(valid_mask_file)
+                    date_pair_list = ifg_list.get_date_pair_list()
+                    with open(ifg_list_file, "w") as f:
+                        f.write("\n".join(date_pair_list))
+                    _spiral_interpolation(
+                        eigensar_opt_phase_output,
+                        ifg_corr_path,
+                        valid_mask_file,
+                        cfg.filter.parameters.eigensar_gamma,
+                    )
+                else:
+                    raise ValueError(
+                        f"Unrecognized interpolation method: {interpolation_method}"
+                    )
                 mark_processed(eigensar_second_round_done)
-                gc.collect()
-                cp.get_default_memory_pool().free_all_blocks()
-                cp.get_default_pinned_memory_pool().free_all_blocks()

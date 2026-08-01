@@ -464,6 +464,15 @@ def _run_phasecorr(config: str, verbose: bool) -> None:
     phase_correction(config=config, verbose=verbose)
 
 
+def _run_reference(config: str, verbose: bool) -> None:
+    """Thin wrapper around :func:`s1proc.reference.select_reference_point`."""
+    from s1proc.reference import select_reference_point
+
+    select_reference_point(
+        config=config, verbose=verbose, from_gps=True, overwrite=True
+    )
+
+
 def _run_unwrap(config: str, verbose: bool) -> None:
     """Thin wrapper around :func:`s1proc.unwrap.batch_unwrap`."""
     from s1proc.unwrap import batch_unwrap
@@ -486,16 +495,17 @@ def _run_timeseries(config: str) -> None:
 def run(
     config: str | Path = "config.yaml",
     *,
-    preproc: bool = True,
-    stack: bool = True,
-    amp: bool = True,
-    integrity: bool = True,
-    slcpairs: bool = True,
-    interfere: bool = True,
-    coh: bool = True,
-    phasecorr: bool = True,
-    unwrap: bool = True,
-    timeseries: bool = True,
+    preproc: bool = False,
+    stack: bool = False,
+    amp: bool = False,
+    integrity: bool = False,
+    slcpairs: bool = False,
+    interfere: bool = False,
+    coh: bool = False,
+    phasecorr: bool = False,
+    unwrap: bool = False,
+    reference: bool = False,
+    timeseries: bool = False,
     verbose: bool = False,
     resume: bool = True,
 ) -> None:
@@ -531,6 +541,9 @@ def run(
     unwrap : bool
         Unwrap interferograms using the backend specified by
         ``unwrap.method`` (``"whirlwind"`` or ``"snaphu"``).
+    reference: bool
+        Select a reference point in the study area (from GPS stations /
+        image analysis)
     timeseries : bool
         Run SBAS time-series inversion via the method specified by
         ``timeseries.method``.
@@ -576,6 +589,28 @@ def run(
     icfg = cfg.io
 
     logger.info("Loaded configuration from %s", config)
+
+    # by default, run all steps
+    if not any([
+        preproc,
+        stack,
+        amp,
+        integrity,
+        coh,
+        phasecorr,
+        unwrap,
+        reference,
+        timeseries,
+    ]):
+        preproc = True
+        stack = True
+        amp = True
+        integrity = True
+        coh = True
+        phasecorr = True
+        unwrap = True
+        reference = True
+        timeseries = True
 
     # ------------------------------------------------------------------
     # Build the pipeline
@@ -664,6 +699,14 @@ def run(
         kwargs={"config": config, "verbose": verbose},
         output_patterns=[os.path.join(icfg.unw_path, "*.unw")],
         enabled=unwrap,
+    )
+
+    pipeline.add_stage(
+        name="reference",
+        fn=_run_reference,
+        kwargs={"config": config, "verbose": verbose},
+        output_patterns=[os.path.join(icfg.time_series_path, "reference_point.txt")],
+        enabled=reference,
     )
 
     pipeline.add_stage(

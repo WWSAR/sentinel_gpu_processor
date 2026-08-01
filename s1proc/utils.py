@@ -617,10 +617,10 @@ def roipac2gtiff(
 
     Parameters
     ----------
-    rscfile: Path|str
-        An rsc file
     imgfile: Path|str
         Input image file
+    rscfile: Path|str
+        An rsc file
     input_type: DTypeLike
         Type of the input image (e.g., np.float32)
     output_type: int
@@ -693,6 +693,9 @@ class IfgList:
         date_list = np.concatenate((date_list1, date_list2))
         date_list = np.sort(np.unique(date_list))
         return date_list
+
+    def get_date_pair_list(self) -> List[str]:
+        return [row["date1"] + "_" + row["date2"] for _, row in self.df.interrows()]
 
     def date2days(self) -> NDArray[np.float32]:
         """
@@ -927,3 +930,12 @@ def _get_mask_chunk(
     row_slice = slice(int(array_loc[1][0]), int(array_loc[1][1]))
     col_slice = slice(int(array_loc[2][0]), int(array_loc[2][1]))
     return mask[row_slice, col_slice]
+
+
+def get_gpu_pool():
+    import queue
+
+    gpu_pool = queue.Queue()
+    for gpu_id in np.arange(_detect_gpu_count()):
+        gpu_pool.put(gpu_id)
+    return gpu_pool
