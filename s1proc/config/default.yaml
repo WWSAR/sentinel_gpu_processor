@@ -47,7 +47,8 @@ filter:
     parameters:
         window_size: 32
         goldstein_alpha: 0.5
-        eigensar_gamma: 0.8
+        eigensar_gamma: 0.5
+        eigensar_interpolation_method: "spiral" # select between ["spiral" and "goldstein"]
 
 # Tropospheric delay correction, for the moment, era5 is the only allowed option
 tropo:

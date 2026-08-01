@@ -71,7 +71,8 @@ class ProcessingConfig:
 class FilteringParams:
     window_size: int = 32
     goldstein_alpha: float = 0.5
-    eigensar_gamma: float = 0.8
+    eigensar_gamma: float = 0.5
+    eigensar_interpolation_method: Literal["goldstein", "spiral"] = "spiral"
 
 
 @dataclass
