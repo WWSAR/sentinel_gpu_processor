@@ -367,13 +367,22 @@ def batch_unwrap(
         raise ValueError(f"Unrecognized unwrapping method: {ucfg.method}")
 
     if ifg_path is None:
-        ifg_path = os.path.join(icfg.ifg_path, "*.int")
+        ifg_path = os.path.join(icfg.ifg_corr_path, "*.int")
+        ifg_files = get_files(ifg_path)
+        if len(ifg_files) == 0:
+            logger.warning(f"Cannot find corrected interferograms in {ifg_path}.")
+            ifg_path = os.path.join(icfg.ifg_path, "*.int")
+            ifg_files = get_files(ifg_path)
+            if len(ifg_files) == 0:
+                logger.error(f"Cannot find interferograms in {ifg_path}.")
+                return
+    else:
+        ifg_files = get_files(ifg_path, "int")
     if cc_path is None:
         cc_path = icfg.ifg_path
     if unw_path is None:
         unw_path = icfg.unw_path
 
-    ifg_files = get_files(ifg_path)
     os.makedirs(unw_path, exist_ok=True)
 
     if len(ifg_files) == 0:
