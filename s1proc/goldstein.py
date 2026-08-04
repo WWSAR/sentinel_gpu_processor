@@ -683,6 +683,15 @@ def goldstein_filter_wrapper(
     return filtered_stack
 
 
+def phase_diff(ifg):
+    ph = np.zeros(ifg.shape, dtype=np.float32)
+    ph[:, 1:] = np.abs(np.angle(np.conj(ifg[:, 1:]) * ifg[:, :-1]))
+    ph[1:, :] = np.maximum(ph[1:,], np.abs(np.angle(np.conj(ifg[1:,]) * ifg[:-1, :])))
+    ph[:, :-1] = np.maximum(ph[:, 1:], ph[:, :-1])
+    ph[1:, :] = np.maximum(ph[:-1, :], ph[1:, :])
+    return ph
+
+
 def _goldstein_interpolate_block(
     template: np.ndarry,
     opt_phase_block: np.ndarray,
@@ -761,6 +770,9 @@ def _goldstein_interpolate_block(
     # -- Blend by coherence --------------------------------------------------
     # gamma_block is (nrow, ncol) → broadcast to (nrow, ncol, batch_n)
     keep = (gamma_block >= gamma_threshold)[:, :, None]
+    for i in range(recon.shape[2]):
+        keep[:, :, i] |= phase_diff(recon[:, :, i]) < np.pi / 4
+
     return np.where(keep, recon, filtered).astype(np.complex64)
 
 
