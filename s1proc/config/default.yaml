@@ -71,7 +71,7 @@ unwrap:
         only_save_phase: true
         # whirlwind parameters
         conncomp: false
-        bridge: false
+        bridge: true
         # snaphu parameters
         cost_mode: "smooth" # select from [smooth, topo, defo]
         rowtile: null
