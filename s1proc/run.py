@@ -617,15 +617,19 @@ def run(
     # ------------------------------------------------------------------
     pipeline = Pipeline(config, resume=resume)
 
+    preproc_output_patterns = []
+    if cfg.proc.download_data:
+        preproc_output_patterns.append("roi_metalink")
+    if cfg.proc.download_eof:
+        preproc_output_patterns.extend(os.path.join(icfg.eof_path, "*.EOF"))
+    preproc_output_patterns.append(icfg.dem_file)
+    preproc_output_patterns.append(icfg.rsc_file)
+
     pipeline.add_stage(
         name="preproc",
         fn=_run_preproc,
         kwargs={"config_file": config},
-        output_patterns=[
-            "roi.metalink",
-            "elevation.dem",
-            "elevation.dem.rsc",
-        ],
+        output_patterns=preproc_output_patterns,
         enabled=preproc,
     )
 
