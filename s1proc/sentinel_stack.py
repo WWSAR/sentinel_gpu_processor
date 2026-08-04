@@ -92,6 +92,8 @@ def stack(
     rm_folder: bool = False,
     reprocess: bool = False,
     zip_list: Sequence[str] | None = None,
+    s1_start_date: str | None = None,
+    s1_end_date: str | None = None,
     verbose: bool = False,
 ):
     """
@@ -123,6 +125,10 @@ def stack(
         Reprocess the geo file if it already exists
     zip_list: Sequence[str]
         List of zip files to process
+    s1_start_date: str | None
+        Starting date of Sentinel-1 images to process
+    s1_end_date: str | None
+        Ending date of Sentinel-1 images to process
     verbose: bool
         Set logging level to DEBUG
     """
@@ -155,6 +161,14 @@ def stack(
 
         # Finding the date of acqusition following the naming rule
         current_date = sentinel_acq_time(zip_file)
+        if s1_start_date is not None:
+            d_s1_start_date = datetime.strptime(s1_start_date, "%Y-%m-%d")
+            if current_date < d_s1_start_date:
+                continue
+        if s1_end_date is not None:
+            d_s1_end_date = datetime.strptime(s1_end_date, "%Y-%m-%d")
+            if current_date > d_s1_end_date:
+                continue
         orbitfilename = None
         for j in range(norbit):
             if start_date[j] <= current_date and end_date[j] >= current_date:
@@ -260,6 +274,8 @@ def run_stack(
         rm_folder=rm_folder,
         reprocess=reprocess,
         zip_list=zip_list,
+        s1_start_date=cfg.date.start,
+        s1_end_date=cfg.date.end,
         verbose=verbose,
     )
     return
