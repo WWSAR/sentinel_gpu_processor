@@ -280,9 +280,9 @@ def prepare_station_df(cfg: Dict[str, Any]) -> pd.DataFrame:
     nrow, ncol = rsc.nlat, rsc.nlon
     if not mask_file.exists():
         logger.warning(f"Cannot find the mask file: {mask_file}")
-        mask = np.fromfile(mask_file, dtype=np.bool_).reshape(nrow, ncol)
-    else:
         mask = np.ones((nrow, ncol), dtype=np.bool_)
+    else:
+        mask = np.fromfile(mask_file, dtype=np.bool_).reshape(nrow, ncol)
     losvec = np.fromfile(losvec_file, dtype=np.float32).reshape(nrow, ncol, 3)
     if cfg.date.start is None:
         raise ValueError(
