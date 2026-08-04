@@ -286,7 +286,7 @@ def batch_tropo_correction(
     nifg = ifg_list.nifg
 
     logger.info(
-        "Batch tropo correction (nested loop): %d ifgs, %d dates, " "shape=(%d, %d)",
+        "Batch tropo correction (nested loop): %d ifgs, %d dates, shape=(%d, %d)",
         nifg,
         ndate,
         nrow,
