@@ -430,6 +430,7 @@ def check_integrity(
         A list of dates with data loss
     """
     amp_list = np.array(glob.glob(os.path.join(amp_dir, "*.amp")))
+    Path(maskfile).parent.mkdir(exist_ok=True, parents=True)
     nimg = len(amp_list)
     non_zero_pixels = np.zeros(nimg, dtype=int)
     valid_pixel_counts = None
@@ -801,6 +802,28 @@ class IfgList:
             [self.datedict[date] for date in self.df["date2"]], dtype=int
         )
         return ref_indices, sec_indices
+
+    def get_date_mask(self) -> NDArray[np.float32]:
+        """
+        For each date, calculate an inteferogram mask for single-reference velocity
+        estimation
+
+        Returns
+        -------
+        mask: NDArray[np.float32]
+            A 2D numpy array of shape (ndate, nifg)
+            mask[j, i] = 1 if the reference SAR image of the i-th interferogram is
+            acquried on dates[j]
+            mask[j, i] = -1 if the secondary SAR image of the i-th interferogram is
+            acquried on dates[j]
+        """
+        mask = np.zeros((self.nifg, self.ndate), dtype=np.float32)
+        for j, date in enumerate(self.dates):
+            idx = np.where((self.df["date1"] == date))[0]
+            mask[j, idx] = 1
+            idx = np.where((self.df["date2"] == date))[0]
+            mask[j, idx] = -1
+        return mask
 
 
 def _detect_gpu_count() -> int:
