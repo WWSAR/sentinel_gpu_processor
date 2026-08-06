@@ -17,9 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from s1proc._log import setup_logger
-
-logger = setup_logger(name=__name__, level="INFO")
+from s1proc._log import logger, set_logging_level
 
 # ---------------------------------------------------------------------------
 # Config sections hashed for fingerprinting (everything except IO paths).
@@ -227,6 +225,9 @@ class Pipeline:
 
             step += 1
 
+            # Machine-parseable stage transition marker (consumed by the GUI).
+            logger.info("[STAGE] %s (%d/%d)", stage.name, step, n_total)
+
             if self._resume and self._should_skip(stage):
                 logger.info(
                     "Stage [%s] (%d/%d) — outputs found and verified. Skipping.",
@@ -234,16 +235,15 @@ class Pipeline:
                     step,
                     n_total,
                 )
+                logger.info("[STAGE_DONE] %s", stage.name)
                 continue
 
-            logger.info("%s", "=" * 60)
             logger.info("Stage [%s] (%d/%d) — running", stage.name, step, n_total)
-            logger.info("%s", "=" * 60)
 
             stage.fn(**stage.kwargs)
 
             self._write_marker(stage)
-            logger.info("Stage [%s] — complete. Marker written.", stage.name)
+            logger.info("[STAGE_DONE] %s", stage.name)
 
     # ------------------------------------------------------------------
     # Marker-file helpers
@@ -339,7 +339,6 @@ class Pipeline:
                 current_short,
             )
             return False
-
         return True
 
     def _validate_outputs(self, stage: Stage) -> bool:
@@ -381,7 +380,9 @@ class Pipeline:
                     if len(os.listdir(fpath)) > 0:
                         valid = True
                         break
-                elif os.path.isfile(fpath) and os.path.getsize(fpath) > 0:
+                elif os.path.isfile(fpath) and (
+                    str(fpath) == "incomplete_date.txt" or os.path.getsize(fpath) > 0
+                ):
                     valid = True
                     break
                 else:
@@ -508,6 +509,7 @@ def run(
     timeseries: bool = False,
     verbose: bool = False,
     resume: bool = True,
+    log_file: str | None = None,
 ) -> None:
     """Run the complete Sentinel-1 InSAR processing workflow.
 
@@ -554,6 +556,9 @@ def run(
         output files are intact and whose configuration fingerprint
         matches the current config.  Set to *False* to force a full
         re-run of every enabled stage.
+    log_file : str or None
+        Optional path to a log file.  When provided, all s1proc log output is
+        mirrored to that file (in addition to stdout) for post-hoc review.
 
     Notes
     -----
@@ -584,9 +589,18 @@ def run(
     """
     from s1proc._config import load_config
 
+    if verbose:
+        set_logging_level(logger, "DEBUG")
+
     config = str(config)
     cfg = load_config(config)
     icfg = cfg.io
+
+    if log_file:
+        from s1proc._log import enable_file_logging
+
+        enable_file_logging(log_file)
+        logger.info("Logging to file: %s", log_file)
 
     logger.info("Loaded configuration from %s", config)
 
@@ -596,6 +610,8 @@ def run(
         stack,
         amp,
         integrity,
+        slcpairs,
+        interfere,
         coh,
         phasecorr,
         unwrap,
@@ -606,6 +622,8 @@ def run(
         stack = True
         amp = True
         integrity = True
+        slcpairs = True
+        interfere = True
         coh = True
         phasecorr = True
         unwrap = True

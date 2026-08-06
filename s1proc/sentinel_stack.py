@@ -153,7 +153,10 @@ def stack(
 
     # loop over directories and process each with sentinel_scene
     # sentinel_scene needs zip_file and precise orbit if available
-    for zip_file in zips:
+    n_zips = len(zips)
+    for idx, zip_file in enumerate(zips, 1):
+        # Machine-parseable per-scene progress marker (consumed by the GUI).
+        logger.info("[ITEM] %d/%d %s", idx, n_zips, os.path.basename(zip_file))
         if is_processed(zip_file, proc_dir) and not reprocess:
             continue
         #  which precise orbit file for this scene?
@@ -222,7 +225,7 @@ def stack(
             record_failure(zip_file, proc_dir, tb, call_kwargs)
             continue
         mark_processed(zip_file, proc_dir, slc_files)
-    logger.info("Loop over scenes complete.")
+    logger.info("[ITEM_DONE] Stacked %d scenes.", n_zips)
 
 
 def run_stack(

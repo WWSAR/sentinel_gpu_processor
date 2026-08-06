@@ -75,12 +75,16 @@ def multilook_amp(
     os.makedirs(amp_dir, exist_ok=True)
     slc_list = glob.glob(os.path.join(slc_dir, "*.gslc"))
     date_list = sorted(np.unique([os.path.basename(s)[0:8] for s in slc_list]))
-    for date in tqdm(date_list, desc="multilook"):
+    n_dates = len(date_list)
+    for idx, date in enumerate(tqdm(date_list, desc="multilook"), 1):
+        # Machine-parseable per-date progress marker (consumed by the GUI).
+        logger.info("[ITEM] %d/%d %s.amp", idx, n_dates, date)
         sub_slc_list = glob.glob(os.path.join(slc_dir, f"{date}*.gslc"))
         outfile = os.path.join(amp_dir, f"{date}.amp")
         if os.path.exists(outfile):
             continue
         multilook(sub_slc_list, outfile, rowlook, collook)
+    logger.info("[ITEM_DONE] Amplitude multilooking complete (%d dates).", n_dates)
 
 
 def run_multilook_amp(config: str = "config.yaml"):
@@ -129,8 +133,11 @@ def coherence(
     """
     os.makedirs(amp_dir, exist_ok=True)
     ifg_list = sorted(glob.glob(os.path.join(ifg_dir, "*.int")))
+    n_ifg = len(ifg_list)
     prev_date1 = None
-    for ifg_file in tqdm(ifg_list, desc="coherence"):
+    for idx, ifg_file in enumerate(tqdm(ifg_list, desc="coherence"), 1):
+        # Machine-parseable per-interferogram progress marker (consumed by GUI).
+        logger.info("[ITEM] %d/%d %s", idx, n_ifg, os.path.basename(ifg_file))
         out_file = ifg_file.replace(".int", ".cc")
         ifg = np.fromfile(ifg_file, dtype=np.complex64)
         basename = os.path.basename(ifg_file)
@@ -145,6 +152,7 @@ def coherence(
         c = amp1 * amp2 + 1j * c
         c = np.reshape(c, (nrow, ncol))
         savec(c, out_file)
+    logger.info("[ITEM_DONE] Coherence computed for %d interferograms.", n_ifg)
 
 
 def run_coherence(config: str = "config.yaml"):

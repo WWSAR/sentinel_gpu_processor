@@ -285,9 +285,11 @@ def _stitch_all(burst_pair_map: Dict[str, List[str]], out_float: bool) -> None:
         Whether images contain float (phase-only) rather than complex data.
     """
     n_failed = 0
-    for outfile in tqdm(burst_pair_map, desc="stitching"):
+    total = len(burst_pair_map)
+    for idx, outfile in enumerate(tqdm(burst_pair_map, desc="stitching"), 1):
         if not stitch(burst_pair_map[outfile], outfile, out_float):
             n_failed += 1
+        logger.info("[ITEM] %d/%d %s", idx, total, os.path.basename(outfile))
     if n_failed > 0:
         logger.warning(
             "%d of %d interferograms failed to stitch; see %s for details.",
@@ -594,9 +596,18 @@ def _run_crossmul_daemon(
                 continue
             if line.startswith("OK "):
                 succeeded += 1
-                logger.debug("[daemon] %s", line)
+                if not np.mod(succeeded + failed, max(total // 1000, 1)):
+                    logger.info(
+                        "[PROGRESS] %5.2f%%",
+                        (succeeded + failed) / max(total, 1) * 100,
+                    )
             elif line.startswith("FAIL "):
                 failed += 1
+                if not np.mod(succeeded + failed, max(total // 1000, 1)):
+                    logger.info(
+                        "[PROGRESS] %5.2f%%",
+                        (succeeded + failed) / max(total, 1) * 100,
+                    )
                 logger.error("[daemon] %s", line)
             elif line.startswith("PROGRESS "):
                 parts = line.split()
