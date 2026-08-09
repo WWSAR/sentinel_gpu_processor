@@ -19,6 +19,7 @@ from s1proc._config import load_config
 from s1proc._log import logger, set_logging_level
 from s1proc.geocoordinates import GeoCoordinates
 from s1proc.gps import gps
+from s1proc.sario import readc
 from s1proc.utils import IfgList, get_files
 
 # Sentinel for pixels outside the valid radar footprint.
@@ -264,17 +265,36 @@ def prepare_station_df(cfg: Dict[str, Any]) -> pd.DataFrame:
     pandas.DataFrame
         A pandas DataFrame taht containss all GPS stations within the study area
     """
-    losvec_file = Path(cfg.io.geometry_path) / "los"
+    geometry_path = Path(cfg.io.geometry_path)
+    if not geometry_path.exists():
+        geometry_path.mkdir(exist_ok=True, parents=True)
+    losvec_file = geometry_path / "los"
+    theta_file = geometry_path / "look_angle"
+    dem_file = Path(cfg.io.multilook_dem_file)
     mask_file = Path(cfg.io.mask_file)
     df_stations_out_file = Path(cfg.io.proc_path) / "gps_stations.csv"
     df_stations_out_file.parent.mkdir(exist_ok=True, parents=True)
+    if not dem_file.exists():
+        from s1proc.utils import multilook_dem
+
+        multilook_dem(
+            cfg.io.dem_file,
+            cfg.io.rsc_file,
+            dem_file,
+            cfg.io.multilook_rsc_file,
+            cfg.proc.rowlook,
+            cfg.proc.collook,
+        )
+
     if not losvec_file.exists():
         from s1proc.utils import los
 
         los(
             cfg.io.multilook_dem_file,
             cfg.io.multilook_rsc_file,
+            proc_dir=cfg.io.proc_path,
             losvec_file=losvec_file,
+            theta_file=theta_file,
         )
     rsc = GeoCoordinates(cfg.io.multilook_rsc_file)
     nrow, ncol = rsc.nlat, rsc.nlon
@@ -452,7 +472,19 @@ def select_reference_station(
     return True
 
 
-def select_reference_point_from_image():
+def local_variation(v: np.ndarray, nwin: int = 11):
+    from scipy.ndimage import convolve
+
+    mask = np.isnan(v)
+    kernel = np.ones((nwin, nwin), dtype=np.float32) / nwin**2
+    v[mask] = 0
+    v_smooth = convolve(v, kernel, mode="constant")
+    v_residue = np.abs(v - v_smooth)
+    v_residue[mask] = np.nan
+    return v_residue
+
+
+def select_reference_point_from_image(config: Path | str, verbose: bool):
     """
     Select a reference point, and write it to the input configuration file.
 
@@ -463,11 +495,78 @@ def select_reference_point_from_image():
     verbose: bool
         If True, setting logging level to DEBUG
     """
+    from s1proc.time_series import _sequential_time_series_2d
+
+    if verbose:
+        set_logging_level(logger, "DEBUG")
+
+    # load the configuration file
+    cfg = load_config(config)
+    # temporary deformation rate is saved to proc_path
+    proc_path = Path(cfg.io.proc_path)
+    proc_path.mkdir(exist_ok=True, parents=True)
+    out_path = Path(cfg.io.proc_path) / "stacking_reference.zarr"
+    # Load unwrapped interferograms, first try corrected ones then uncorrected ones
+    unw_files = get_files(cfg.io.unw_corr_path, "unw")
+    if len(unw_files) == 0:
+        logger.debug(f"Cannot find any unwrapped images in {cfg.io.unw_corr_path}")
+        unw_files = get_files(cfg.io.unw_path, "unw")
+        if len(unw_files) == 0:
+            raise RuntimeError(f"Cannot find any unwrapped images in {cfg.io.unw_path}")
+    # parse nrow and ncol
+    rsc = GeoCoordinates(cfg.io.multilook_rsc_file)
+    nrow, ncol = rsc.nlat, rsc.nlon
+    mask = np.fromfile(cfg.io.mask_file, dtype=bool).reshape(nrow, ncol)
+
+    # estimate a coarse deformation rate map using the stacking method
+    unw_list = IfgList(unw_files)
+    tempbl = unw_list.df["tempbl"].to_numpy()
+    _sequential_time_series_2d(
+        unw_files, mask, out_path, nrow, ncol, temp_bl=tempbl, method="stack"
+    )
+    z = zarr.open(out_path, "r")
+    deformation_rate = z[:, :]
+    deformation_variation = local_variation(deformation_rate, nwin=3)
+    deformation_variation += local_variation(deformation_rate, nwin=11)
+    deformation_variation += local_variation(deformation_rate, nwin=51)
+    threshold = np.percentile(
+        deformation_variation[~np.isnan(deformation_variation)], 5
+    )
+    candidate_pixels = (deformation_variation < threshold) & mask
+    logger.debug(
+        "Threshold of deformation variation used for candidate reference point "
+        + f"selection : {threshold} cm/yr."
+    )
+    rank_deformation = np.argsort(deformation_variation[candidate_pixels])
+
+    # estimate average InSAR phase coherence
+    cc_files = get_files(cfg.io.ifg_path, "cc")
+    tempbl_indices = np.argsort(np.argsort(tempbl))
+    n_cc_imgs = int(min(100, unw_list.nifg * 0.3))
+    sum_coherence = np.zeros((nrow, ncol), dtype=np.float32)
+    for i in range(n_cc_imgs):
+        c = readc(cc_files[tempbl_indices[i]], ncol).imag
+        sum_coherence += c
+    sum_coherence /= n_cc_imgs
+    sum_coherence[~mask] = 0
+    candidate_coherence = sum_coherence[candidate_pixels]
+    rank_coherence = np.argsort(-np.argsort(candidate_coherence))
+
+    # calculate distance to the center of images
+    rr, cc = np.where(candidate_pixels)
+    candidate_dist = (rr - nrow / 2) ** 2 + (cc - ncol / 2) ** 2
+    rank_dist = np.argsort(np.argsort(candidate_dist))
+    rank_sum = rank_deformation + rank_coherence + rank_dist
+    candidate_idx = np.argmin(rank_sum)
+    ref_lat, ref_lon = rsc.xy2ll(rr[candidate_idx], cc[candidate_idx])
+    logger.info(f"Selected reference point: ({ref_lon},{ref_lat})")
+    write_reference_point(float(ref_lat), float(ref_lon), config=config)
+
     return
 
 
 def select_reference_point(
-    config: Path | str,
+    config: Path | str = "config.yaml",
     from_gps: bool = True,
     overwrite: bool = False,
     verbose: bool = False,
