@@ -8,8 +8,8 @@ import cupy as cp
 import dask.array as da
 import numpy as np
 import zarr
-from dask.diagnostics import ProgressBar
 from numpy.typing import NDArray
+from tqdm.auto import tqdm
 
 from s1proc.utils import get_gpu_pool
 
@@ -564,6 +564,8 @@ def save_phase_linking_results(
     """
     import gc
 
+    import dask
+
     out_path = Path(out_path)
     if out_path.exists():
         if _is_zarr_path(out_path):
@@ -584,11 +586,16 @@ def save_phase_linking_results(
         chunks=(res.chunks[0][0], res.chunks[1][0], res.chunks[2][0]),
         dtype=np.float32,
     )
-    for row_start in range(0, nrow, row_chunk):
+    for row_start in tqdm(range(0, nrow, row_chunk), desc="EVD"):
         row_end = min(row_start + row_chunk, nrow)
         logger.debug("Writing rows [%d:%d] to zarr", row_start, row_end)
         sub_da = res[row_start:row_end, :, :]
-        with ProgressBar():
+        with dask.config.set({
+            "array.chunk-size": res.chunks[0][0]
+            * res.chunks[1][0]
+            * res.chunks[2][0]
+            * 4
+        }):
             da.to_zarr(
                 sub_da,
                 z,

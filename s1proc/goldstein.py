@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Literal, Sequence, Tuple
 
 import cupy as cp
 import numpy as np
+from tqdm.auto import tqdm
 
 if TYPE_CHECKING:
     import dask.array as da
@@ -771,7 +772,7 @@ def _goldstein_interpolate_block(
     # gamma_block is (nrow, ncol) → broadcast to (nrow, ncol, batch_n)
     keep = (gamma_block >= gamma_threshold)[:, :, None]
     for i in range(recon.shape[2]):
-        keep[:, :, i] |= phase_diff(recon[:, :, i]) < np.pi / 4
+        keep[:, :, i] |= phase_diff(recon[:, :, i]) < np.pi / 2
 
     return np.where(keep, recon, filtered).astype(np.complex64)
 
@@ -966,6 +967,7 @@ def save_filtered_stack(
     ValueError
         If *output_format* is unrecognised or required args are missing.
     """
+    import dask
     import dask.array as da
     from dask.diagnostics import ProgressBar
 
@@ -999,12 +1001,17 @@ def save_filtered_stack(
             dtype=np.complex64,
         )
 
-        for start in range(0, N, save_chunk_size):
+        for start in tqdm(range(0, N, save_chunk_size), desc="filtering"):
             end = min(start + save_chunk_size, N)
             logger.debug("Computing batch [%d:%d] of %d", start, end, N)
             sub_da = filtered_stack[:, :, start:end]
 
-            with ProgressBar():
+            with dask.config.set({
+                "array.chunk-size": filtered_stack.chunks[0][0]
+                * filtered_stack.chunks[1][0]
+                * filtered_stack.chunks[2][0]
+                * 8
+            }):
                 da.to_zarr(
                     sub_da,
                     z,
