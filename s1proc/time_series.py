@@ -12,14 +12,14 @@ import numpy as np
 import zarr
 from matplotlib import pyplot as plt
 from numpy.typing import NDArray
+from tqdm.auto import tqdm
 
-from s1proc._log import setup_logger
+from s1proc._log import logger, set_logging_level
 from s1proc.sario import _store_attr, create_virtual_stack
 from s1proc.utils import IfgList, _get_mask_chunk
 
 plt.rcParams["image.interpolation"] = "none"
 
-logger = setup_logger(name=__name__, level="INFO")
 
 # ---------------------------------------------------------------------------
 # Design matrix builders
@@ -101,8 +101,9 @@ def build_design_matrix_ls(ifg_list: IfgList) -> NDArray[np.float32]:
 
 
 def _compute_ifg_outlier_mask(
-    d_unw: cp.ndarray,  # (nifg, npixels)
-    B: cp.ndarray,  # (nifg, ndate - 1)
+    unw: cp.ndarray,  # (nifg, npixels)
+    date_mask: cp.ndarray,  # (ndate, nifg)
+    tempbl: cp.ndarray,  # (nifg)
     mad_scalar: float,
 ) -> cp.ndarray:
     """Flag interferograms whose per-interval velocities are MAD outliers.
@@ -114,10 +115,16 @@ def _compute_ifg_outlier_mask(
 
     Parameters
     ----------
-    d_unw : cp.ndarray, shape ``(nifg, npixels)``
+    unw : cp.ndarray, shape ``(nifg, npixels)``
         Reference-corrected unwrapped phase (radians).
-    B : cp.ndarray, shape ``(nifg, ndate - 1)``
-        Velocity integration matrix.
+    date_mask: cp.ndarray, shape ``(ndate, nifg)``
+        Interferograms mask for different date.
+        date_mask[j, i] = 1 if the reference SAR image of the i-th interferogram is
+        acquried on dates[j]>
+        date_mask[j, i] = -1 if the secondary SAR image of the i-th interferogram is
+        acquried on dates[j].
+    tempbl : cp.ndarray, shape ``(nifg)``
+        Temporal baseline of interferograms.
     mad_scalar : float
         Threshold multiplier for the median absolute deviation.
 
@@ -126,33 +133,29 @@ def _compute_ifg_outlier_mask(
     d_ifg_mask : cp.ndarray, shape ``(nifg, npixels)``, dtype bool
         ``True`` where the interferogram should be kept.
     """
-    d_tempbl = cp.sum(B, axis=1)  # (nifg,)
-
-    numerator_v = cp.matmul(cp.sign(B).T, d_unw)  # (ndate - 1, npixels)
-    denominator_v = cp.matmul(
-        (B.T != 0).astype(cp.float32), cp.abs(d_tempbl)[:, None]
-    )  # (ndate - 1, npixels)
-    d_v = numerator_v / (denominator_v + 1e-6)  # (ndate - 1, npixels)
-
-    d_medv = cp.nanmedian(cp.abs(d_v), axis=0)  # (npixels,)
-    d_devv = cp.abs(d_v - d_medv[None, :])  # (ndate - 1, npixels)
-    d_madv = cp.nanmedian(d_devv, axis=0)  # (npixels,)
-
-    d_valid_mask = d_devv <= (d_madv[None, :] * mad_scalar)  # (ndate - 1, npixels)
-
-    has_outlier = cp.matmul(
-        (B != 0).astype(cp.float32), (~d_valid_mask).astype(cp.float32)
-    )  # (nifg, npixels)
-    return has_outlier == 0  # (nifg, npixels), True = keep
+    v = cp.matmul(date_mask, unw)
+    sum_tempbl = cp.matmul(cp.abs(date_mask), tempbl)
+    v = v / sum_tempbl[:, None]
+    medv = cp.nanmedian(v, axis=0)
+    mad = cp.nanmedian(cp.abs(v - medv), axis=0)
+    bad_dates = v > (medv + mad_scalar * mad)
+    mask = cp.matmul((date_mask != 0).T, bad_dates) == 0
+    return mask  # (nifg, npixels), True = keep
 
 
-def _weighted_lstsq(
+def _weighted_lstsq_exact(
     G: cp.ndarray,  # (nifg, nparam)
     d: cp.ndarray,  # (nifg, npixels)
     w: cp.ndarray,  # (nifg, npixels)
     regularization: float = 0.0,
 ) -> cp.ndarray:
-    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` for every pixel in a batch.
+    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` per pixel via a batched dense solve.
+
+    Forms the full ``(nparam, nparam, npixels)`` normal-equation tensor
+    ``Gᵀ W G`` explicitly, so its GPU memory scales as
+    ``O(nparam² · npixels)``.  Prefer ``_weighted_lstsq`` (which dispatches to
+    the matrix-free CG solver when ``nparam`` is large) unless ``nparam`` is
+    small enough that the tensor is cheap.
 
     Parameters
     ----------
@@ -181,6 +184,209 @@ def _weighted_lstsq(
     B = GTWd.T[..., None]  # (npixels, nparam, 1)
     x = cp.linalg.solve(A, B)  # (npixels, nparam, 1)
     return x[..., 0].T  # (nparam, npixels)
+
+
+def _weighted_lstsq_cg(
+    G: cp.ndarray,  # (nifg, nparam)
+    d: cp.ndarray,  # (nifg, npixels)
+    w: cp.ndarray,  # (nifg, npixels)
+    regularization: float = 0.0,
+    tol: float = 1e-5,
+    max_iter: int = 50,
+) -> cp.ndarray:
+    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` per pixel via preconditioned CG.
+
+    Matrix-free: the ``(nparam, nparam, npixels)`` normal-equation tensor is
+    never materialized.  Each iteration applies the system matrix through two
+    batched matmuls
+
+    .. math::
+
+        (Gᵀ W G) p = Gᵀ ( W ⊙ (G p) ),
+
+    so GPU memory scales as ``O(nparam · npixels + nifg · npixels)`` instead of
+    ``O(nparam² · npixels)``.  This makes ``sbas_ls`` (where
+    ``nparam = ndate - 1`` can be 50-200+) tractable on a GPU.  Each pixel
+    carries its own Jacobi-preconditioned conjugate-gradient run because the
+    weight matrix ``W`` differs per pixel; the per-pixel step sizes
+    ``alpha``/``beta`` keep the runs independent.
+
+    The solver starts at ``x = 0`` and iterates toward the minimum-norm
+    least-squares solution, which matches the exact solve on singular systems.
+    When ``max_iter`` is reached before the tolerance, the current iterate is
+    returned — an approximation whose quality is controlled by ``tol`` and
+    ``max_iter``.
+
+    Parameters
+    ----------
+    G : cp.ndarray, shape ``(nifg, nparam)``
+        Design matrix, shared across pixels.
+    d : cp.ndarray, shape ``(nifg, npixels)``
+    w : cp.ndarray, shape ``(nifg, npixels)``
+        Per-pixel, per-ifg weights (0 = masked / outlier).
+    regularization : float
+        Tikhonov factor λ added to the diagonal of the normal equations.
+    tol : float
+        Relative-residual tolerance on the global (all-pixel) residual norm.
+    max_iter : int
+        Maximum number of CG iterations.
+
+    Returns
+    -------
+    x : cp.ndarray, shape ``(nparam, npixels)``
+    """
+    nparam = G.shape[1]
+    npixels = d.shape[1]
+
+    # Work only on pixels with at least one non-zero weight; the rest keep the
+    # zero initial guess (the caller overwrites them with NaN via the mask).
+    active = cp.sum(w, axis=0) > 0  # (npixels,)
+    n_active = int(cp.sum(active))
+    if n_active == 0:
+        return cp.zeros((nparam, npixels), dtype=cp.float32)
+
+    d_a = d[:, active]  # (nifg, n_active)
+    w_a = w[:, active]  # (nifg, n_active)
+
+    # Right-hand side: Gᵀ (W ⊙ d)
+    b = G.T @ (w_a * d_a)  # (nparam, n_active)
+    del d_a
+
+    # Jacobi preconditioner: diagonal of Gᵀ W G.  Entries far below the pixel's
+    # own diagonal scale are left unpreconditioned (identity) instead of being
+    # inverted, which keeps rounding noise in the null space of a singular
+    # system from being amplified by a huge 1/diag.
+    diag = (G * G).T @ w_a  # (nparam, n_active)
+    diag_floor = cp.maximum(diag.max(axis=0, keepdims=True) * 1e-8, 1e-30)
+    m_inv = cp.where(
+        diag + regularization > diag_floor,
+        1.0 / cp.maximum(diag + regularization, diag_floor),
+        cp.float32(1.0),
+    )
+
+    x = cp.zeros((nparam, n_active), dtype=cp.float32)
+    r = b  # residual at x = 0 (b is not needed afterwards)
+    z = m_inv * r
+    p = z.copy()
+    rho = cp.sum(r * z, axis=0)  # (n_active,)
+    r0_norm2 = float(cp.sum(b * b))
+
+    # Track the lowest-residual iterate.  On an ill-conditioned or singular
+    # system float32 prevents reaching ``tol``, and once CG loses orthogonality
+    # the residual can grow again; returning the best iterate keeps such cases
+    # stable instead of letting the late iterations diverge.
+    best_r2 = r0_norm2
+    x_best = x.copy()
+
+    for _ in range(max_iter):
+        r_norm2 = float(cp.sum(r * r))
+        if r_norm2 < best_r2:
+            best_r2 = r_norm2
+            x_best = x.copy()
+        if r_norm2 <= (tol * tol) * r0_norm2 + 1e-30:
+            break
+
+        # Matrix-vector product: (Gᵀ W G) p, with the middle product in place
+        # to keep a single (nifg, n_active) temporary.
+        tmp = G @ p  # (nifg, n_active)
+        tmp *= w_a
+        Ap = G.T @ tmp + regularization * p  # (nparam, n_active)
+        del tmp
+
+        # Per-pixel step size; stalled pixels (pᵀAp ~ 0, i.e. p in the null
+        # space of a singular system) keep their current iterate.
+        pAp = cp.sum(p * Ap, axis=0)  # (n_active,)
+        safe = pAp > cp.float32(1e-30)
+        alpha = cp.where(safe, rho / pAp, cp.float32(0.0))
+
+        x += alpha[None, :] * p
+        r -= alpha[None, :] * Ap
+
+        z = m_inv * r
+        rho_new = cp.sum(r * z, axis=0)  # (n_active,)
+        rho_safe = cp.maximum(rho, cp.float32(1e-30))
+        beta = cp.where(safe, rho_new / rho_safe, cp.float32(0.0))
+        p = z + beta[None, :] * p
+        rho = rho_new
+
+    if r0_norm2 > 0 and best_r2 > 1e-2 * r0_norm2:
+        logger.warning(
+            "CG did not converge in %d iterations (relative residual %.3e). "
+            "Consider raising timeseries.parameters.cg_max_iter.",
+            max_iter,
+            best_r2 / r0_norm2,
+        )
+
+    x_out = cp.zeros((nparam, npixels), dtype=cp.float32)
+    x_out[:, active] = x_best
+    return x_out
+
+
+def _weighted_lstsq(
+    G: cp.ndarray,  # (nifg, nparam)
+    d: cp.ndarray,  # (nifg, npixels)
+    w: cp.ndarray,  # (nifg, npixels)
+    regularization: float = 0.0,
+    solver: Literal["auto", "exact", "cg"] = "auto",
+    cg_tol: float = 1e-5,
+    cg_max_iter: int = 50,
+) -> cp.ndarray:
+    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` for every pixel in a batch.
+
+    Dispatches to a batched dense solve (``_weighted_lstsq_exact``) or to a
+    matrix-free preconditioned CG solve (``_weighted_lstsq_cg``).  The CG
+    solver avoids materializing the ``(nparam, nparam, npixels)`` normal
+    equation tensor, which is essential for ``sbas_ls`` where
+    ``nparam = ndate - 1`` can be large.
+
+    Parameters
+    ----------
+    G : cp.ndarray, shape ``(nifg, nparam)``
+    d : cp.ndarray, shape ``(nifg, npixels)``
+    w : cp.ndarray, shape ``(nifg, npixels)``
+        Per-pixel, per-ifg weights (0 = masked / outlier).
+    regularization : float
+        Tikhonov factor λ added to the diagonal of the normal equations.
+        Should already be scaled by ``mean(tr(BᵀB))`` by the caller.
+    solver : ``"auto"`` | ``"exact"`` | ``"cg"``
+        - ``"exact"``: form ``Gᵀ W G`` and use a batched dense solve.
+        - ``"cg"``: matrix-free Jacobi-preconditioned CG (never forms ``Gᵀ W G``).
+        - ``"auto"``: use ``"exact"`` while the normal-equation tensor fits in
+          roughly 1 GiB, otherwise use ``"cg"``.
+    cg_tol : float
+        Relative-residual tolerance for the CG solver.
+    cg_max_iter : int
+        Maximum number of CG iterations.
+
+    Returns
+    -------
+    x : cp.ndarray, shape ``(nparam, npixels)``
+    """
+    if solver == "exact":
+        return _weighted_lstsq_exact(G, d, w, regularization=regularization)
+    if solver == "cg":
+        return _weighted_lstsq_cg(
+            G,
+            d,
+            w,
+            regularization=regularization,
+            tol=cg_tol,
+            max_iter=cg_max_iter,
+        )
+    # solver == "auto"
+    nparam = G.shape[1]
+    npixels = d.shape[1]
+    gtwg_bytes = nparam * nparam * npixels * G.dtype.itemsize
+    if gtwg_bytes <= 1e9:  # normal-equation tensor up to ~1 GiB
+        return _weighted_lstsq_exact(G, d, w, regularization=regularization)
+    return _weighted_lstsq_cg(
+        G,
+        d,
+        w,
+        regularization=regularization,
+        tol=cg_tol,
+        max_iter=cg_max_iter,
+    )
 
 
 def _shrinkage(a: cp.ndarray, kappa: cp.ndarray | float) -> cp.ndarray:
@@ -395,7 +601,8 @@ def _stack_block(
     ref_phase: NDArray[np.float32] = None,  # (nifg,)
     wvl: float = 0.055465763,
     mad_scalar: float = 0.0,
-    mask: NDArray[np.bool_] = None,  # (nrow, ncol)
+    mask: NDArray[np.bool_] | None = None,  # (nrow, ncol)
+    date_mask: NDArray[np.float32] | None = None,
     block_info: dict = None,
     **kwargs: Any,
 ) -> NDArray[np.float32]:  # (chunk_rows, chunk_cols)
@@ -418,9 +625,10 @@ def _stack_block(
     d_B = cp.array(B, dtype=cp.float32)  # (nifg, ndate - 1)
     d_tempbl = cp.sum(d_B, axis=1)  # (nifg,)
 
+    d_date_mask = cp.array(date_mask, dtype=cp.float32)
     if mad_scalar > 0:
         # (nifg, npixels)
-        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_B, mad_scalar)
+        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_date_mask, d_tempbl, mad_scalar)
         d_filtered_unw = d_unw * d_ifg_mask  # (nifg, npixels)
         # (npixels,)
         d_filtered_bl = cp.sum(d_tempbl[:, None] * d_ifg_mask, axis=0)
@@ -449,6 +657,10 @@ def _sbas_solver_chunk(
     regularization: float,
     seasonal_terms: int,
     solver_type: str,
+    cg_solver: Literal["auto", "exact", "cg"] = "auto",
+    cg_tol: float = 1e-5,
+    cg_max_iter: int = 50,
+    date_mask: NDArray[np.float32] | None = None,
 ) -> NDArray[np.float32]:
     """Generic SBAS solver for one dask chunk.
 
@@ -475,6 +687,7 @@ def _sbas_solver_chunk(
         Already scaled by ``mean(tr(BᵀB))`` by the caller.
     seasonal_terms : int
     solver_type : ``"linear"`` | ``"seasonal"`` | ``"ls"``
+    date_mask: ndarray, shape ``(ndate, nifg)``
 
     Returns
     -------
@@ -505,12 +718,22 @@ def _sbas_solver_chunk(
 
     if mad_scalar > 0:
         d_B = cp.array(B, dtype=cp.float32)  # (nifg, ndate - 1)
+        d_tempbl = cp.sum(d_B, axis=1)  # (nifg,)
+        d_date_mask = cp.array(date_mask, dtype=cp.float32)
         # (nifg, npixels)
-        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_B, mad_scalar)
+        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_date_mask, d_tempbl, mad_scalar)
         weights = weights * d_ifg_mask.astype(cp.float32)  # (nifg, npixels)
 
     # (nparam, npixels)
-    x = _weighted_lstsq(d_G, d_unw, weights, regularization=regularization)
+    x = _weighted_lstsq(
+        d_G,
+        d_unw,
+        weights,
+        regularization=regularization,
+        solver=cg_solver,
+        cg_tol=cg_tol,
+        cg_max_iter=cg_max_iter,
+    )
 
     if output_dim == "2d":
         v_rad_per_day = x[0:1, :]  # (1, npixels)
@@ -545,11 +768,11 @@ def _sbas_l1_chunk(
     days: NDArray[np.float32],  # (ndate,)
     dt: NDArray[np.float32],  # (ndate - 1,)
     mad_scalar: float,
-    regularization: float,
     GTG_inv: NDArray[np.float32],  # (nparam, nparam)
     l1_rho: float,
     l1_alpha: float,
     l1_max_iter: int,
+    date_mask: NDArray[np.float32] | None = None,
 ) -> NDArray[np.float32]:  # (ndate, chunk_rows, chunk_cols)
     """SBAS chunk solver using L1-norm minimization via ADMM.
 
@@ -583,6 +806,8 @@ def _sbas_l1_chunk(
         ADMM over-relaxation parameter.
     l1_max_iter : int
         Number of ADMM iterations.
+    date_mask: ndarray, shape ``(ndate, nifg)``
+        Interferogram indices for each date, must be provided when mad_scalar > 0.
 
     Returns
     -------
@@ -610,8 +835,10 @@ def _sbas_l1_chunk(
 
     if mad_scalar > 0:
         d_B = cp.array(B, dtype=cp.float32)  # (nifg, ndate - 1)
+        d_tempbl = cp.sum(d_B, axis=1)  # (nifg)
+        d_date_mask = cp.array(date_mask, dtype=cp.float32)  # (ndate, nifg)
         # (nifg, npixels)
-        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_B, mad_scalar)
+        d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_date_mask, d_tempbl, mad_scalar)
         weights = weights * d_ifg_mask.astype(cp.float32)  # (nifg, npixels)
 
     # (nparam, npixels) — L1-minimized interval velocities in rad / day
@@ -675,6 +902,10 @@ def _sbas_linear_block(
         regularization=regularization,
         seasonal_terms=0,
         solver_type="linear",
+        cg_solver=kwargs.get("cg_solver", "auto"),
+        cg_tol=kwargs.get("cg_tol", 1e-5),
+        cg_max_iter=kwargs.get("cg_max_iter", 50),
+        date_mask=kwargs.get("date_mask", None),
     )
 
 
@@ -711,6 +942,10 @@ def _sbas_seasonal_block(
         regularization=regularization,
         seasonal_terms=seasonal_terms,
         solver_type="seasonal",
+        cg_solver=kwargs.get("cg_solver", "auto"),
+        cg_tol=kwargs.get("cg_tol", 1e-5),
+        cg_max_iter=kwargs.get("cg_max_iter", 50),
+        date_mask=kwargs.get("date_mask", None),
     )
 
 
@@ -747,6 +982,10 @@ def _sbas_ls_block(
         regularization=regularization,
         seasonal_terms=0,
         solver_type="ls",
+        cg_solver=kwargs.get("cg_solver", "auto"),
+        cg_tol=kwargs.get("cg_tol", 1e-5),
+        cg_max_iter=kwargs.get("cg_max_iter", 50),
+        date_mask=kwargs.get("date_mask", None),
     )
 
 
@@ -761,7 +1000,6 @@ def _sbas_l1_block(
     mask: NDArray[np.bool_] = None,
     mad_scalar: float = 0.0,
     block_info: dict = None,
-    regularization: float = 1e-3,
     GTG_inv: NDArray[np.float32] = None,
     l1_rho: float = 0.4,
     l1_alpha: float = 1.0,
@@ -780,7 +1018,6 @@ def _sbas_l1_block(
         days,
         dt=dt,
         mad_scalar=mad_scalar,
-        regularization=regularization,
         GTG_inv=GTG_inv,
         l1_rho=l1_rho,
         l1_alpha=l1_alpha,
@@ -799,11 +1036,11 @@ def _sequential_time_series_2d(
     out_path: Path,
     nrow: int,
     ncol: int,
-    ref_point: Tuple[int, int],
-    ref_win: Tuple[int, int],
     temp_bl: NDArray[np.float32],
-    wvl: float,
     method: Literal["stack", "sbas_linear"],
+    ref_point: Tuple[int, int] | None = None,
+    ref_win: Tuple[int, int] = (11, 11),
+    wvl: float = 0.055465763,
     row_chunk_size: int | None = None,
     metadata: Dict[str, Any] | None = None,
 ) -> None:
@@ -827,15 +1064,15 @@ def _sequential_time_series_2d(
         Number of rows per interferogram.
     ncol : int
         Number of columns per interferogram.
-    ref_point : (row, col)
-        Reference pixel coordinates (0-indexed).
-    ref_win : (row_half, col_half)
-        Reference window half-sizes in pixels.
     temp_bl : ndarray, shape ``(nifg,)``
         Total temporal baseline (days) per interferogram — the sum of each
         row of the velocity-integration matrix **B**.
     wvl : float
         Radar wavelength in meters.
+    ref_point : (row, col)
+        Reference pixel coordinates (0-indexed).
+    ref_win : (row_half, col_half)
+        Reference window half-sizes in pixels.
     method : ``"stack"`` | ``"sbas_linear"``
         - ``"stack"``:  ``v = sum(phase_corrected) / sum(temp_bl)``
         - ``"sbas_linear"``:  ``v = sum(temp_bl * phase_corrected) / sum(temp_bl²)``
@@ -848,43 +1085,45 @@ def _sequential_time_series_2d(
     nifg = len(unw_files)
 
     # --- Validate reference point -----------------------------------------
-    if (
-        ref_point[0] < 0
-        or ref_point[0] >= nrow
-        or ref_point[1] < 0
-        or ref_point[1] >= ncol
-    ):
-        raise ValueError(
-            f"Reference point ({ref_point[0]}, {ref_point[1]}) out of boundary."
-        )
-    if not mask[ref_point[0], ref_point[1]]:
-        raise RuntimeError(
-            f"Reference point ({ref_point[0]}, {ref_point[1]}) is on the masked area."
-        )
-    if ref_win[0] < 0 or ref_win[1] < 0:
-        raise ValueError("Reference window size must be positive.")
+    if ref_point is not None:
+        if (
+            ref_point[0] < 0
+            or ref_point[0] >= nrow
+            or ref_point[1] < 0
+            or ref_point[1] >= ncol
+        ):
+            raise ValueError(
+                f"Reference point ({ref_point[0]}, {ref_point[1]}) out of boundary."
+            )
+        if not mask[ref_point[0], ref_point[1]]:
+            raise RuntimeError(
+                f"Reference point ({ref_point[0]}, {ref_point[1]}) is masked out."
+            )
+        if ref_win[0] < 0 or ref_win[1] < 0:
+            raise ValueError("Reference window size must be positive.")
 
-    # --- Compute reference phase ------------------------------------------
-    half_row_win = (ref_win[0] + 1) // 2
-    half_col_win = (ref_win[1] + 1) // 2
-    top = int(np.maximum(0, ref_point[0] - half_row_win + 1))
-    bottom = int(np.minimum(nrow, ref_point[0] + half_row_win))
-    left = int(np.maximum(0, ref_point[1] - half_col_win + 1))
-    right = int(np.minimum(ncol, ref_point[1] + half_col_win))
-    logger.info(
-        "Reference window: left=%d, right=%d, top=%d, bottom=%d",
-        left,
-        right,
-        top,
-        bottom,
-    )
-    ref_win_mask = mask[top:bottom, left:right]
-
-    ref_phase = np.empty(nifg, dtype=np.float32)
-    for i, f in enumerate(unw_files):
-        data = np.memmap(f, dtype=np.float32, mode="r", shape=(nrow, ncol))
-        ref_tube = np.array(data[top:bottom, left:right])
-        ref_phase[i] = np.nanmean(ref_tube * ref_win_mask)
+        # --- Compute reference phase ------------------------------------------
+        half_row_win = (ref_win[0] + 1) // 2
+        half_col_win = (ref_win[1] + 1) // 2
+        top = int(np.maximum(0, ref_point[0] - half_row_win + 1))
+        bottom = int(np.minimum(nrow, ref_point[0] + half_row_win))
+        left = int(np.maximum(0, ref_point[1] - half_col_win + 1))
+        right = int(np.minimum(ncol, ref_point[1] + half_col_win))
+        logger.info(
+            "Reference window: left=%d, right=%d, top=%d, bottom=%d",
+            left,
+            right,
+            top,
+            bottom,
+        )
+        ref_win_mask = mask[top:bottom, left:right]
+        ref_phase = np.empty(nifg, dtype=np.float32)
+        for i, f in enumerate(unw_files):
+            data = np.memmap(f, dtype=np.float32, mode="r", shape=(nrow, ncol))
+            ref_tube = np.array(data[top:bottom, left:right])
+            ref_phase[i] = np.nanmean(ref_tube * ref_win_mask)
+    else:
+        ref_phase = np.zeros(nifg, dtype=np.float32)
 
     # --- Precompute denominator -------------------------------------------
     if method == "stack":
@@ -899,7 +1138,7 @@ def _sequential_time_series_2d(
     # --- Row chunk size ---------------------------------------------------
     if row_chunk_size is None:
         row_chunk_size = nrow
-    logger.info("Row chunk size: %d", row_chunk_size)
+    logger.debug("Row chunk size: %d", row_chunk_size)
 
     # --- Prepare output ---------------------------------------------------
     out_path = Path(out_path)
@@ -1004,7 +1243,10 @@ def time_series_solver(
     metadata : dict or None
         Attributes stored on the output zarr group.
     """
-    from dask.diagnostics import ProgressBar
+    import warnings
+
+    import dask
+    from dask.array.core import PerformanceWarning
 
     if solver_kwargs is None:
         solver_kwargs = {}
@@ -1077,6 +1319,7 @@ def time_series_solver(
     ref_phase = np.nanmean(ref_tube * ref_win_mask[None, :, :], axis=(1, 2))  # (nifg,)
 
     # --- Build common kwargs for map_blocks ---------------------------------
+    date_mask = unw_list.get_date_mask()
     common_kwargs = dict(
         G=solver_kwargs.get("G"),
         B=solver_kwargs.get("B"),
@@ -1085,6 +1328,7 @@ def time_series_solver(
         days=solver_kwargs.get("days"),
         dt=solver_kwargs.get("dt"),
         mask=mask,
+        date_mask=date_mask,
         mad_scalar=solver_kwargs.get("mad_scalar", 0.0),
         regularization=solver_kwargs.get("regularization", 0.0),
         seasonal_terms=solver_kwargs.get("seasonal_terms", 1),
@@ -1092,6 +1336,9 @@ def time_series_solver(
         l1_rho=solver_kwargs.get("l1_rho", 0.4),
         l1_alpha=solver_kwargs.get("l1_alpha", 1.0),
         l1_max_iter=solver_kwargs.get("l1_max_iter", 20),
+        cg_solver=solver_kwargs.get("cg_solver", "auto"),
+        cg_tol=solver_kwargs.get("cg_tol", 1e-5),
+        cg_max_iter=solver_kwargs.get("cg_max_iter", 50),
         block_info=True,
     )
 
@@ -1134,12 +1381,18 @@ def time_series_solver(
             dtype=np.float32,
         )
 
-        for start in range(0, nrow, row_chunk_size):
+        for start in tqdm(range(0, nrow, row_chunk_size), desc="Solve(2D)"):
             end = min(start + row_chunk_size, nrow)
             logger.debug("Computing batch [%d:%d] of %d", start, end, nrow)
             sub_da = result[start:end, :]
 
-            with ProgressBar():
+            with (
+                dask.config.set({
+                    "array.chunk-size": result.chunks[0][0] * result.chunks[1][0] * 4
+                }),
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", category=PerformanceWarning)
                 da.to_zarr(
                     sub_da,
                     root,
@@ -1172,12 +1425,21 @@ def time_series_solver(
             dtype=np.float32,
         )
 
-        for start in range(0, nrow, row_chunk_size):
+        for start in tqdm(range(0, nrow, row_chunk_size), desc="Solve(3D)"):
             end = min(start + row_chunk_size, nrow)
             logger.debug("Computing batch [%d:%d] of %d", start, end, nrow)
             sub_da = result[:, start:end, :]
 
-            with ProgressBar():
+            with (
+                dask.config.set({
+                    "array.chunk-size": result.chunks[0][0]
+                    * result.chunks[1][0]
+                    * result.chunks[2][0]
+                    * 4
+                }),
+                warnings.catch_warnings(),
+            ):
+                warnings.simplefilter("ignore", category=PerformanceWarning)
                 da.to_zarr(
                     sub_da,
                     root,
@@ -1192,18 +1454,6 @@ def time_series_solver(
             gc.collect()
         del result
         gc.collect()
-
-        # Derive cumulative deformation (final time step)
-        # cumulative = result[-1]  # (nrow, ncol)
-        # da.to_zarr(
-        #    cumulative,
-        #    store,
-        #    component="cumulative_deformation",
-        #    overwrite=True,
-        # )
-        ## Derive mean velocity  v = disp_final / total_days * 365.25  (m / yr)
-        # velocity = cumulative / total_days * 365.25  # (nrow, ncol)
-        # da.to_zarr(velocity, store, component="velocity", overwrite=True)
 
         root = zarr.open(store, mode="a")
         if metadata:
@@ -1223,6 +1473,7 @@ def run_time_series(
     unw_path: Path | str | None = None,
     outpath: Path | str | None = None,
     config: str = "config.yaml",
+    verbose: bool = False,
 ) -> None:
     """Run time series analysis.
 
@@ -1235,6 +1486,8 @@ def run_time_series(
         Output directory.  Falls back to ``io.time_series_path``.
     config : str
         Path to the YAML configuration file.
+    verbose: bool
+        If True, set logging level to DEBUG
 
     Notes
     -----
@@ -1257,6 +1510,8 @@ def run_time_series(
     from s1proc.geocoordinates import GeoCoordinates
     from s1proc.utils import get_files
 
+    if verbose:
+        set_logging_level(logger, "DEBUG")
     cfg = load_config(config)
     icfg = cfg.io
     pcfg = cfg.proc
@@ -1332,13 +1587,7 @@ def run_time_series(
                 "mask_file": str(mask_file) if mask_file else "none",
                 "reference_point": list(reference_point),
                 "wavelength": float(pcfg.wavelength),
-                "seasonal_terms": int(tcfg.parameters.seasonal_terms),
                 "mad_scalar": 0.0,
-                "regularization": 0.0,
-                "reg_scale": float(reg_scale),
-                "l1_rho": float(tcfg.parameters.l1_rho),
-                "l1_alpha": float(tcfg.parameters.l1_alpha),
-                "l1_max_iter": int(tcfg.parameters.l1_max_iter),
             },
         )
         return
@@ -1348,6 +1597,9 @@ def run_time_series(
         days=unw_list.date2days().astype(np.float32),  # (ndate,)
         mad_scalar=mad_scalar,
         regularization=0.0,  # default; overridden below for methods that need it
+        cg_solver=tcfg.parameters.cg_solver,
+        cg_tol=tcfg.parameters.cg_tol,
+        cg_max_iter=tcfg.parameters.cg_max_iter,
     )
 
     # ------- Dispatch -------------------------------------------------------
@@ -1467,6 +1719,7 @@ def run_time_series(
             "l1_rho": float(tcfg.parameters.l1_rho),
             "l1_alpha": float(tcfg.parameters.l1_alpha),
             "l1_max_iter": int(tcfg.parameters.l1_max_iter),
+            "cg_max_iter": int(tcfg.parameters.cg_max_iter),
         },
     )
 
