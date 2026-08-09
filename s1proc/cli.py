@@ -19,6 +19,7 @@ def main() -> int:
     from s1proc.interfere import run_interfere
     from s1proc.phase_correction import phase_correction
     from s1proc.preproc import preprocess
+    from s1proc.reference import select_reference_point
     from s1proc.run import run
     from s1proc.sentinel_stack import run_stack
     from s1proc.time_series import run_time_series
@@ -28,15 +29,16 @@ def main() -> int:
     tyro.extras.subcommand_cli_from_dict({
         "init": initialize_config,
         "subconfig": populate_config,
-        "integrity": run_check_integrity,
         "preproc": preprocess,
+        "amp": run_multilook_amp,
+        "integrity": run_check_integrity,
         "stack": run_stack,
         "slcpairs": run_create_slc_pair_list,
         "interfere": run_interfere,
-        "unwrap": batch_unwrap,
-        "amp": run_multilook_amp,
         "coh": run_coherence,
         "phasecorr": phase_correction,
+        "unwrap": batch_unwrap,
+        "reference": select_reference_point,
         "timeseries": run_time_series,
         "run": run,
     })
