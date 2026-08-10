@@ -13,9 +13,7 @@ from numpy.typing import DTypeLike, NDArray
 from tqdm import tqdm
 
 from s1proc import geocoordinates, geometry, orbit, sario
-from s1proc._log import setup_logger
-
-logger = setup_logger(name=__name__, level="INFO")
+from s1proc._log import logger, set_logging_level
 
 
 def sentinel_parser(filename: Path | str) -> dict:
@@ -442,7 +440,8 @@ def check_integrity(
             valid_pixel_counts += a > 0
         non_zero_pixels[i] = np.sum(a != 0)
     valid_pixel_threshold = np.median(valid_pixel_counts[valid_pixel_counts > 0])
-    (valid_pixel_counts > valid_pixel_threshold).tofile(maskfile)
+    logger.debug(f"Threshold used to create the mask file: {valid_pixel_threshold}")
+    (valid_pixel_counts >= valid_pixel_threshold).tofile(maskfile)
     median_non_zero_pixel = np.median(non_zero_pixels)
     threshold = median_non_zero_pixel * max_deviation
     incomplete_idx = (median_non_zero_pixel - non_zero_pixels) > threshold
@@ -473,6 +472,7 @@ def run_check_integrity(
     movedata: bool = False,
     out_dir: str = "incomplete",
     config: str = "config.yaml",
+    verbose: bool = False,
 ):
     """
     Check data integrity based on the number of nonzero pixels in amplitude
@@ -492,12 +492,16 @@ def run_check_integrity(
         Output directory
     config: Path|str
         Configuration file
+    verbose: bool
+        If True, set logging level to DEBUG
 
     Returns
     -------
     bad_dates: List[str]
         A list of dates with data loss
     """
+    if verbose:
+        set_logging_level(logger, "DEBUG")
     from s1proc._config import load_config
 
     cfg = load_config(config)
@@ -542,13 +546,13 @@ def get_files(input_path: str, extension: str | None = None) -> List[str]:
         else:
             file_list = glob.glob(os.path.join(input_path, "*" + extension))
         if len(file_list) == 0:
-            logger.warning(
+            logger.debug(
                 "Cannot find any file from the input " + f"directory {input_path}."
             )
     else:
         file_list = glob.glob(input_path)
         if len(file_list) == 0:
-            logger.warning(
+            logger.debug(
                 "Cannot find any file using the input " + f"pattern {input_path}."
             )
     return file_list
@@ -817,7 +821,7 @@ class IfgList:
             mask[j, i] = -1 if the secondary SAR image of the i-th interferogram is
             acquried on dates[j]
         """
-        mask = np.zeros((self.nifg, self.ndate), dtype=np.float32)
+        mask = np.zeros((self.ndate, self.nifg), dtype=np.float32)
         for j, date in enumerate(self.dates):
             idx = np.where((self.df["date1"] == date))[0]
             mask[j, idx] = 1
