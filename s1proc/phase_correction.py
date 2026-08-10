@@ -37,7 +37,7 @@ def _spiral_interpolation(
     valid_mask_file: Path | str,
     gamma_threshold: float = 0.5,
     nneighbor: int = 20,
-    rdmax: int = 101,
+    rdmax: int = 21,
     alpha: float = 1.0,
     phase_jump_threshold: float = 0.785,
 ):
@@ -62,6 +62,7 @@ def _spiral_interpolation(
     import subprocess
 
     import zarr
+    from tqdm.auto import tqdm
 
     from s1proc import get_bin_path
 
@@ -70,9 +71,10 @@ def _spiral_interpolation(
     seed_file = Path(output_dir, "seed.mask")
     root = zarr.open(phase_opt_zarr, "r")
     dates = root.attrs["date"]
-    for i, date in enumerate(dates):
-        opt_phase = root[:, :, i]
-        opt_phase.astype(np.float32).tofile(binary_opt_phase_dir / f"{date}.phase")
+    for i, date in tqdm(enumerate(dates), desc="Saving optimized phase"):
+        if not (binary_opt_phase_dir / f"{date}.phase").exists():
+            opt_phase = root[:, :, i]
+            opt_phase.astype(np.float32).tofile(binary_opt_phase_dir / f"{date}.phase")
     gamma = root[:, :, -1]
     nrow, ncol = gamma.shape
     (gamma > gamma_threshold).astype(np.int32).tofile(seed_file)
@@ -92,9 +94,14 @@ def _spiral_interpolation(
         "--mask",
         str(valid_mask_file),
         "--keep-orig",
-        phase_jump_threshold,
+        str(phase_jump_threshold),
     ]
-    subprocess.run(command)
+    try:
+        subprocess.run(command, capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError as e:
+        logger.error("Error occurred while running the command:")
+        logger.error(e.stderr)
+        raise
 
 
 def phase_correction(
@@ -176,7 +183,7 @@ def phase_correction(
                     nrow=nrow,
                     ncol=ncol,
                     alpha=fcfg.parameters.goldstein_alpha,
-                    window_size=fcfg.parameters.window_size,
+                    window_size=fcfg.parameters.goldstein_window_size,
                 )
                 filtered_stack = filtered_stack.rechunk({0: nrow, 1: ncol, 2: 1})
                 save_filtered_stack(filtered_stack, out_path=final_output)
@@ -197,8 +204,8 @@ def phase_correction(
                     igrams=current_output,
                     nrow=nrow,
                     ncol=ncol,
-                    alpha=fcfg.parameters.goldstein_alpha,
-                    window_size=fcfg.parameters.window_size,
+                    alpha=fcfg.parameters.eigensar_first_round_alpha,
+                    window_size=fcfg.parameters.eigensar_first_round_window_size,
                 )
                 filter_chunk_size = filtered_stack.chunks
                 filter_batch = filter_chunk_size[2][0]
@@ -231,7 +238,9 @@ def phase_correction(
                 cp.get_default_memory_pool().free_all_blocks()
                 cp.get_default_pinned_memory_pool().free_all_blocks()
             if not eigensar_opt_phase_done.exists():
-                logger.info(f"EigenSAR phase linking chunk size: {eigensar_chunk_size}")
+                logger.debug(
+                    f"EigenSAR phase linking chunk size: {eigensar_chunk_size}"
+                )
                 res, ifg_list = phase_linking_solver(
                     eigensar_first_round_output,
                     mask_file,
@@ -260,8 +269,8 @@ def phase_correction(
                     filtered_stack = goldstein_interpolation(
                         eigensar_opt_phase_output,
                         ifg_list,
-                        window_size=fcfg.parameters.window_size * 2,
-                        alpha=min(1, fcfg.parameters.goldstein_alpha * 2),
+                        window_size=fcfg.parameters.eigensar_second_round_window_size,
+                        alpha=min(1, fcfg.parameters.eigensar_second_round_alpha),
                     )
                     filtered_stack = filtered_stack.rechunk({0: nrow, 1: ncol, 2: 1})
                     save_filtered_stack(filtered_stack, out_path=final_output)
@@ -274,13 +283,27 @@ def phase_correction(
                     valid_mask = np.fromfile(mask_file, dtype=bool)
                     valid_mask.astype(np.int32).tofile(valid_mask_file)
                     date_pair_list = ifg_list.get_date_pair_list()
+                    existing_ifgs = [
+                        Path(f).stem for f in get_files(ifg_corr_path, "int")
+                    ]
+                    date_pair_list = [
+                        d for d in date_pair_list if str(d)[0:17] not in existing_ifgs
+                    ]
+                    logger.debug(
+                        "Number of interferograms to interpolate: "
+                        + f"{len(date_pair_list)}"
+                    )
+                    if len(date_pair_list) == 0:
+                        mark_processed(eigensar_second_round_done)
+                        return
                     with open(ifg_list_file, "w") as f:
                         f.write("\n".join(date_pair_list))
                     _spiral_interpolation(
                         eigensar_opt_phase_output,
-                        ifg_corr_path,
-                        valid_mask_file,
-                        cfg.filter.parameters.eigensar_gamma,
+                        output_dir=ifg_corr_path,
+                        ifg_list_file=ifg_list_file,
+                        valid_mask_file=valid_mask_file,
+                        gamma_threshold=cfg.filter.parameters.eigensar_gamma,
                     )
                 else:
                     raise ValueError(
