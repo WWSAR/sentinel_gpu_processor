@@ -45,10 +45,27 @@ filter:
     # if eigensar is used, the window_size and goldstein_alpha correspond to the
     # parameters for the first-round goldstein-filter.
     parameters:
-        window_size: 32
-        goldstein_alpha: 0.5
-        eigensar_gamma: 0.5
+        goldstein_window_size: 32              # window size for Goldstein filter
+        goldstein_window_alpha: 0.5            # filtering parameter for Goldstein filter
+        # window size for the first-round Goldstein filter in the EigenSAR algorithm
+        eigensar_first_round_window_size: 32 
+        # filtering parameter for the first-round Goldstein filter in the EigenSAR algorithm
+        eigensar_first_round_alpha: 0.5
+        # window size for the second-round Goldstein filter in the EigenSAR algorithm
+        eigensar_second_round_window_size: 64
+        # filtering parameter for the second-round Goldstein filter in the EigenSAR algorithm
+        eigensar_second_round_alpha: 1
+        # Temporal cohernece threshold used for pixel replacement in the EigenSAR algorithm
+        eigensar_gamma: 0.8
+        # Phase interpolation method
         eigensar_interpolation_method: "spiral" # select between ["spiral" and "goldstein"]
+        # Number of nearest neighbor pixels used in spiral phase interpolation
+        spiral_nneighbor: 20
+        # Maximum search radius for pixel interpolation
+        spiral_rdmax: 101
+        # Power of radius used for scaling interpolation weights, larger spiral exponent leads
+        # to smoother phase interpolation
+        spiral_exponent: 1.0
 
 # Tropospheric delay correction, for the moment, era5 is the only allowed option
 tropo:
@@ -102,6 +119,12 @@ timeseries:
         l1_alpha: 1.0
         # l1_max_iter: number of ADMM iterations
         l1_max_iter: 20
+        # CG solver parameters (for sbas_linear, sbas_seasonal, sbas_ls)
+        # cg_solver: "auto" selects exact for small problems, CG when the
+        #            normal-equation tensor (nparam^2 * npixels) exceeds ~1 GiB
+        cg_solver: "auto"   # "auto", "exact", or "cg"
+        cg_tol: 1.0e-5      # convergence tolerance (relative residual)
+        cg_max_iter: 50     # maximum CG iterations
 
 # date and study area
 date:

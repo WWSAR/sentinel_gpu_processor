@@ -16,9 +16,10 @@ from tqdm.auto import tqdm
 
 from s1proc._log import logger, set_logging_level
 from s1proc.sario import _store_attr, create_virtual_stack
-from s1proc.utils import IfgList, _get_mask_chunk
+from s1proc.utils import IfgList, _get_mask_chunk, get_gpu_pool
 
 plt.rcParams["image.interpolation"] = "none"
+GPU_POOL = get_gpu_pool()
 
 
 # ---------------------------------------------------------------------------
@@ -172,16 +173,11 @@ def _weighted_lstsq_exact(
     x : cp.ndarray, shape ``(nparam, npixels)``
     """
     nparam = G.shape[1]
-
-    GTWG = cp.einsum("ip,ix,iq->pqx", G, w, G)  # (nparam, nparam, npixels)
+    A = cp.einsum("ip,ix,iq->xpq", G, w, G)  # (npixels, nparam, nparam)
     if regularization > 0:
-        GTWG += float(regularization) * cp.eye(nparam, dtype=G.dtype)[:, :, None]
-
-    GTWd = cp.einsum("ip,ix,ix->px", G, w, d)  # (nparam, npixels)
-
-    # cp.linalg.solve expects batch dimensions first
-    A = GTWG.transpose(2, 0, 1)  # (npixels, nparam, nparam)
-    B = GTWd.T[..., None]  # (npixels, nparam, 1)
+        idx = cp.arange(nparam)
+        A[:, idx, idx] += float(regularization)
+    B = cp.einsum("ip,ix,ix->xp", G, w, d)[..., None]  # (npixels, nparam, 1)
     x = cp.linalg.solve(A, B)  # (npixels, nparam, 1)
     return x[..., 0].T  # (nparam, npixels)
 
@@ -239,8 +235,8 @@ def _weighted_lstsq_cg(
     npixels = d.shape[1]
 
     # Work only on pixels with at least one non-zero weight; the rest keep the
-    # zero initial guess (the caller overwrites them with NaN via the mask).
-    active = cp.sum(w, axis=0) > 0  # (npixels,)
+    # zero inital guess
+    active = cp.sum(w, axis=0) > 0
     n_active = int(cp.sum(active))
     if n_active == 0:
         return cp.zeros((nparam, npixels), dtype=cp.float32)
@@ -248,74 +244,81 @@ def _weighted_lstsq_cg(
     d_a = d[:, active]  # (nifg, n_active)
     w_a = w[:, active]  # (nifg, n_active)
 
-    # Right-hand side: Gᵀ (W ⊙ d)
-    b = G.T @ (w_a * d_a)  # (nparam, n_active)
+    # Right-hand side b = Gᵀ (W ⊙ d)
+    b = G.T @ (w_a * d_a)
     del d_a
 
     # Jacobi preconditioner: diagonal of Gᵀ W G.  Entries far below the pixel's
     # own diagonal scale are left unpreconditioned (identity) instead of being
     # inverted, which keeps rounding noise in the null space of a singular
     # system from being amplified by a huge 1/diag.
-    diag = (G * G).T @ w_a  # (nparam, n_active)
-    diag_floor = cp.maximum(diag.max(axis=0, keepdims=True) * 1e-8, 1e-30)
+    diag = (G * G).T @ w_a
+    diag_floor = cp.maximum(diag.max(axis=0, keepdims=True) * 1e-7, 1e-12)
     m_inv = cp.where(
         diag + regularization > diag_floor,
         1.0 / cp.maximum(diag + regularization, diag_floor),
         cp.float32(1.0),
-    )
+    ).astype(cp.float32)
 
     x = cp.zeros((nparam, n_active), dtype=cp.float32)
-    r = b  # residual at x = 0 (b is not needed afterwards)
+    r = b.copy()
     z = m_inv * r
     p = z.copy()
-    rho = cp.sum(r * z, axis=0)  # (n_active,)
-    r0_norm2 = float(cp.sum(b * b))
+    rho = cp.sum(r * z, axis=0)
+
+    # Preallocate GPU buffers, avoid frequent alloc/free
+    tmp = cp.empty((G.shape[0], n_active), dtype=cp.float32)
+    Ap = cp.empty((nparam, n_active), dtype=cp.float32)
 
     # Track the lowest-residual iterate.  On an ill-conditioned or singular
     # system float32 prevents reaching ``tol``, and once CG loses orthogonality
     # the residual can grow again; returning the best iterate keeps such cases
     # stable instead of letting the late iterations diverge.
-    best_r2 = r0_norm2
+    r2_pixel = cp.sum(r * r, axis=0)
+    best_r2_pixel = r2_pixel.copy()
     x_best = x.copy()
 
+    # initialize the total residual
+    r0_norm2_total = float(cp.sum(r2_pixel))
+    tol_sq = (tol * tol) * r0_norm2_total + 1e-12
+
+    reg_fp32 = cp.float32(regularization)
+    eps_fp32 = cp.float32(1e-12)
+
     for _ in range(max_iter):
-        r_norm2 = float(cp.sum(r * r))
-        if r_norm2 < best_r2:
-            best_r2 = r_norm2
-            x_best = x.copy()
-        if r_norm2 <= (tol * tol) * r0_norm2 + 1e-30:
+        # pixel-wize residual update and keep the best iterate
+        r2_pixel = cp.sum(r * r, axis=0)
+        improved = r2_pixel < best_r2_pixel
+        best_r2_pixel = cp.where(improved, r2_pixel, best_r2_pixel)
+        x_best = cp.where(improved[None, :], x, x_best)
+
+        # Check if the residual converges
+        total_r2 = cp.sum(r2_pixel)
+        if total_r2 <= tol_sq:
             break
 
-        # Matrix-vector product: (Gᵀ W G) p, with the middle product in place
-        # to keep a single (nifg, n_active) temporary.
-        tmp = G @ p  # (nifg, n_active)
+        # matrix-free operator: Ap = Gᵀ (W ⊙ (G p)) + λ p
+        cp.matmul(G, p, out=tmp)
         tmp *= w_a
-        Ap = G.T @ tmp + regularization * p  # (nparam, n_active)
-        del tmp
+        cp.matmul(G.T, tmp, out=Ap)
+        if regularization > 0:
+            Ap += reg_fp32 * p
 
-        # Per-pixel step size; stalled pixels (pᵀAp ~ 0, i.e. p in the null
-        # space of a singular system) keep their current iterate.
-        pAp = cp.sum(p * Ap, axis=0)  # (n_active,)
-        safe = pAp > cp.float32(1e-30)
-        alpha = cp.where(safe, rho / pAp, cp.float32(0.0))
+        # update alpha
+        pAp = cp.sum(p * Ap, axis=0)
+        safe = pAp > eps_fp32
+        alpha = cp.where(safe, rho / cp.maximum(pAp, eps_fp32), cp.float32(0.0))
 
+        # update solution and residual
         x += alpha[None, :] * p
         r -= alpha[None, :] * Ap
 
+        # update beta and search direction p
         z = m_inv * r
-        rho_new = cp.sum(r * z, axis=0)  # (n_active,)
-        rho_safe = cp.maximum(rho, cp.float32(1e-30))
-        beta = cp.where(safe, rho_new / rho_safe, cp.float32(0.0))
+        rho_new = cp.sum(r * z, axis=0)
+        beta = cp.where(safe, rho_new / cp.maximum(rho, eps_fp32), cp.float32(0.0))
         p = z + beta[None, :] * p
         rho = rho_new
-
-    if r0_norm2 > 0 and best_r2 > 1e-2 * r0_norm2:
-        logger.warning(
-            "CG did not converge in %d iterations (relative residual %.3e). "
-            "Consider raising timeseries.parameters.cg_max_iter.",
-            max_iter,
-            best_r2 / r0_norm2,
-        )
 
     x_out = cp.zeros((nparam, npixels), dtype=cp.float32)
     x_out[:, active] = x_best
@@ -387,6 +390,197 @@ def _weighted_lstsq(
         tol=cg_tol,
         max_iter=cg_max_iter,
     )
+
+
+# ---------------------------------------------------------------------------
+# Optimised solvers for uniform per-pixel weights  (w[i,j] ≡ mask[j])
+#
+# When MAD outlier detection is disabled the per-pixel weights are identical
+# across all interferograms for a given pixel.  In that case the normal
+# equations factorise and the design matrix *G* can be collapsed to its
+# Gramian ``GᵀG`` (``nparam × nparam``) and transposed form ``Gᵀ``
+# (``nparam × nifg``), avoiding the per-pixel expansion of *G*.
+# ---------------------------------------------------------------------------
+
+
+def _weighted_lstsq_exact_uniform(
+    GTG: cp.ndarray,  # (nparam, nparam)
+    GT: cp.ndarray,  # (nparam, nifg)
+    d: cp.ndarray,  # (nifg, npixels)
+    w: cp.ndarray,  # (nifg, npixels) — uniform across axis 0
+    regularization: float = 0.0,
+) -> cp.ndarray:
+    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` when weights are uniform across IFGs.
+
+    When ``w[i, j] = mask[j]`` for all interferograms *i*, the per-pixel
+    system matrix ``Gᵀ W G`` collapses to ``mask[j] · GᵀG``.  For a binary
+    mask (value 1 on valid pixels) the solution for all valid pixels is
+
+    .. math::
+
+        x = (GᵀG + λ I)^{-1} @ Gᵀ d,
+
+    computed as a single ``(nparam, nparam) @ (nparam, npixels)`` matmul.
+    This avoids materializing the ``(npixels, nparam, nparam)`` tensor
+    entirely.
+
+    Parameters
+    ----------
+    GTG : cp.ndarray, shape ``(nparam, nparam)``
+        Precomputed ``Gᵀ G``.
+    GT : cp.ndarray, shape ``(nparam, nifg)``
+        Precomputed ``Gᵀ``.
+    d : cp.ndarray, shape ``(nifg, npixels)``
+    w : cp.ndarray, shape ``(nifg, npixels)``
+        Per-pixel weights, identical across axis 0 (``w[0, :]`` is the
+        mask for all interferograms).
+    regularization : float
+        Tikhonov factor λ added to the diagonal.
+
+    Returns
+    -------
+    x : cp.ndarray, shape ``(nparam, npixels)``
+    """
+    nparam = GTG.shape[0]
+    # Binary mask: mask[j] ∈ {0, 1} for all pixels
+    mask = w[0, :]  # (npixels,)
+    active = mask > 0.0
+    n_active = int(cp.sum(active))
+    if n_active == 0:
+        return cp.zeros((nparam, d.shape[1]), dtype=cp.float32)
+
+    # Regularise the Gramian
+    GTG_reg = GTG.copy()
+    if regularization > 0:
+        GTG_reg += float(regularization) * cp.eye(nparam, dtype=GTG.dtype)
+
+    # Solve x = (GᵀG + λI)⁻¹ @ Gᵀ d  for valid pixels
+    GTd = GT @ d[:, active]  # (nparam, n_active)
+    x_active = cp.linalg.solve(GTG_reg, GTd)  # (nparam, n_active)
+
+    x = cp.zeros((nparam, d.shape[1]), dtype=cp.float32)
+    x[:, active] = x_active
+    return x
+
+
+def _weighted_lstsq_cg_uniform(
+    GTG: cp.ndarray,  # (nparam, nparam)
+    GT: cp.ndarray,  # (nparam, nifg)
+    G2_diag: cp.ndarray,  # (nparam,) — diag of GᵀG , i.e. sum_i(G[i,:]²)
+    d: cp.ndarray,  # (nifg, npixels)
+    w: cp.ndarray,  # (nifg, npixels) — uniform across axis 0
+    regularization: float = 0.0,
+    tol: float = 1e-5,
+    max_iter: int = 50,
+) -> cp.ndarray:
+    """Solve ``(Gᵀ W G + λ I) x = Gᵀ W d`` via CG when weights are uniform
+    across interferograms.
+
+    When ``w[i, j] = mask[j]``, the weight matrix is the scalar 1 on every
+    active pixel, so the CG operator simplifies to a single Gramian matmul
+
+    .. math::
+
+        (Gᵀ W G) p = (GᵀG) @ p,
+
+    the Jacobi preconditioner is identical for all pixels, and the
+    right-hand side reduces to ``Gᵀ d``.  This is substantially faster than
+    the general CG solver because it replaces two ``(nifg × nparam)``
+    matmuls per iteration with one ``(nparam × nparam)`` matmul.
+
+    Parameters
+    ----------
+    GTG : cp.ndarray, shape ``(nparam, nparam)``
+        Precomputed ``Gᵀ G``.
+    GT : cp.ndarray, shape ``(nparam, nifg)``
+        Precomputed ``Gᵀ``.
+    G2_diag : cp.ndarray, shape ``(nparam,)``
+        Diagonal of ``Gᵀ G`` (sum of squared entries per parameter row).
+    d : cp.ndarray, shape ``(nifg, npixels)``
+    w : cp.ndarray, shape ``(nifg, npixels)``
+        Per-pixel weights, identical across axis 0.
+    regularization : float
+    tol : float
+    max_iter : int
+
+    Returns
+    -------
+    x : cp.ndarray, shape ``(nparam, npixels)``
+    """
+    nparam = GTG.shape[0]
+    npixels = d.shape[1]
+
+    mask = w[0, :]  # (npixels,)
+    active = mask > 0.0
+    n_active = int(cp.sum(active))
+    if n_active == 0:
+        return cp.zeros((nparam, npixels), dtype=cp.float32)
+
+    d_a = d[:, active]  # (nifg, n_active)
+
+    # Right-hand side: Gᵀ d  (w_a ≡ 1 for active pixels)
+    b = GT @ d_a  # (nparam, n_active)
+    del d_a
+
+    # Jacobi preconditioner: identical for all active pixels
+    diag = G2_diag[:, None]  # (nparam, 1)
+    diag_floor = cp.maximum(cp.max(diag) * 1e-7, 1e-12)
+    m_inv = cp.where(
+        diag + regularization > diag_floor,
+        1.0 / cp.maximum(diag + regularization, diag_floor),
+        cp.float32(1.0),
+    ).astype(cp.float32)  # (nparam, 1)
+
+    x = cp.zeros((nparam, n_active), dtype=cp.float32)
+    r = b.copy()
+    z = m_inv * r
+    p = z.copy()
+    rho = cp.sum(r * z, axis=0)
+
+    # Preallocate buffer for Ap = GTG @ p  (replaces the two G/Gᵀ matmuls)
+    Ap = cp.empty((nparam, n_active), dtype=cp.float32)
+
+    r2_pixel = cp.sum(r * r, axis=0)
+    best_r2_pixel = r2_pixel.copy()
+    x_best = x.copy()
+
+    r0_norm2_total = float(cp.sum(r2_pixel))
+    tol_sq = (tol * tol) * r0_norm2_total + 1e-12
+
+    reg_fp32 = cp.float32(regularization)
+    eps_fp32 = cp.float32(1e-12)
+
+    for _ in range(max_iter):
+        r2_pixel = cp.sum(r * r, axis=0)
+        improved = r2_pixel < best_r2_pixel
+        best_r2_pixel = cp.where(improved, r2_pixel, best_r2_pixel)
+        x_best = cp.where(improved[None, :], x, x_best)
+
+        total_r2 = cp.sum(r2_pixel)
+        if total_r2 <= tol_sq:
+            break
+
+        # Matrix-free operator: Ap = (GᵀG) @ p + λ p
+        cp.matmul(GTG, p, out=Ap)
+        if regularization > 0:
+            Ap += reg_fp32 * p
+
+        pAp = cp.sum(p * Ap, axis=0)
+        safe = pAp > eps_fp32
+        alpha = cp.where(safe, rho / cp.maximum(pAp, eps_fp32), cp.float32(0.0))
+
+        x += alpha[None, :] * p
+        r -= alpha[None, :] * Ap
+
+        z = m_inv * r
+        rho_new = cp.sum(r * z, axis=0)
+        beta = cp.where(safe, rho_new / cp.maximum(rho, eps_fp32), cp.float32(0.0))
+        p = z + beta[None, :] * p
+        rho = rho_new
+
+    x_out = cp.zeros((nparam, npixels), dtype=cp.float32)
+    x_out[:, active] = x_best
+    return x_out
 
 
 def _shrinkage(a: cp.ndarray, kappa: cp.ndarray | float) -> cp.ndarray:
@@ -501,93 +695,57 @@ def _phase_to_displacement(
     return phase_rad * float(wvl) / (4.0 * cp.pi)
 
 
-def _displacement_time_series_linear(
-    x: cp.ndarray,  # (1, npixels)
-    days: cp.ndarray,  # (ndate,)
+def _displacement_time_series(
+    x: cp.ndarray,  # (nparam, npixels)
+    days: cp.ndarray | None,  # (ndate,)
+    dt: NDArray[np.float32] | None,  # (ndate - 1,)
     wvl: float,
+    solver_type: str,
+    seasonal_terms: int = 0,
 ) -> cp.ndarray:
-    """Cumulative displacement from constant-velocity model parameters.
+    """Cumulative displacement (meters) from model parameters *x*.
+
+    The per-date basis is built according to the model type: ``"linear"``
+    projects a constant velocity onto the day axis, ``"seasonal"`` adds
+    annual (and sub-annual) harmonics, and ``"ls"`` accumulates the
+    per-interval velocities with a cumulative sum.
 
     Parameters
     ----------
-    x : cp.ndarray, shape ``(1, npixels)``
-        Velocity in rad / day.
-    days : cp.ndarray, shape ``(ndate,)``
+    x : cp.ndarray, shape ``(nparam, npixels)``
+        Model parameters in rad / day.
+    days : cp.ndarray or None, shape ``(ndate,)``
+        Days since the first acquisition.  Unused for ``"ls"``.
+    dt : ndarray or None, shape ``(ndate - 1,)``
+        Interval durations in days, used only for ``"ls"``.
     wvl : float
-
-    Returns
-    -------
-    ts : cp.ndarray, shape ``(ndate, npixels)``
-        Cumulative displacement in meters.
-    """
-    disp_rad = x[0:1, :] * days[:, None]  # (ndate, npixels)
-    return _phase_to_displacement(disp_rad, wvl)
-
-
-def _displacement_time_series_seasonal(
-    x: cp.ndarray,  # (1 + 2*seasonal_terms, npixels)
-    days: cp.ndarray,  # (ndate,)
-    wvl: float,
-    seasonal_terms: int,
-) -> cp.ndarray:
-    """Cumulative displacement from seasonal model parameters.
-
-    Parameters
-    ----------
-    x : cp.ndarray, shape ``(1 + 2*seasonal_terms, npixels)``
-    days : cp.ndarray, shape ``(ndate,)``
-    wvl : float
+        Radar wavelength in meters.
+    solver_type : ``"linear"`` | ``"seasonal"`` | ``"ls"``
     seasonal_terms : int
+        Number of harmonic pairs for the ``"seasonal"`` model.
 
     Returns
     -------
     ts : cp.ndarray, shape ``(ndate, npixels)``
         Cumulative displacement in meters.
     """
-    T = 365.25
-    ndate = len(days)
-    nparam = 1 + 2 * seasonal_terms
-
-    basis = cp.ones((ndate, nparam), dtype=cp.float32)
-    basis[:, 0] = days.astype(cp.float32)
-    for k in range(1, seasonal_terms + 1):
-        omega = 2.0 * np.pi * k / T
-        col_sin = 1 + 2 * (k - 1)
-        col_cos = 2 + 2 * (k - 1)
-        basis[:, col_sin] = cp.sin(omega * days)
-        basis[:, col_cos] = cp.cos(omega * days)
-
-    disp_rad = cp.matmul(basis, x)  # (ndate, npixels)
+    if solver_type == "ls":
+        incr = x * cp.array(dt, dtype=cp.float32)[:, None]  # (ndate - 1, npixels)
+        disp_rad = cp.concatenate(
+            [cp.zeros((1, x.shape[1]), dtype=cp.float32), cp.cumsum(incr, axis=0)],
+            axis=0,
+        )  # (ndate, npixels)
+    else:
+        basis = cp.ones((len(days), x.shape[0]), dtype=cp.float32)
+        basis[:, 0] = days.astype(cp.float32)
+        if solver_type == "seasonal":
+            T = 365.25
+            for k in range(1, seasonal_terms + 1):
+                omega = 2.0 * np.pi * k / T
+                basis[:, 1 + 2 * (k - 1)] = cp.sin(omega * days)
+                basis[:, 2 + 2 * (k - 1)] = cp.cos(omega * days)
+        disp_rad = basis @ x  # (ndate, npixels)
     return _phase_to_displacement(disp_rad, wvl)
-
-
-def _displacement_time_series_ls(
-    x: cp.ndarray,  # (ndate - 1, npixels)
-    dt: NDArray[np.float32],  # (ndate - 1,)
-    wvl: float,
-) -> cp.ndarray:
-    """Cumulative displacement from per-interval velocity parameters.
-
-    Parameters
-    ----------
-    x : cp.ndarray, shape ``(ndate - 1, npixels)``
-        Velocity in rad / day in each inter-acquisition interval.
-    dt : ndarray, shape ``(ndate - 1,)``
-        Interval durations in days.
-    wvl : float
-
-    Returns
-    -------
-    ts : cp.ndarray, shape ``(ndate, npixels)``
-        Cumulative displacement in meters.
-    """
-    dt_gpu = cp.array(dt, dtype=cp.float32)  # (ndate - 1,)
-    incr = x * dt_gpu[:, None]  # (ndate - 1, npixels)
-    cum_disp_rad = cp.concatenate(
-        [cp.zeros((1, x.shape[1]), dtype=cp.float32), cp.cumsum(incr, axis=0)],
-        axis=0,
-    )  # (ndate, npixels)
-    return _phase_to_displacement(cum_disp_rad, wvl)
 
 
 # ---------------------------------------------------------------------------
@@ -649,18 +807,19 @@ def _sbas_solver_chunk(
     G: NDArray[np.float32],  # (nifg, nparam)
     B: NDArray[np.float32],  # (nifg, ndate - 1)
     ref_phase: NDArray[np.float32],  # (nifg,)
-    wvl: float,
-    output_dim: str,
-    days: NDArray[np.float32],  # (ndate,)
-    dt: NDArray[np.float32] | None,  # (ndate - 1,) or None
-    mad_scalar: float,
-    regularization: float,
-    seasonal_terms: int,
-    solver_type: str,
+    wvl: float = 0.055465763,
+    output_dim: str = "2d",
+    days: NDArray[np.float32] | None = None,  # (ndate,)
+    dt: NDArray[np.float32] | None = None,  # (ndate - 1,) or None
+    mad_scalar: float = 0.0,
+    regularization: float = 0.0,
+    seasonal_terms: int = 0,
+    solver_type: str = "linear",
     cg_solver: Literal["auto", "exact", "cg"] = "auto",
     cg_tol: float = 1e-5,
     cg_max_iter: int = 50,
     date_mask: NDArray[np.float32] | None = None,
+    **kwargs: Any,  # absorbs model-irrelevant keys forwarded by ``_sbas_block``
 ) -> NDArray[np.float32]:
     """Generic SBAS solver for one dask chunk.
 
@@ -724,16 +883,52 @@ def _sbas_solver_chunk(
         d_ifg_mask = _compute_ifg_outlier_mask(d_unw, d_date_mask, d_tempbl, mad_scalar)
         weights = weights * d_ifg_mask.astype(cp.float32)  # (nifg, npixels)
 
-    # (nparam, npixels)
-    x = _weighted_lstsq(
-        d_G,
-        d_unw,
-        weights,
-        regularization=regularization,
-        solver=cg_solver,
-        cg_tol=cg_tol,
-        cg_max_iter=cg_max_iter,
-    )
+        # Per-pixel weights → general solver
+        x = _weighted_lstsq(
+            d_G,
+            d_unw,
+            weights,
+            regularization=regularization,
+            solver=cg_solver,
+            cg_tol=cg_tol,
+            cg_max_iter=cg_max_iter,
+        )
+    else:
+        # Uniform weights across IFGs (w[i,j] = mask[j]).
+        # Precompute the Gramian GᵀG and transposed Gᵀ so the solver can
+        # avoid expanding G across the pixel dimension.
+        d_GTG = d_G.T @ d_G  # (nparam, nparam)
+        d_GT = d_G.T  # (nparam, nifg)
+        d_G2_diag = cp.sum(d_G * d_G, axis=0)  # (nparam,)
+        del d_G  # free the full design matrix
+
+        nparam = d_GTG.shape[0]
+        if cg_solver == "exact":
+            use_exact = True
+        elif cg_solver == "cg":
+            use_exact = False
+        else:  # "auto" — same ~1 GiB tensor threshold as _weighted_lstsq
+            use_exact = nparam * nparam * npixels * 4 <= 1e9
+
+        if use_exact:
+            x = _weighted_lstsq_exact_uniform(
+                d_GTG,
+                d_GT,
+                d_unw,
+                weights,
+                regularization=regularization,
+            )
+        else:
+            x = _weighted_lstsq_cg_uniform(
+                d_GTG,
+                d_GT,
+                d_G2_diag,
+                d_unw,
+                weights,
+                regularization=regularization,
+                tol=cg_tol,
+                max_iter=cg_max_iter,
+            )
 
     if output_dim == "2d":
         v_rad_per_day = x[0:1, :]  # (1, npixels)
@@ -743,14 +938,9 @@ def _sbas_solver_chunk(
         return cp.asnumpy(v_m_per_yr).reshape(chunk_rows, chunk_cols)
 
     # 3D: cumulative displacement time series  (ndate, npixels)
-    if solver_type == "linear":
-        ts = _displacement_time_series_linear(x, d_days, wvl)
-    elif solver_type == "seasonal":
-        ts = _displacement_time_series_seasonal(x, d_days, wvl, seasonal_terms)
-    elif solver_type == "ls":
-        ts = _displacement_time_series_ls(x, dt, wvl)
-    else:
+    if solver_type not in ("linear", "seasonal", "ls"):
         raise ValueError(f"Unknown solver_type: {solver_type}")
+    ts = _displacement_time_series(x, d_days, dt, wvl, solver_type, seasonal_terms)
 
     ts[:, ~mask_flat] = np.nan
     ts = cp.asnumpy(ts)  # (ndate, npixels)
@@ -773,6 +963,7 @@ def _sbas_l1_chunk(
     l1_alpha: float,
     l1_max_iter: int,
     date_mask: NDArray[np.float32] | None = None,
+    **kwargs: Any,  # absorbs model-irrelevant keys forwarded by ``_sbas_block``
 ) -> NDArray[np.float32]:  # (ndate, chunk_rows, chunk_cols)
     """SBAS chunk solver using L1-norm minimization via ADMM.
 
@@ -853,7 +1044,7 @@ def _sbas_l1_chunk(
     )
 
     # Reconstruct cumulative displacement time series
-    ts = _displacement_time_series_ls(x, dt, wvl)  # (ndate, npixels)
+    ts = _displacement_time_series(x, None, dt, wvl, "ls")  # (ndate, npixels)
     ts[:, ~mask_flat] = np.nan
     ts = cp.asnumpy(ts)
     # (ndate, chunk_rows, chunk_cols)
@@ -861,168 +1052,39 @@ def _sbas_l1_chunk(
 
 
 # ---------------------------------------------------------------------------
-# Block wrappers for dask ``map_blocks``
+# Block wrapper for dask ``map_blocks``
 #
-#   ``_sbas_linear_block``  → always 2d (mean velocity).
-#   ``_sbas_seasonal_block``,
-#   ``_sbas_ls_block``,
-#   ``_sbas_l1_block``       → always 3d (displacement time series).
+#   ``_sbas_block``  → dispatches on ``solver_type`` to ``_sbas_solver_chunk``
+#                      (least-squares models; 2d velocity or 3d displacement)
+#                      or ``_sbas_l1_chunk`` (L1-ADMM model, always 3d).
+#   ``_stack_block``  → always 2d (mean velocity).
 # ---------------------------------------------------------------------------
 
 
-def _sbas_linear_block(
-    unw_chunk: NDArray[np.float32],
-    G: NDArray[np.float32],
-    B: NDArray[np.float32],
-    ref_phase: NDArray[np.float32],
-    days: NDArray[np.float2] | None = None,
-    mask: NDArray[np.bool_] | None = None,
-    mad_scalar: float = 0.0,
+def _sbas_block(
+    unw_chunk: NDArray[np.float32],  # (nifg, chunk_rows, chunk_cols)
     block_info: dict | None = None,
-    regularization: float = 0.0,
-    wvl: float = 0.055465763,
     **kwargs: Any,
 ) -> NDArray[np.float32]:
-    chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    if block_info is not None:
-        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
-    else:
-        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
-    return _sbas_solver_chunk(
-        unw_chunk,
-        mask_chunk,
-        G,
-        B,
-        ref_phase,
-        wvl,
-        "2d",
-        days,
-        dt=None,
-        mad_scalar=mad_scalar,
-        regularization=regularization,
-        seasonal_terms=0,
-        solver_type="linear",
-        cg_solver=kwargs.get("cg_solver", "auto"),
-        cg_tol=kwargs.get("cg_tol", 1e-5),
-        cg_max_iter=kwargs.get("cg_max_iter", 50),
-        date_mask=kwargs.get("date_mask", None),
-    )
+    """dask ``map_blocks`` wrapper that dispatches to an SBAS chunk solver.
 
-
-def _sbas_seasonal_block(
-    unw_chunk: NDArray[np.float32],
-    G: NDArray[np.float32] = None,
-    B: NDArray[np.float32] = None,
-    ref_phase: NDArray[np.float32] = None,
-    wvl: float = 0.055465763,
-    days: NDArray[np.float32] = None,
-    mask: NDArray[np.bool_] = None,
-    mad_scalar: float = 0.0,
-    block_info: dict = None,
-    regularization: float = 1e-3,
-    seasonal_terms: int = 1,
-    **kwargs: Any,
-) -> NDArray[np.float32]:
-    chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    if block_info is not None:
-        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
-    else:
-        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
-    return _sbas_solver_chunk(
-        unw_chunk,
-        mask_chunk,
-        G,
-        B,
-        ref_phase,
-        wvl,
-        "3d",
-        days,
-        dt=None,
-        mad_scalar=mad_scalar,
-        regularization=regularization,
-        seasonal_terms=seasonal_terms,
-        solver_type="seasonal",
-        cg_solver=kwargs.get("cg_solver", "auto"),
-        cg_tol=kwargs.get("cg_tol", 1e-5),
-        cg_max_iter=kwargs.get("cg_max_iter", 50),
-        date_mask=kwargs.get("date_mask", None),
-    )
-
-
-def _sbas_ls_block(
-    unw_chunk: NDArray[np.float32],
-    G: NDArray[np.float32] = None,
-    B: NDArray[np.float32] = None,
-    ref_phase: NDArray[np.float32] = None,
-    wvl: float = 0.055465763,
-    days: NDArray[np.float32] = None,
-    dt: NDArray[np.float32] = None,
-    mask: NDArray[np.bool_] = None,
-    mad_scalar: float = 0.0,
-    block_info: dict = None,
-    regularization: float = 1e-3,
-    **kwargs: Any,
-) -> NDArray[np.float32]:
-    chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    if block_info is not None:
-        mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
-    else:
-        mask_chunk = np.ones(unw_chunk.shape[-2:], dtype=np.bool_)
-    return _sbas_solver_chunk(
-        unw_chunk,
-        mask_chunk,
-        G,
-        B,
-        ref_phase,
-        wvl,
-        "3d",
-        days,
-        dt=dt,
-        mad_scalar=mad_scalar,
-        regularization=regularization,
-        seasonal_terms=0,
-        solver_type="ls",
-        cg_solver=kwargs.get("cg_solver", "auto"),
-        cg_tol=kwargs.get("cg_tol", 1e-5),
-        cg_max_iter=kwargs.get("cg_max_iter", 50),
-        date_mask=kwargs.get("date_mask", None),
-    )
-
-
-def _sbas_l1_block(
-    unw_chunk: NDArray[np.float32],
-    G: NDArray[np.float32] = None,
-    B: NDArray[np.float32] = None,
-    ref_phase: NDArray[np.float32] = None,
-    wvl: float = 0.055465763,
-    days: NDArray[np.float32] = None,
-    dt: NDArray[np.float32] = None,
-    mask: NDArray[np.bool_] = None,
-    mad_scalar: float = 0.0,
-    block_info: dict = None,
-    GTG_inv: NDArray[np.float32] = None,
-    l1_rho: float = 0.4,
-    l1_alpha: float = 1.0,
-    l1_max_iter: int = 20,
-    **kwargs: Any,
-) -> NDArray[np.float32]:
-    chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
-    mask_chunk = _get_mask_chunk(block_info, mask, chunk_shape)
-    return _sbas_l1_chunk(
-        unw_chunk,
-        mask_chunk,
-        G,
-        B,
-        ref_phase,
-        wvl,
-        days,
-        dt=dt,
-        mad_scalar=mad_scalar,
-        GTG_inv=GTG_inv,
-        l1_rho=l1_rho,
-        l1_alpha=l1_alpha,
-        l1_max_iter=l1_max_iter,
-    )
+    Resolves the per-chunk mask from ``block_info`` and forwards the keyword
+    arguments to ``_sbas_solver_chunk`` (``solver_type`` in ``"linear"``,
+    ``"seasonal"``, ``"ls"``) or ``_sbas_l1_chunk`` (``solver_type="l1"``).
+    """
+    assigned_gpu = GPU_POOL.get()
+    try:
+        chunk_shape = (unw_chunk.shape[1], unw_chunk.shape[2])
+        kwargs["mask_chunk"] = _get_mask_chunk(
+            block_info, kwargs.pop("mask", None), chunk_shape
+        )
+        solver_type = kwargs.pop("solver_type", "linear")
+        if solver_type == "l1":
+            return _sbas_l1_chunk(unw_chunk, **kwargs)
+        kwargs["solver_type"] = solver_type
+        return _sbas_solver_chunk(unw_chunk, **kwargs)
+    finally:
+        GPU_POOL.put(assigned_gpu)
 
 
 # ---------------------------------------------------------------------------
@@ -1193,6 +1255,164 @@ def _sequential_time_series_2d(
 
 
 # ---------------------------------------------------------------------------
+# VRAM-aware row chunk estimation
+# ---------------------------------------------------------------------------
+
+
+def _compute_ts_row_chunk(
+    nrow: int,
+    ncol: int,
+    nifg: int,
+    nparam: int,
+    ndate: int,
+    solver_type: str,
+    cg_solver: str = "auto",
+    mad_scalar: float = 0.0,
+    output_dim: str = "2d",
+    max_vram_gb: float | None = None,
+) -> int:
+    """Compute a safe row-chunk size for time-series inversion.
+
+    Estimates the peak GPU memory (bytes) per row based on the inversion
+    method, solver type, and optional MAD outlier detection, then divides the
+    available VRAM budget to determine a row count that keeps the working set
+    within GPU memory limits.
+
+    The per-row memory model counts every per-pixel array that coexists at the
+    solver's peak allocation point (input phase, weights, solver-specific
+    working buffers, MAD intermediate arrays, and the output displacement
+    tensor for 3-D output), then applies a 2× safety margin for CuPy
+    temporaries and allocator overhead.
+
+    Parameters
+    ----------
+    nrow : int
+        Total number of image rows.
+    ncol : int
+        Number of image columns.
+    nifg : int
+        Number of interferograms.
+    nparam : int
+        Number of model parameters (columns of the design matrix *G*).
+        For the ``"stack"`` solver this value is ignored.
+    ndate : int
+        Number of acquisition dates.
+    solver_type : str
+        One of ``"stack"``, ``"linear"``, ``"seasonal"``, ``"ls"``, ``"l1"``.
+    cg_solver : str
+        Least-squares solver dispatch: ``"auto"``, ``"exact"``, or ``"cg"``.
+        When ``"auto"`` the decision uses the same ``~1 GiB`` normal-equation
+        tensor threshold as :func:`_weighted_lstsq`, evaluated at full-image
+        scale.  Ignored for ``"stack"`` and ``"l1"``.
+    mad_scalar : float
+        Values > 0 enable MAD outlier detection, which adds intermediate
+        per-date and per-ifg boolean arrays on the GPU.
+    output_dim : str
+        ``"2d"`` (velocity only) or ``"3d"`` (displacement time series).
+    max_vram_gb : float or None
+        Maximum GPU VRAM budget in gigabytes.  When *None*, queries the
+        GPU with the most total memory via :func:`~s1proc.utils._query_gpu_info`.
+
+    Returns
+    -------
+    int
+        Safe number of rows per chunk, clamped to ``[1, nrow]``.
+    """
+    from s1proc.utils import _query_gpu_info
+
+    if max_vram_gb is None:
+        gpu_info = _query_gpu_info()
+        max_vram_gb = max(
+            gpu_info[i]["total_vram_gb"] for i in range(gpu_info["gpu_count"])
+        )
+    max_vram_bytes = int(max_vram_gb * 1024**3)
+
+    # ---- count per-pixel float32 arrays at peak memory ----------------------
+    # each "unit" = one float32 value per pixel = 4 bytes
+    f32_units = 0
+
+    # common input: d_unw + weights  (2 arrays, nifg slices each per pixel)
+    f32_units += 2 * nifg
+
+    # MAD outlier detection
+    if mad_scalar > 0:
+        # v: (ndate,) per pixel
+        f32_units += ndate
+        # bad_dates (ndate,) + d_ifg_mask (nifg,) — bool, count as ~¼ float32
+        f32_units += (ndate + nifg) // 4
+        # inside _compute_ifg_outlier_mask: temp `v - medv` before median
+        f32_units += ndate
+
+    # solver-specific working set
+    if solver_type == "stack":
+        # _stack_block: d_filtered_unw copy when MAD is active; otherwise the
+        # fast path bypasses time_series_solver entirely, so MAD is always on.
+        f32_units += nifg
+
+    elif solver_type == "l1":
+        # _weighted_l1_admm: x (nparam), z/u/kappa_scale (3×nifg),
+        # q (nparam), Ax_hat (nifg), z_old (nifg)
+        f32_units += (2 * nparam + 5 * nifg) * 1.5
+
+    else:
+        # "linear", "seasonal", "ls" — all go through _weighted_lstsq
+        if mad_scalar > 0:
+            # Per-pixel weights → general solver.
+            # Decide exact vs CG at full-image scale for the "auto" case.
+            if cg_solver == "exact":
+                use_exact = True
+            elif cg_solver == "cg":
+                use_exact = False
+            else:  # "auto"
+                gtwg_bytes_full = nparam * nparam * nrow * ncol * 4
+                use_exact = gtwg_bytes_full <= 1e9
+
+            if use_exact:
+                # GTWG + A: 2 × nparam²; GTWd + B + x: 3 × nparam
+                # (plus CuPy temporaries from the einsum)
+                f32_units += 6 * nparam * nparam + 3 * nparam
+            else:
+                # w_a copy (nifg) + tmp (nifg) + x, r, z, p, b, diag, m_inv,
+                # Ap, x_best, x_out (10 × nparam), plus misc temporaries
+                f32_units += int((2 * nifg + 10 * nparam) * 1.5)
+        else:
+            # Uniform weights across IFGs → optimised Gramian-based solvers.
+            # The full G matrix is collapsed to GTG (nparam², shared) and
+            # GT (nparam × nifg, shared); per-pixel arrays drop substantially.
+            if cg_solver == "exact":
+                use_exact = True
+            elif cg_solver == "cg":
+                use_exact = False
+            else:  # "auto"
+                gtwg_bytes_full = nparam * nparam * nrow * ncol * 4
+                use_exact = gtwg_bytes_full <= 1e9
+
+            if use_exact:
+                # _weighted_lstsq_exact_uniform: GTd (nparam) + x (nparam)
+                # The (nparam, nparam) matrices are shared, not per-pixel.
+                f32_units += 2 * nparam
+            else:
+                # _weighted_lstsq_cg_uniform: b, x, r, z, p, Ap, x_best, x_out
+                # (8 × nparam).  No nifg-sized per-pixel arrays.
+                f32_units += 8 * nparam
+
+    # output reconstruction (3-D only)
+    if output_dim == "3d":
+        f32_units += ndate  # ts array
+
+    # ---- convert to bytes per row -------------------------------------------
+    bytes_per_pixel = f32_units * 4
+    safety_factor = 2.0
+    bytes_per_row = int(ncol * bytes_per_pixel * safety_factor)
+
+    if bytes_per_row <= 0:
+        return nrow
+
+    row_chunk = max(1, int(max_vram_bytes / bytes_per_row))
+    return max(1, min(row_chunk, nrow))
+
+
+# ---------------------------------------------------------------------------
 # Time-series orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1260,12 +1480,34 @@ def time_series_solver(
     )
 
     if row_chunk_size is None:
-        byte_per_row = ncol * 4 * nifg
-        row_chunk_size = int(1e9 / byte_per_row)
-        row_chunk_size = int(max(min(row_chunk_size, nrow), 1))
+        solver_type = solver_kwargs.get("solver_type", "ls")
+        _G = solver_kwargs.get("G")
+        nparam = _G.shape[1] if _G is not None else 0
+        ndate = unw_list.ndate
+        mad_scalar = float(solver_kwargs.get("mad_scalar", 0.0))
+        cg_solver = solver_kwargs.get("cg_solver", "auto")
+        row_chunk_size = _compute_ts_row_chunk(
+            nrow=nrow,
+            ncol=ncol,
+            nifg=nifg,
+            nparam=nparam,
+            ndate=ndate,
+            solver_type=solver_type,
+            cg_solver=cg_solver,
+            mad_scalar=mad_scalar,
+            output_dim=output_dim,
+        )
     col_chunk_size = ncol
-    logger.info(f"Row chunk size: {row_chunk_size}.")
-    logger.info(f"Column chunk size: {col_chunk_size}.")
+    _G = solver_kwargs.get("G")
+    _nparam = _G.shape[1] if _G is not None else 0
+    logger.info(
+        "Row chunk size: %d (method=%s, nifg=%d, nparam=%d).",
+        row_chunk_size,
+        solver_kwargs.get("solver_type", "ls"),
+        nifg,
+        _nparam,
+    )
+    logger.info("Column chunk size: %d.", col_chunk_size)
 
     logger.info("Creating a virtual Zarr stack")
     mapper = create_virtual_stack(
@@ -1319,26 +1561,15 @@ def time_series_solver(
     ref_phase = np.nanmean(ref_tube * ref_win_mask[None, :, :], axis=(1, 2))  # (nifg,)
 
     # --- Build common kwargs for map_blocks ---------------------------------
+    # ``solver_kwargs`` already carries every per-model parameter; only the
+    # chunk-dependent values are computed here.
     date_mask = unw_list.get_date_mask()
-    common_kwargs = dict(
-        G=solver_kwargs.get("G"),
-        B=solver_kwargs.get("B"),
+    common_kwargs = dict(solver_kwargs)
+    common_kwargs.update(
         ref_phase=ref_phase,
-        wvl=solver_kwargs.get("wvl", 0.055465763),
-        days=solver_kwargs.get("days"),
-        dt=solver_kwargs.get("dt"),
         mask=mask,
         date_mask=date_mask,
-        mad_scalar=solver_kwargs.get("mad_scalar", 0.0),
-        regularization=solver_kwargs.get("regularization", 0.0),
-        seasonal_terms=solver_kwargs.get("seasonal_terms", 1),
-        GTG_inv=solver_kwargs.get("GTG_inv"),
-        l1_rho=solver_kwargs.get("l1_rho", 0.4),
-        l1_alpha=solver_kwargs.get("l1_alpha", 1.0),
-        l1_max_iter=solver_kwargs.get("l1_max_iter", 20),
-        cg_solver=solver_kwargs.get("cg_solver", "auto"),
-        cg_tol=solver_kwargs.get("cg_tol", 1e-5),
-        cg_max_iter=solver_kwargs.get("cg_max_iter", 50),
+        output_dim=output_dim,
         block_info=True,
     )
 
@@ -1606,88 +1837,93 @@ def run_time_series(
     if method == "stack":
         output_dim: Literal["2d", "3d"] = "2d"
         solver_func = _stack_block
-        solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = 1
-        solver_kwargs["seasonal_terms"] = 0
-        solver_kwargs["regularization"] = 0.0
+        solver_kwargs.update(
+            B=B, ndate_out=1, seasonal_terms=0, regularization=0.0, solver_type="stack"
+        )
         logger.info("Stacking velocity (mad_scalar=%.1f)", mad_scalar)
 
     elif method == "sbas_linear":
         output_dim = "2d"
-        solver_func = _sbas_linear_block
-        solver_kwargs["G"] = build_design_matrix_linear(unw_list)  # (nifg, 1)
-        solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = 1
-        solver_kwargs["seasonal_terms"] = 0
-        solver_kwargs["regularization"] = 0.0
-        solver_kwargs["dt"] = unw_list.date_interval(
-            drop_first_date=True,
-        ).astype(np.float32)  # (ndate - 1,)
+        solver_func = _sbas_block
+        solver_kwargs.update(
+            G=build_design_matrix_linear(unw_list),  # (nifg, 1)
+            B=B,
+            dt=unw_list.date_interval(drop_first_date=True).astype(
+                np.float32
+            ),  # (ndate - 1,)
+            ndate_out=1,
+            seasonal_terms=0,
+            regularization=0.0,
+            solver_type="linear",
+        )
         logger.info("SBAS linear (mad_scalar=%.1f)", mad_scalar)
 
     elif method == "sbas_seasonal":
         output_dim = "3d"
         seasonal_terms = tcfg.parameters.seasonal_terms
-        solver_func = _sbas_seasonal_block
-        solver_kwargs["G"] = build_design_matrix_seasonal(
-            unw_list,
+        reg = config_reg * reg_scale
+        solver_func = _sbas_block
+        solver_kwargs.update(
+            G=build_design_matrix_seasonal(  # (nifg, 1 + 2*seasonal_terms)
+                unw_list, seasonal_terms=seasonal_terms
+            ),
+            B=B,
+            dt=None,
+            ndate_out=unw_list.ndate,
             seasonal_terms=seasonal_terms,
-        )  # (nifg, 1 + 2*seasonal_terms)
-        solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = unw_list.ndate
-        solver_kwargs["seasonal_terms"] = seasonal_terms
-        solver_kwargs["dt"] = None
-        solver_kwargs["regularization"] = config_reg * reg_scale
+            regularization=reg,
+            solver_type="seasonal",
+        )
         logger.info(
             "SBAS seasonal (terms=%d, reg=%.3e, mad_scalar=%.1f)",
             seasonal_terms,
-            solver_kwargs["regularization"],
+            reg,
             mad_scalar,
         )
 
-    elif method == "sbas_ls":
+    elif method in ("sbas_ls", "sbas_l1"):
         output_dim = "3d"
-        solver_func = _sbas_ls_block
-        solver_kwargs["G"] = build_design_matrix_ls(unw_list)  # (nifg, ndate - 1)
-        solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = unw_list.ndate
-        solver_kwargs["seasonal_terms"] = 0
-        solver_kwargs["dt"] = unw_list.date_interval(
-            drop_first_date=True,
-        ).astype(np.float32)  # (ndate - 1,)
-        solver_kwargs["regularization"] = config_reg * reg_scale
-        logger.info(
-            "SBAS plain least-squares (reg=%.3e, mad_scalar=%.1f)",
-            solver_kwargs["regularization"],
-            mad_scalar,
+        G_ls = build_design_matrix_ls(unw_list)  # (nifg, ndate - 1)
+        reg = config_reg * reg_scale
+        solver_func = _sbas_block
+        solver_kwargs.update(
+            G=G_ls,
+            B=B,
+            dt=unw_list.date_interval(drop_first_date=True).astype(np.float32),
+            ndate_out=unw_list.ndate,
+            seasonal_terms=0,
+            regularization=reg,
+            solver_type="l1" if method == "sbas_l1" else "ls",
         )
-
-    elif method == "sbas_l1":
-        output_dim = "3d"
-        solver_func = _sbas_l1_block
-        solver_kwargs["G"] = build_design_matrix_ls(unw_list)  # (nifg, ndate - 1)
-        solver_kwargs["B"] = B
-        solver_kwargs["ndate_out"] = unw_list.ndate
-        solver_kwargs["seasonal_terms"] = 0
-        solver_kwargs["dt"] = unw_list.date_interval(
-            drop_first_date=True,
-        ).astype(np.float32)  # (ndate - 1,)
-        solver_kwargs["regularization"] = config_reg * reg_scale
-        # Precompute (Gᵀ G + λ I)⁻¹ for the ADMM x-update
-        G_l1 = solver_kwargs["G"]
-        GTG_l1 = G_l1.astype(np.float64).T @ G_l1.astype(np.float64)
-        GTG_l1 += np.eye(GTG_l1.shape[0]) * float(solver_kwargs["regularization"])
-        solver_kwargs["GTG_inv"] = np.linalg.inv(GTG_l1).astype(np.float32)
-        solver_kwargs["l1_rho"] = tcfg.parameters.l1_rho
-        solver_kwargs["l1_alpha"] = tcfg.parameters.l1_alpha
-        solver_kwargs["l1_max_iter"] = tcfg.parameters.l1_max_iter
-        logger.info(
-            "SBAS L1-ADMM (reg=%.3e, rho=%.2f, iter=%d, mad_scalar=%.1f)",
-            solver_kwargs["regularization"],
-            solver_kwargs["l1_rho"],
-            solver_kwargs["l1_max_iter"],
-            mad_scalar,
-        )
+        if method == "sbas_l1":
+            # Precompute (Gᵀ G + λ I)⁻¹ for the ADMM x-update
+            GTG = G_ls.astype(np.float64).T @ G_ls.astype(np.float64)
+            GTG += np.eye(GTG.shape[0]) * reg
+            solver_kwargs.update(
+                GTG_inv=np.linalg.inv(GTG).astype(np.float32),
+                l1_rho=tcfg.parameters.l1_rho,
+                l1_alpha=tcfg.parameters.l1_alpha,
+                l1_max_iter=tcfg.parameters.l1_max_iter,
+            )
+            logger.info(
+                "SBAS L1-ADMM (reg=%.3e, rho=%.2f, iter=%d, mad_scalar=%.1f)",
+                reg,
+                tcfg.parameters.l1_rho,
+                tcfg.parameters.l1_max_iter,
+                mad_scalar,
+            )
+        else:
+            # When MAD is enabled, weights become per-pixel and the exact
+            # solver would materialize an (nparam, nparam, npixels) tensor
+            # that is both wasteful and likely to OOM for large nparam.
+            if mad_scalar > 0:
+                solver_kwargs["cg_solver"] = "cg"
+            logger.info(
+                "SBAS plain least-squares (reg=%.3e, mad_scalar=%.1f, cg=%s)",
+                reg,
+                mad_scalar,
+                solver_kwargs.get("cg_solver", "auto"),
+            )
 
     else:
         raise ValueError(

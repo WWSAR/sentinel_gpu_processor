@@ -385,7 +385,7 @@ def select_reference_station(
     """
     if verbose:
         set_logging_level(logger, "DEBUG")
-    from s1proc.time_series import _sbas_linear_block, build_design_matrix_linear
+    from s1proc.time_series import _sbas_block, build_design_matrix_linear
 
     # create a DataFrame of GPS stations
     cfg = load_config(config)
@@ -424,8 +424,14 @@ def select_reference_station(
             idx += 1
             continue
         ref_phase = np.nanmean(gps_patch[station_idx, :, :, :], axis=(1, 2))
-        v_est = -_sbas_linear_block(
-            gps_phase, G, B, ref_phase, mad_scalar=cfg.timeseries.parameters.mad_scalar
+        v_est = -_sbas_block(
+            gps_phase,
+            G=G,
+            B=B,
+            ref_phase=ref_phase,
+            mad_scalar=cfg.timeseries.parameters.mad_scalar,
+            solver_type="linear",
+            output_dim="2d",
         )
         v_est = v_est.flatten() * 100  # m/yr -> cm/yr
         v_est = v_est + row["gps_los_velocity"]

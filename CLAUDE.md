@@ -91,6 +91,27 @@ f = open(filename)
 | `_log.py` | Logging setup via `logging.config.dictConfig` |
 | `preproc.py` | generate metalinks for Sentinel-1 data downloading, download DEM |
 
+### Logging and progress markers
+
+`_log.py` configures per-module loggers that write to stdout and propagate to the
+root logger. Calling `enable_file_logging(path)` attaches a `FileHandler` to the
+root logger so all output is mirrored to a file (used by `s1proc run --log-file
+<path>`).
+
+When a stage has countable items, emit machine-parseable markers on stdout so
+downstream consumers (e.g. the s1proc-gui backend) can show live progress:
+
+- `[STAGE] <name> (<step>/<total>)` and `[STAGE_DONE] <name>` — emitted by
+  `Pipeline.run()` in `run.py` (do not emit these manually).
+- `[ITEM] <n>/<total> <description>` — per-item progress inside a stage
+  (e.g. one line per scene/date/interferogram).
+- `[PROGRESS] <n>%` — authoritative overall percentage (e.g. derived from the
+  crossmul daemon's `PROGRESS <done> <failed> <total> <elapsed>` lines).
+
+Markers are case-insensitive and may appear anywhere in a log line. Keep them
+human-readable plain text — they are intended to be both terminal-readable and
+grep-able.
+
 ### Compilation
 1. Lauch x64_x86 Cross Tools Command Prompt for VS Insiders
 2. In the launched prompt, run "D:\visual_studio\VC\Auxiliary\Build\vcvarsall.bat" x64 -vcvars_ver=14.44.35207

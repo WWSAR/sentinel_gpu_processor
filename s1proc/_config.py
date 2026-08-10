@@ -69,10 +69,17 @@ class ProcessingConfig:
 
 @dataclass
 class FilteringParams:
-    window_size: int = 32
+    goldstein_window_size: int = 32
     goldstein_alpha: float = 0.5
+    eigensar_first_round_window_size: int = 32
+    eigensar_first_round_alpha: float = 0.5
+    eigensar_second_round_window_size: int = 64
+    eigensar_second_round_alpha: float = 1.0
     eigensar_gamma: float = 0.5
     eigensar_interpolation_method: Literal["goldstein", "spiral"] = "spiral"
+    spiral_nneighbor: int = 20
+    spiral_rdmax: int = 101
+    spiral_exponent: float = 1.0
 
 
 @dataclass
@@ -131,6 +138,9 @@ class TimeSeriesParams:
     l1_rho: float = 0.4
     l1_alpha: float = 1.0
     l1_max_iter: int = 20
+    cg_solver: Literal["auto", "exact", "cg"] = "auto"
+    cg_tol: float = 1e-5
+    cg_max_iter: int = 50
 
 
 @dataclass
