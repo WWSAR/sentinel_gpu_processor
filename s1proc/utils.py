@@ -10,10 +10,13 @@ from typing import List, Sequence, Tuple
 import numpy as np
 import pandas as pd
 from numpy.typing import DTypeLike, NDArray
+from osgeo import gdal, gdal_array, osr
 from tqdm import tqdm
 
 from s1proc import geocoordinates, geometry, orbit, sario
 from s1proc._log import logger, set_logging_level
+
+gdal.UseExceptions()
 
 
 def sentinel_parser(filename: Path | str) -> dict:
@@ -582,8 +585,6 @@ def gtiff2roipac(
         If true, shift lonmin, latmin by a half pixel to respect the convention
         of rsc definition
     """
-    from osgeo import gdal
-
     ds = gdal.Open(tif_file)
     gt = ds.GetGeoTransform()
     if shift:
@@ -609,11 +610,60 @@ def gtiff2roipac(
     img.astype(output_type).tofile(output_image)
 
 
+def save_as_geotiff(
+    img: np.ndarray,
+    rsc: geocoordinates.GeoCoordinates,
+    output_type: DTypeLike,
+    shift: bool = True,
+    output_file: str | None = None,
+):
+    """
+    Save an image as a GeoTIFF file
+
+    Parameters
+    ----------
+    img: np.ndarray
+        Image to save
+    rsc: geocoordinates.GeoCoordinates
+        A GeoCoordinates object defining the geoposition of image points
+    output_type: int
+        Type of the output image (e.g., gdal.GDT_Float32)
+    shfit: bool
+        If True, shift edge coordinates by a half pixel such following the
+        edge convention of gdal
+    output_file: Path|str|None
+        Output image file
+    """
+
+    nrow, ncol = rsc.nlat, rsc.nlon
+    dlon = rsc.dlon
+    dlat = rsc.dlat
+    if shift:
+        lonmin = rsc.lonmin - 0.5 * dlon
+        latmax = rsc.latmax - 0.5 * dlat
+
+    geotransform = (lonmin, dlon, 0, latmax, 0, dlat)
+    outtif = gdal.GetDriverByName("GTiff").Create(
+        output_file,
+        ncol,
+        nrow,
+        1,
+        gdal_array.NumericTypeCodeToGDALTypeCode(output_type),
+    )
+    outtif.SetGeoTransform(geotransform)
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(4326)
+    outtif.SetProjection(srs.ExportToWkt())
+    outtif.GetRasterBand(1).WriteArray(img)
+    outtif.FlushCache()
+    outtif = None
+
+
 def roipac2gtiff(
     imgfile: str,
     rscfile: str,
     input_type: DTypeLike,
-    output_type: int,
+    output_type: DTypeLike,
     shift: bool = True,
     output_file: str | None = None,
 ):
@@ -629,38 +679,19 @@ def roipac2gtiff(
     input_type: DTypeLike
         Type of the input image (e.g., np.float32)
     output_type: int
-        Type of the output iamge (e.g., gdal.GDT_Float32)
+        Type of the output image (e.g., gdal.GDT_Float32)
     shfit: bool
         If True, shift edge coordinates by a half pixel such following the
         edge convention of gdal
     output_file: Path|str|None
         Output image file
     """
-    from osgeo import gdal, osr
-
     rsc = geocoordinates.GeoCoordinates(rscfile)
     if output_file is None:
         output_file = imgfile + ".tif"
     nrow, ncol = rsc.nlat, rsc.nlon
-    dlon = rsc.dlon
-    dlat = rsc.dlat
-    if shift:
-        lonmin = rsc.lonmin - 0.5 * dlon
-        latmax = rsc.latmax - 0.5 * dlat
-
     img = np.fromfile(imgfile, dtype=input_type).reshape(nrow, ncol)
-
-    geotransform = (lonmin, dlon, 0, latmax, 0, dlat)
-    outtif = gdal.GetDriverByName("GTiff").Create(
-        output_file, ncol, nrow, 1, output_type
-    )
-    outtif.SetGeoTransform(geotransform)
-    srs = osr.SpatialReference()
-    srs.ImportFromEPSG(4326)
-    outtif.SetProjection(srs.ExportToWkt())
-    outtif.GetRasterBand(1).WriteArray(img)
-    outtif.FlushCache()
-    outtif = None
+    save_as_geotiff(img, rsc, output_type, shift, output_file)
 
 
 class IfgList:

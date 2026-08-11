@@ -21,6 +21,7 @@ def main() -> int:
     from s1proc.preproc import preprocess
     from s1proc.reference import select_reference_point
     from s1proc.run import run
+    from s1proc.save_deformation import save_deformation
     from s1proc.sentinel_stack import run_stack
     from s1proc.time_series import run_time_series
     from s1proc.unwrap import batch_unwrap
@@ -40,6 +41,7 @@ def main() -> int:
         "unwrap": batch_unwrap,
         "reference": select_reference_point,
         "timeseries": run_time_series,
+        "save": save_deformation,
         "run": run,
     })
     return os.EX_OK

@@ -25,7 +25,7 @@ proc:
     download_eof: true # automatic precise orbit data downloading
     rowlook: 10
     collook: 20
-    wavelength: 0.055465763
+    wavelength: 5.5465763 # wavelength in centimeters
     min_tbl: 6       # minimum temporal baseline
     max_tbl: 360     # maximum temporal baseline
     min_sbl: 0       # minimum spatial baseline

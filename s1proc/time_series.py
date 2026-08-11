@@ -719,7 +719,7 @@ def _displacement_time_series(
     dt : ndarray or None, shape ``(ndate - 1,)``
         Interval durations in days, used only for ``"ls"``.
     wvl : float
-        Radar wavelength in meters.
+        Radar wavelength in centimeters.
     solver_type : ``"linear"`` | ``"seasonal"`` | ``"ls"``
     seasonal_terms : int
         Number of harmonic pairs for the ``"seasonal"`` model.
@@ -727,7 +727,7 @@ def _displacement_time_series(
     Returns
     -------
     ts : cp.ndarray, shape ``(ndate, npixels)``
-        Cumulative displacement in meters.
+        Cumulative displacement in centimeters.
     """
     if solver_type == "ls":
         incr = x * cp.array(dt, dtype=cp.float32)[:, None]  # (ndate - 1, npixels)
@@ -757,7 +757,7 @@ def _stack_block(
     unw_chunk: NDArray[np.float32],  # (nifg, chunk_rows, chunk_cols)
     B: NDArray[np.float32] = None,  # (nifg, ndate - 1)
     ref_phase: NDArray[np.float32] = None,  # (nifg,)
-    wvl: float = 0.055465763,
+    wvl: float = 5.5465763,
     mad_scalar: float = 0.0,
     mask: NDArray[np.bool_] | None = None,  # (nrow, ncol)
     date_mask: NDArray[np.float32] | None = None,
@@ -807,7 +807,7 @@ def _sbas_solver_chunk(
     G: NDArray[np.float32],  # (nifg, nparam)
     B: NDArray[np.float32],  # (nifg, ndate - 1)
     ref_phase: NDArray[np.float32],  # (nifg,)
-    wvl: float = 0.055465763,
+    wvl: float = 5.5465763,
     output_dim: str = "2d",
     days: NDArray[np.float32] | None = None,  # (ndate,)
     dt: NDArray[np.float32] | None = None,  # (ndate - 1,) or None
@@ -1003,7 +1003,7 @@ def _sbas_l1_chunk(
     Returns
     -------
     result : ndarray, shape ``(ndate, chunk_rows, chunk_cols)``
-        Cumulative displacement time series in meters.
+        Cumulative displacement time series in centimeters.
     """
     nifg, chunk_rows, chunk_cols = unw_chunk.shape
     npixels = chunk_rows * chunk_cols
@@ -1102,7 +1102,7 @@ def _sequential_time_series_2d(
     method: Literal["stack", "sbas_linear"],
     ref_point: Tuple[int, int] | None = None,
     ref_win: Tuple[int, int] = (11, 11),
-    wvl: float = 0.055465763,
+    wvl: float = 5.5465763,
     row_chunk_size: int | None = None,
     metadata: Dict[str, Any] | None = None,
 ) -> None:
@@ -1130,7 +1130,7 @@ def _sequential_time_series_2d(
         Total temporal baseline (days) per interferogram — the sum of each
         row of the velocity-integration matrix **B**.
     wvl : float
-        Radar wavelength in meters.
+        Radar wavelength in centimeters.
     ref_point : (row, col)
         Reference pixel coordinates (0-indexed).
     ref_win : (row_half, col_half)
@@ -1643,7 +1643,6 @@ def time_series_solver(
             for key, value in metadata.items():
                 _store_attr(root, key, value)
     else:
-        total_days = float(solver_kwargs.get("days", np.zeros(1))[-1])
         store = str(out_path)
         logger.info("Writing displacement time series to %s", out_path)
 
@@ -1690,7 +1689,6 @@ def time_series_solver(
         if metadata:
             for key, value in metadata.items():
                 _store_attr(root, key, value)
-        root.attrs["total_days"] = total_days
 
     logger.info("Time series computation complete.")
 
@@ -1815,10 +1813,15 @@ def run_time_series(
             metadata={
                 "method": method,
                 "dates": list(unw_list.dates),
+                "days": list(unw_list.date2days()),
                 "mask_file": str(mask_file) if mask_file else "none",
                 "reference_point": list(reference_point),
                 "wavelength": float(pcfg.wavelength),
                 "mad_scalar": 0.0,
+                "latmax": rsc.latmax,
+                "lonmin": rsc.lonmin,
+                "dlat": rsc.dlat,
+                "dlon": rsc.dlon,
             },
         )
         return
@@ -1945,6 +1948,7 @@ def run_time_series(
         metadata={
             "method": method,
             "dates": list(unw_list.dates),
+            "days": list(solver_kwargs["days"]),
             "mask_file": str(mask_file) if mask_file else "none",
             "reference_point": list(reference_point),
             "wavelength": float(pcfg.wavelength),
@@ -1956,6 +1960,10 @@ def run_time_series(
             "l1_alpha": float(tcfg.parameters.l1_alpha),
             "l1_max_iter": int(tcfg.parameters.l1_max_iter),
             "cg_max_iter": int(tcfg.parameters.cg_max_iter),
+            "latmax": rsc.latmax,
+            "lonmin": rsc.lonmin,
+            "dlat": rsc.dlat,
+            "dlon": rsc.dlon,
         },
     )
 
@@ -2039,7 +2047,7 @@ def plot_time_series_at_points(
     Parameters
     ----------
     data : ndarray, shape ``(ndate, nrows, ncols)``
-        Displacement time series in meters.
+        Displacement time series in centimeters.
     dates : list of str
         Acquisition dates as ``"YYYYMMDD"`` strings.
     points : list of (row, col)
