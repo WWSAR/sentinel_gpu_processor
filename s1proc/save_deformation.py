@@ -40,6 +40,10 @@ def recalibrate(
     # read GPS DataFrame
     df_stations = pd.read_csv(gps_csv_file, index_col="name")
     z = zarr.open(deformation_path, mode="r+")
+    if len(df_stations) == 0:
+        logger.warning("Empty GPS lists, skip recalibration.")
+        z.attrs["offset"] = 0
+        return
     dim = len(z.shape)
     # calculate average LOS deformation rate
     if dim == 2:
@@ -66,6 +70,10 @@ def recalibrate(
     v_gps = np.array(v_gps)
     v_insar = np.array(v_insar)
     offset = np.nanmedian(v_gps - v_insar)
+    if np.isnan(offset):
+        logger.warning("Recalibration failed, please check input GPS CSV files.")
+        z.attrs["offset"] = 0
+        return
     v_insar += offset
     df_stations["insar_los_velocity"] = v_insar
     z.attrs["offset"] = offset
@@ -247,6 +255,12 @@ def save_deformation(
 
     cfg = load_config(config)
     rsc_file = cfg.io.multilook_rsc_file
+    if deformation_path is None:
+        deformation_path = Path(cfg.io.time_series_path) / "time_series.zarr"
+    if not deformation_path.exists():
+        raise FileNotFoundError(
+            f"Cannot find deformation result file: {deformation_path}."
+        )
     if recali:
         if gps_csv_file is None:
             logger.debug(
