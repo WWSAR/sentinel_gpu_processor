@@ -21,9 +21,16 @@ The typical workflow runs in order:
 
 The remaining steps are **experimental** and have not been thoroughly tested:
 
-10. `s1proc phasecorr` — tropospheric correction & Goldstein filtering
+10. `s1proc phasecorr` — tropospheric correction & phase filtering
+    (Goldstein or EigenSAR)
 11. `s1proc unwrap` — phase unwrapping (whirlwind or SNAPHU)
-12. `s1proc timeseries` — SBAS time-series inversion (GPU)
+12. `s1proc reference` — select a reference point (GPS or image-based)
+13. `s1proc timeseries` — SBAS time-series inversion (GPU)
+14. `s1proc save` — export deformation maps as images and GeoTIFFs
+
+You can also run the entire pipeline from `preproc` through `timeseries`
+with a single `s1proc run` command — see
+[Running the whole pipeline in one command](#running-the-whole-pipeline-in-one-command).
 
 ---
 
@@ -583,15 +590,26 @@ Two optional corrections, each gated by a boolean in `config.yaml`:
      (`s1proc.tropo._era5_correction`).
    - Output files land in `io.ifg_corr_path` (default: `ifg_corrected/`).
 
-2. **Goldstein filtering** (`filter.enable: true`):
-   - Applies the Goldstein adaptive phase filter to reduce phase noise.
-   - Uses the `goldstein` CUDA executable in `s1proc/bin/`.
+2. **Phase filtering** (`filter.enable: true`), with two backends selected via
+   `filter.method`:
+   - **`eigensar`** (default, recommended): a GPU phase-linking filter. It
+     first smooths the interferogram stack with a first-round Goldstein
+     filter, then solves for an optimised phase per acquisition date via
+     phase linking, and finally reconstructs the filtered interferograms —
+     either by interpolating the optimised phase with a spiral-phase
+     interpolator (`"spiral"`, default) or with a second Goldstein pass
+     (`"goldstein"`). Processing is chunk-wise so large stacks fit in GPU
+     memory.
+   - **`goldstein`**: the classic Goldstein adaptive phase filter
+     (`s1proc.goldstein`), using the `goldstein` CUDA executable in
+     `s1proc/bin/`.
 
-**Files created (if tropo enabled):**
+**Files created:**
 
 | File | Description |
 |---|---|
-| `ifg_corrected/*.int` | Tropospheric-corrected interferograms |
+| `ifg_corrected/*.int` | Phase-corrected interferograms |
+| `ifg_corrected/eigensar_*.zarr` | EigenSAR intermediate stores (method `eigensar` only) |
 | `tropo_delay/` | Per-date tropospheric delay maps |
 
 **Configuration:**
@@ -601,11 +619,23 @@ tropo:
     enable: true
     method: "era5"
 filter:
-    enable: false
-    method: "goldstein"
+    enable: true
+    method: "eigensar"      # "eigensar" (recommended) or "goldstein"
     parameters:
-        window_size: 32
+        # Goldstein backend parameters
+        goldstein_window_size: 32
         goldstein_alpha: 0.5
+        # EigenSAR: first-round Goldstein filtering
+        eigensar_first_round_window_size: 32
+        eigensar_first_round_alpha: 0.5
+        # EigenSAR: second-round reconstruction
+        eigensar_second_round_window_size: 64
+        eigensar_second_round_alpha: 1
+        eigensar_gamma: 0.8              # coherence threshold for phase seeds
+        eigensar_interpolation_method: "spiral"  # "spiral" or "goldstein"
+        spiral_nneighbor: 20
+        spiral_rdmax: 101
+        spiral_exponent: 1.0
 ```
 
 **Example:**
@@ -680,7 +710,7 @@ unwrap:
         only_save_phase: true   # write float32 phase only (saves disk space)
         # whirlwind-specific
         conncomp: false
-        bridge: false
+        bridge: true
         # snaphu-specific
         cost_mode: "smooth"     # smooth, topo, or defo
         rowtile: null           # auto-computed if null
@@ -698,7 +728,75 @@ s1proc unwrap --cc-path igrams --ifg-path ifg_corrected --verbose
 
 ---
 
-## Step 12 — Time series analysis (experimental)
+## Step 12 — Reference point selection (experimental)
+
+```bash
+s1proc reference
+```
+
+**What it does** (see `s1proc.reference.select_reference_point`):
+
+SBAS time-series inversion is only defined relative to a reference pixel. This
+step selects one for you and writes its coordinates into
+`timeseries.parameters.ref_lon` / `ref_lat` in `config.yaml`, and records a
+human-readable `analysis/reference_point.txt`.
+
+By default (`--from-gps`) it tries to pick a **GPS station** as the reference:
+
+1. Discovers GPS stations within `area.bbox` for the study period from the
+   [Nevada Geodetic Laboratory](https://geodesy.unr.edu/) (data cached
+   locally), downloads their `tenv3` position time series, and projects the
+   station velocities into the radar line-of-sight.
+2. For every candidate station it runs a quick constant-velocity SBAS solve
+   treating that station as the reference and compares the resulting InSAR
+   LOS velocities against the GPS velocities.
+3. The station with the smallest median absolute velocity error is written to
+   the configuration.
+
+If no suitable GPS station is available (or `--no-from-gps` is given), it
+falls back to **image-based selection**:
+
+1. Computes a coarse deformation-rate map by velocity stacking.
+2. Ranks candidate pixels by local deformation variation (a low-variation
+   pixel makes a stable reference), average InSAR coherence, and distance to
+   the image centre, then picks the best one.
+
+**Prerequisites:** unwrapped interferograms (in `unw/` — or `unw_corrected/`
+if phase correction was applied), the multilooked DEM/RSC, the mask file from
+`integrity`, and the geometry files (`geometry/los`, `geometry/look_angle`,
+generated automatically if missing). `date.start`, `date.end`, and
+`area.bbox` must be set in the config. GPS-based selection additionally needs
+internet access to the NGL servers.
+
+If a reference point is already present in the config, the step warns and
+does nothing unless `--overwrite` is given.
+
+**Key options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `--config` | `config.yaml` | Configuration file |
+| `--from-gps` | `true` | Prefer a GPS station as reference |
+| `--overwrite` | `false` | Replace an existing reference point |
+| `--verbose` | `false` | DEBUG logging |
+
+**Files created:**
+
+| File | Description |
+|---|---|
+| `analysis/reference_point.txt` | Selected reference point (lat, lon) |
+| `proc/gps_stations.csv` | GPS stations within the study area |
+| `proc/gps.zarr` | Unwrapped-phase patches around each station |
+
+**Example:**
+
+```bash
+s1proc reference --overwrite
+```
+
+---
+
+## Step 13 — Time series analysis (experimental)
 
 ```bash
 s1proc timeseries
@@ -707,8 +805,10 @@ s1proc timeseries
 **What it does** (see `s1proc.time_series.run_time_series`):
 
 Solves for surface deformation over time using GPU-accelerated SBAS (Small
-Baseline Subset) inversion via CuPy and dask. Five solver methods are
-available, selected by `timeseries.method` in `config.yaml`:
+Baseline Subset) inversion via CuPy and dask. It reads unwrapped
+interferograms (from `unw_corrected/` if present, otherwise `unw/`), converts
+the phase to deformation, and writes the result as a zarr store. Five solver
+methods are available, selected by `timeseries.method` in `config.yaml`:
 
 | Method | Output | Description |
 |---|---|---|
@@ -724,6 +824,9 @@ regularisation. The L1 solver uses the ADMM algorithm following
 
 **Key configuration parameters:**
 
+A **reference point** is required. Run `s1proc reference` (Step 12) to select
+one automatically, or set the coordinates manually:
+
 ```yaml
 timeseries:
     method: "sbas_l1"
@@ -736,7 +839,17 @@ timeseries:
         l1_rho: 0.4           # ADMM augmented Lagrangian parameter
         l1_alpha: 1.0         # ADMM over-relaxation
         l1_max_iter: 20       # ADMM iterations
+        cg_solver: "auto"     # "auto", "exact", or "cg" (conjugate gradient)
+        cg_tol: 1.0e-5        # CG convergence tolerance
+        cg_max_iter: 50       # maximum CG iterations
 ```
+
+For memory efficiency, `stack` and `sbas_linear` with `mad_scalar: 0`
+(disabled MAD) use a **sequential solver** that reads the interferograms one
+at a time and never materialises the full 3-D phase stack in memory. The
+larger SBAS solvers run block-wise on the GPU with dask; `cg_solver: "auto"`
+transparently switches from the exact normal-equation solve to a
+conjugate-gradient solve when the problem becomes too large to hold in memory.
 
 Results are written as a [zarr](https://zarr.readthedocs.io/) store. For 2D
 outputs a single `velocity` array is saved; for 3D outputs the store
@@ -789,6 +902,96 @@ plot_velocity_map(
 
 ---
 
+## Step 14 — Save deformation results (experimental)
+
+```bash
+s1proc save
+```
+
+**What it does** (see `s1proc.save_deformation.save_deformation`):
+
+Reads the deformation zarr store written by `timeseries`
+(`analysis/time_series.zarr`), computes the average **LOS deformation rate**
+(cm/yr) and **total LOS displacement** (cm), and writes them as PDF images
+and GeoTIFFs under `figures/`. If the look-angle file (`geometry/look_angle`)
+exists, it additionally estimates the vertical deformation rate and
+displacement (assuming negligible horizontal motion).
+
+Optionally, the result can be **recalibrated against GPS**
+(`--recali`, default on): the step reads the GPS station list
+(`proc/gps_stations.csv`, produced by `s1proc reference`), computes the
+median offset between the GPS and InSAR LOS velocities, stores it in the
+zarr attributes (`offset`), and applies it to all maps.
+
+**Files created:**
+
+| File | Description |
+|---|---|
+| `figures/los_deformation_rate.pdf` / `.tif` | Mean LOS deformation rate (cm/yr) |
+| `figures/los_displacement.pdf` / `.tif` | Total LOS displacement (cm) |
+| `figures/vertical_deformation_rate.pdf` / `.tif` | Vertical rate (if look angle available) |
+| `figures/vertical_displacement.pdf` / `.tif` | Vertical displacement (if look angle available) |
+
+**Key options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `--deformation-path` | `analysis/time_series.zarr` | Input zarr store |
+| `--out-path` | `figures` | Output directory for images/GeoTIFFs |
+| `--recali` / `--no-recali` | `true` | Recalibrate against GPS |
+| `--gps-csv-file` | `proc/gps_stations.csv` | GPS station CSV (`gps_los_velocity` column) |
+| `--config` | `config.yaml` | Configuration file |
+
+**Example:**
+
+```bash
+s1proc save --no-recali
+```
+
+---
+
+## Running the whole pipeline in one command
+
+`s1proc run` (see `s1proc.run.run`) executes the entire workflow from
+`preproc` through `timeseries` with a single command:
+
+```bash
+s1proc run
+```
+
+By default every stage is enabled. Each stage is **idempotent**: outputs that
+already exist on disk are skipped. `s1proc run` also records a `.done` marker
+per stage under `.pipeline_state/`, together with a SHA-256 fingerprint of the
+processing-parameter sections (`proc`, `filter`, `tropo`, `detrend`,
+`unwrap`, `timeseries`). If you later change a processing parameter, only the
+affected stages are re-run on the next invocation. IO paths, dates, and the
+study area are excluded from the fingerprint, so moving data or adjusting the
+study period does not invalidate cached results.
+
+Enable only the stages you want with boolean flags:
+
+```bash
+s1proc run --preproc --stack --amp     # run just these stages
+s1proc run --no-preproc                # data already downloaded
+s1proc run --no-resume                 # force a clean re-run
+s1proc run --log-file run.log          # mirror logs to a file
+```
+
+The stage order is: `preproc` → `stack` → `amp` → `integrity` → `slcpairs` →
+`interfere` → `coh` → `phasecorr` → `unwrap` → `reference` → `timeseries`.
+
+**Key options:**
+
+| Option | Default | Description |
+|---|---|---|
+| `--config` | `config.yaml` | Configuration file |
+| `--preproc` … `--timeseries` | all enabled | Toggle individual stages |
+| `--resume` / `--no-resume` | `true` | Skip stages with intact outputs |
+| `--log-file` | `None` | Mirror all logs to a file |
+| `--verbose` | `false` | DEBUG logging |
+
+---
+
 ## Configuration quick reference
 
 The default `config.yaml` (written by `s1proc init`) contains commented
@@ -798,7 +1001,7 @@ sections for every parameter. Key sections:
 |---|---|
 | `io` | All input/output directory and file paths |
 | `proc` | Multilooking factors, baseline thresholds, GPU/CPU worker counts |
-| `filter` | Goldstein phase filtering |
+| `filter` | Goldstein / EigenSAR phase filtering |
 | `tropo` | ERA5 tropospheric correction |
 | `detrend` | Phase ramp removal |
 | `unwrap` | Unwrapping method (whirlwind/snaphu) and parameters |
@@ -824,9 +1027,10 @@ ascending/path_123/
 ├── elevation.dem.rsc
 ├── crossmul_daemon_stderr.log
 ├── incomplete_date.txt
+├── .pipeline_state/       # s1proc run stage markers (.done)
 ├── data/                  # Sentinel-1 zip files
 ├── eof/                   # Precise orbit files
-├── proc/                  # Intermediate files, .done markers, orbit timing
+├── proc/                  # Intermediate files, .done markers, gps_stations.csv
 ├── slc/                   # Geocoded per-burst SLCs (*.gslc)
 ├── amp/                   # Multilooked amplitude images (*.amp)
 ├── igrams/                # Wrapped interferograms (*.int) + coherence (*.cc)
@@ -835,9 +1039,12 @@ ascending/path_123/
 │   ├── multilook.rsc
 │   └── mask.bin
 ├── unw/                   # Unwrapped interferograms (*.unw)
-├── ifg_corrected/         # Tropospheric-corrected interferograms
+├── unw_corrected/         # Unwrapped phase-corrected interferograms
+├── ifg_corrected/         # Phase-corrected interferograms + eigensar stores
 ├── tropo_delay/           # ERA5 delay maps
 ├── geometry/              # LOS vectors, look angles
-└── analysis/
-    └── time_series.zarr/  # Deformation time series
+├── analysis/
+│   ├── reference_point.txt   # Selected reference point
+│   └── time_series.zarr/     # Deformation time series
+└── figures/               # Deformation maps (from s1proc save)
 ```
