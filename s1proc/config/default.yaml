@@ -40,13 +40,13 @@ proc:
 # Wrapped interferogram processing
 # Interferogram filtering
 filter:
-    enable: false
-    method: "goldstein" # select between [eigensar (recommended) and goldstein]
+    enable: true
+    method: "eigensar" # select between [eigensar (recommended) and goldstein]
     # if eigensar is used, the window_size and goldstein_alpha correspond to the
     # parameters for the first-round goldstein-filter.
     parameters:
         goldstein_window_size: 32              # window size for Goldstein filter
-        goldstein_window_alpha: 0.5            # filtering parameter for Goldstein filter
+        goldstein_alpha: 0.5            # filtering parameter for Goldstein filter
         # window size for the first-round Goldstein filter in the EigenSAR algorithm
         eigensar_first_round_window_size: 32 
         # filtering parameter for the first-round Goldstein filter in the EigenSAR algorithm
