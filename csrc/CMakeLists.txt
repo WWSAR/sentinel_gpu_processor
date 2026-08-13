@@ -10,9 +10,22 @@ endif()
 
 project(s1proc VERSION 0.1.0 LANGUAGES C CXX CUDA)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CUDA_RUNTIME_LIBRARY Shared)
+set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CUDA_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_GLIBCXX_USE_CXX11_ABI=1")
+set(CMAKE_CUDA_STANDARD_REQUIRED True)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+if(UNIX)
+    set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+    set(CMAKE_SKIP_INSTALL_RPATH FALSE)
+endif()
+
+if(NOT MSVC)
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-D_GLIBCXX_USE_CXX14_ABI=1>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-D_GLIBCXX_USE_CXX14_ABI=1>)
+endif()
 
 if(MSVC)
     # force MSVC compiler to use UTF-8 to decode source and header files
@@ -30,6 +43,7 @@ set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90)
 # Find packages (order matters: tries custom paths first, then system)
 find_package(SQLite3 REQUIRED)
 find_package(CUDAToolkit REQUIRED COMPONENTS cufft)
+find_package(Threads REQUIRED)
 
 if(DEFINED ENV{BUILD_PREFIX})
     if(WIN32)
@@ -80,6 +94,7 @@ target_include_directories(goldstein PRIVATE "include" ${CUDAToolkit_INCLUDE_DIR
 # Link libraries with platform-specific handling
 target_link_libraries(geo2rdr SQLite3::SQLite3)
 target_link_libraries(goldstein PRIVATE CUDA::cufft)
+target_link_libraries(crossmul_daemon PRIVATE Threads::Threads)
 
 # Install CUDA executables into the Python package: s1proc/bin/
 install(TARGETS geo2rdr crossmul crossmul_daemon phase_similarity phase_interp goldstein

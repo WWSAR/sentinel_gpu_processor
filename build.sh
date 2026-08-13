@@ -1,8 +1,8 @@
 #!/bin/bash
-
-echo "=== [Linux] Check compilers ==="
-echo "Using GCC: $(gcc --version | head -n 1)"
-echo "Using NVCC: $(nvcc --version | head -n 1)"
+set -e
+export LANG=C
+export LC_ALL=C
+export NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} -std=c++14"
 
 cmake -S csrc -B build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
